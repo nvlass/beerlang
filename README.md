@@ -59,6 +59,27 @@ make clean    # Clean build artifacts
 - C compiler (gcc or clang)
 - POSIX system (Linux, macOS, BSD)
 - Make
+- [rlwrap](https://github.com/hanslub42/rlwrap) (optional, for line editing in the REPL)
+
+## Installation
+
+After building, you can run the REPL from anywhere using the `bl.sh` wrapper script. Copy or symlink these to a directory on your `PATH`:
+
+```
+bl.sh          # REPL launcher (resolves lib path, wraps with rlwrap)
+bin/beerlang   # the binary (or place it next to bl.sh as just "beerlang")
+lib/           # standard library (core.beer)
+```
+
+Then start the REPL with:
+
+```bash
+bl.sh
+```
+
+The wrapper sets `BEER_LIB_PATH` automatically so that `lib/core.beer` is found regardless of your working directory. You can also set `BEER_LIB_PATH` manually if you prefer to invoke the binary directly.
+
+> **Note:** An install script will be added in a future release.
 
 ## Documentation
 

@@ -1965,9 +1965,23 @@ void core_register_utility(void) {
     namespace_define(core_ns, loaded_sym, empty_map);
     object_release(empty_map);
 
-    /* Initialize *load-path* as ["lib/"] */
+    /* Initialize *load-path* — BEER_LIB_PATH first, then "lib/" */
     Value lp_sym = symbol_intern("*load-path*");
     Value lp_vec = vector_create(4);
+    const char* beer_lib_env = getenv("BEER_LIB_PATH");
+    if (beer_lib_env) {
+        /* Add BEER_LIB_PATH with trailing slash */
+        char buf[1024];
+        size_t len = strlen(beer_lib_env);
+        if (len > 0 && beer_lib_env[len-1] == '/') {
+            snprintf(buf, sizeof(buf), "%s", beer_lib_env);
+        } else {
+            snprintf(buf, sizeof(buf), "%s/", beer_lib_env);
+        }
+        Value env_str = string_from_cstr(buf);
+        vector_push(lp_vec, env_str);
+        object_release(env_str);
+    }
     Value lib_str = string_from_cstr("lib/");
     vector_push(lp_vec, lib_str);
     object_release(lib_str);
@@ -2496,12 +2510,19 @@ static Value native_load(VM* caller_vm, int argc, Value* argv) {
  * ================================================================= */
 
 void core_register_macros(void) {
-    /* Try paths relative to common run locations */
-    const char* paths[] = {
-        "lib/core.beer",           /* running from project root */
-        "../lib/core.beer",        /* running from bin/ */
-        NULL
-    };
+    /* Build candidate paths for core.beer */
+    char env_path[1024] = {0};
+    const char* beer_lib = getenv("BEER_LIB_PATH");
+    if (beer_lib) {
+        snprintf(env_path, sizeof(env_path), "%s/core.beer", beer_lib);
+    }
+
+    const char* paths[4];
+    int n = 0;
+    if (beer_lib) paths[n++] = env_path;
+    paths[n++] = "lib/core.beer";       /* running from project root */
+    paths[n++] = "../lib/core.beer";    /* running from bin/ */
+    paths[n] = NULL;
 
     for (int i = 0; paths[i]; i++) {
         FILE* f = fopen(paths[i], "r");
