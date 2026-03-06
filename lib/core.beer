@@ -1,0 +1,425 @@
+; Beerlang Core Macros
+; Loaded at startup by the runtime.
+
+; defn: convenience for (def name (fn name ...))
+; Single arity:  (defn name [params] body...)
+; Multi-arity:   (defn name ([params1] body1...) ([params2] body2...) ...)
+(defmacro defn [name & fdecl]
+  (if (vector? (first fdecl))
+    ; Single arity: (defn name [params] body...)
+    (list (quote def) name (cons (quote fn) (cons name fdecl)))
+    ; Multi-arity: each fdecl element is ([params] body...)
+    (let* [arities fdecl
+           clauses (__multi-arity-clauses arities)
+           err-expr (list (quote __arity-error)
+                          (list (quote str)
+                                (str name)
+                                " called with wrong number of args: "
+                                (list (quote count) (quote __args))))
+           full-clauses (concat clauses (list :else err-expr))]
+      (list (quote def) name
+            (list (quote fn) name (quote [& __args])
+                  (cons (quote cond) full-clauses))))))
+
+; Helper: build cond clauses for multi-arity dispatch
+(defn __multi-arity-clauses [arities]
+  (if (empty? arities)
+    '()
+    (let* [arity (first arities)
+           params (first arity)
+           body (rest arity)
+           n (count params)]
+      (concat (list (list (quote =) (list (quote count) (quote __args)) n)
+                    (list (quote apply) (cons (quote fn) arity) (quote __args)))
+              (__multi-arity-clauses (rest arities))))))
+
+; when: (when test body...) => (if test (do body...) nil)
+(defmacro when [test & body]
+  (list (quote if) test (cons (quote do) body) nil))
+
+; and: short-circuit logical and
+(defmacro and [& args]
+  (if (empty? args) true
+    (if (= (count args) 1) (first args)
+      (list (quote if) (first args)
+        (cons (quote and) (rest args))
+        false))))
+
+; or: short-circuit logical or (uses gensym to avoid double evaluation)
+(defmacro or [& args]
+  (if (empty? args) nil
+    (if (= (count args) 1) (first args)
+      (let* [v (gensym "or__")]
+        (list (quote let*) [v (first args)]
+              (list (quote if) v v
+                    (cons (quote or) (rest args))))))))
+
+; cond: (cond test1 expr1 test2 expr2 ... :else default)
+(defmacro cond [& clauses]
+  (if (empty? clauses) nil
+    (if (= (count clauses) 1)
+      (first clauses)
+      (list (quote if) (first clauses)
+        (first (rest clauses))
+        (cons (quote cond) (rest (rest clauses)))))))
+
+; ->: thread-first macro
+; (-> x (f a) (g b)) => (g (f x a) b)
+(defmacro -> [x & forms]
+  (if (empty? forms) x
+    (let* [form (first forms)
+           threaded (if (list? form)
+                      (cons (first form) (cons x (rest form)))
+                      (list form x))]
+      (cons (quote ->) (cons threaded (rest forms))))))
+
+; ->>: thread-last macro
+; (->> x (f a) (g b)) => (g a (f a x))  -- actually (g b (->> x (f a)))
+(defmacro ->> [x & forms]
+  (if (empty? forms) x
+    (let* [form (first forms)
+           threaded (if (list? form)
+                      (concat form (list x))
+                      (list form x))]
+      (cons (quote ->>) (cons threaded (rest forms))))))
+
+; --- let with destructuring ---
+; Helper: build nthrest expression (chain of rest calls)
+(defn __nthrest-expr [sym n]
+  (loop [i 0 v sym]
+    (if (= i n) v
+      (recur (+ i 1) (list 'rest v)))))
+
+; Helper: expand a destructuring vector pattern into flat let* binding pairs
+(defn __expand-destructure [pattern expr]
+  (let* [tmp (gensym "destr__")]
+    (loop [i 0
+           bindings (list tmp expr)
+           elems pattern]
+      (if (empty? elems)
+        bindings
+        (let* [elem (first elems)]
+          (if (= elem '&)
+            (concat bindings (list (first (rest elems))
+                                   (__nthrest-expr tmp i)))
+            (if (= elem :as)
+              (concat bindings (list (first (rest elems)) tmp))
+              (recur (+ i 1)
+                     (concat bindings (list elem (list 'nth tmp i)))
+                     (rest elems)))))))))
+
+; Helper: expand all bindings, handling destructuring vectors
+(defn __expand-bindings [bindings]
+  (loop [i 0
+         result '()]
+    (if (>= i (count bindings))
+      result
+      (let* [binding (nth bindings i)
+             expr    (nth bindings (+ i 1))]
+        (if (vector? binding)
+          (recur (+ i 2) (concat result (__expand-destructure binding expr)))
+          (recur (+ i 2) (concat result (list binding expr))))))))
+
+; let: supports destructuring via macro expansion to let*
+(defmacro let [bindings & body]
+  (let* [expanded (__expand-bindings bindings)]
+    (cons 'let* (cons (apply vector expanded) body))))
+
+; Arity error helper (until we have throw)
+(defn __arity-error [msg] (println "ERROR:" msg) nil)
+
+; --- Numeric utilities ---
+(defn inc [x] (+ x 1))
+(defn dec [x] (- x 1))
+(defn zero? [x] (= x 0))
+(defn pos? [x] (> x 0))
+(defn neg? [x] (< x 0))
+(defn even? [x] (= 0 (mod x 2)))
+(defn odd? [x] (not (even? x)))
+
+; --- Comparison utilities ---
+(defn not= [a b] (not (= a b)))
+(defn max [& args] (reduce (fn [a b] (if (> a b) a b)) (first args) (rest args)))
+(defn min [& args] (reduce (fn [a b] (if (< a b) a b)) (first args) (rest args)))
+(defn abs [x] (if (neg? x) (- x) x))
+
+; --- Function utilities ---
+(defn identity [x] x)
+(defn constantly [x] (fn [& _] x))
+(defn complement [f] (fn [& args] (not (apply f args))))
+(defn comp [& fns]
+  (if (empty? fns) identity
+    (if (empty? (rest fns)) (first fns)
+      (let* [f (first fns)
+             g (apply comp (rest fns))]
+        (fn [& args] (f (apply g args)))))))
+(defn partial [f & bound]
+  (fn [& args] (apply f (concat bound args))))
+(defn juxt [& fns]
+  (fn [& args]
+    (let* [results (map (fn [f] (apply f args)) fns)]
+      (into [] results))))
+
+; --- Collection utilities ---
+(defn filter [pred seq]
+  (loop [s   seq
+         acc '()]
+    (if (empty? s)
+      acc
+      (recur (rest s)
+             (if (pred (first s))
+               (concat acc (list (first s)))
+               acc)))))
+
+(defn reduce [f init coll]
+  (loop [acc init
+         s   coll]
+    (if (empty? s)
+      acc
+      (recur (f acc (first s)) (rest s)))))
+
+(defn map [f seq]
+  (loop [s   seq
+         acc '()]
+    (if (empty? s)
+      acc
+      (recur (rest s)
+             (concat acc (list (f (first s))))))))
+
+; --- More collection utilities ---
+(defn second [coll] (first (rest coll)))
+(defn ffirst [coll] (first (first coll)))
+
+(defn last [coll]
+  (loop [s coll]
+    (if (empty? (rest s))
+      (first s)
+      (recur (rest s)))))
+
+(defn butlast [coll]
+  (loop [s coll acc '()]
+    (if (empty? (rest s))
+      acc
+      (recur (rest s) (concat acc (list (first s)))))))
+
+(defn take [n coll]
+  (loop [i 0 s coll acc '()]
+    (if (or (= i n) (empty? s))
+      acc
+      (recur (+ i 1) (rest s) (concat acc (list (first s)))))))
+
+(defn drop [n coll]
+  (loop [i 0 s coll]
+    (if (or (= i n) (empty? s))
+      s
+      (recur (+ i 1) (rest s)))))
+
+(defn take-while [pred coll]
+  (loop [s coll acc '()]
+    (if (or (empty? s) (not (pred (first s))))
+      acc
+      (recur (rest s) (concat acc (list (first s)))))))
+
+(defn drop-while [pred coll]
+  (loop [s coll]
+    (if (or (empty? s) (not (pred (first s))))
+      s
+      (recur (rest s)))))
+
+(defn partition [n coll]
+  (loop [s coll acc '()]
+    (if (empty? s)
+      acc
+      (let* [chunk (take n s)
+             remaining (drop n s)]
+        (if (< (count chunk) n)
+          acc
+          (recur remaining (concat acc (list chunk))))))))
+
+(defn range [& args]
+  (let* [start (if (>= (count args) 2) (first args) 0)
+         end   (if (>= (count args) 2) (second args) (first args))
+         step  (if (>= (count args) 3) (nth args 2) 1)]
+    (loop [i start acc '()]
+      (if (>= i end)
+        acc
+        (recur (+ i step) (concat acc (list i)))))))
+
+(defn repeat [n x]
+  (loop [i 0 acc '()]
+    (if (= i n)
+      acc
+      (recur (+ i 1) (concat acc (list x))))))
+
+(defn repeatedly [n f]
+  (loop [i 0 acc '()]
+    (if (= i n)
+      acc
+      (recur (+ i 1) (concat acc (list (f)))))))
+
+(defn reverse [coll]
+  (reduce (fn [acc x] (cons x acc)) '() coll))
+
+(defn into [to from]
+  (reduce conj to from))
+
+(defn some [pred coll]
+  (loop [s coll]
+    (if (empty? s)
+      nil
+      (let* [result (pred (first s))]
+        (if result result (recur (rest s)))))))
+
+(defn every? [pred coll]
+  (loop [s coll]
+    (if (empty? s)
+      true
+      (if (pred (first s))
+        (recur (rest s))
+        false))))
+
+(defn not-any? [pred coll] (not (some pred coll)))
+(defn not-every? [pred coll] (not (every? pred coll)))
+
+(defn frequencies [coll]
+  (reduce (fn [m x]
+            (let* [n (get m x 0)]
+              (assoc m x (+ n 1))))
+          {} coll))
+
+(defn group-by [f coll]
+  (reduce (fn [m x]
+            (let* [k (f x)
+                   existing (get m k '())]
+              (assoc m k (concat existing (list x)))))
+          {} coll))
+
+(defn mapcat [f coll]
+  (reduce (fn [acc x] (concat acc (f x))) '() coll))
+
+(defn interleave [c1 c2]
+  (loop [s1 c1 s2 c2 acc '()]
+    (if (or (empty? s1) (empty? s2))
+      acc
+      (recur (rest s1) (rest s2)
+             (concat acc (list (first s1) (first s2)))))))
+
+(defn zipmap [keys vals]
+  (loop [ks keys vs vals m {}]
+    (if (or (empty? ks) (empty? vs))
+      m
+      (recur (rest ks) (rest vs) (assoc m (first ks) (first vs))))))
+
+(defn flatten [coll]
+  (reduce (fn [acc x]
+            (if (or (list? x) (vector? x))
+              (concat acc (flatten x))
+              (concat acc (list x))))
+          '() coll))
+
+(defn distinct [coll]
+  (loop [s coll seen {} acc '()]
+    (if (empty? s)
+      acc
+      (let* [x (first s)]
+        (if (contains? seen x)
+          (recur (rest s) seen acc)
+          (recur (rest s) (assoc seen x true) (concat acc (list x))))))))
+
+(defn select-keys [m ks]
+  (reduce (fn [acc k]
+            (if (contains? m k)
+              (assoc acc k (get m k))
+              acc))
+          {} ks))
+
+; sort uses a simple merge sort
+(defn sort
+  ([coll] (sort (fn [a b] (< a b)) coll))
+  ([comp coll]
+    (let [merge-fn (fn merge-fn [a b]
+                     (cond
+                       (empty? a) b
+                       (empty? b) a
+                       (comp (first a) (first b))
+                         (cons (first a) (merge-fn (rest a) b))
+                       :else
+                         (cons (first b) (merge-fn a (rest b)))))
+          n (count coll)]
+      (if (<= n 1) coll
+        (let [mid (quot n 2)
+              left (take mid coll)
+              right (drop mid coll)]
+          (merge-fn (sort comp left) (sort comp right)))))))
+
+(defn sort-by [keyfn coll]
+  (sort (fn [a b] (< (keyfn a) (keyfn b))) coll))
+
+; --- Nested collection access ---
+(defn get-in [m ks]
+  (reduce get m ks))
+
+(defn assoc-in [m ks v]
+  (if (= (count ks) 1)
+    (assoc m (first ks) v)
+    (assoc m (first ks)
+           (assoc-in (get m (first ks) {}) (rest ks) v))))
+
+(defn update [m k f]
+  (assoc m k (f (get m k))))
+
+(defn update-in [m ks f]
+  (if (= (count ks) 1)
+    (update m (first ks) f)
+    (assoc m (first ks)
+           (update-in (get m (first ks) {}) (rest ks) f))))
+
+(defn merge [& maps]
+  (reduce (fn [acc m]
+            (if (nil? m) acc
+              (reduce (fn [a k] (assoc a k (get m k)))
+                      acc (keys m))))
+          {} maps))
+
+; --- I/O helpers ---
+(defmacro with-open [bindings & body]
+  (let* [name (first bindings)
+         init (second bindings)
+         result (gensym "result__")]
+    (list (quote let*) [name init]
+      (list (quote try)
+        (list (quote let*) [result (cons (quote do) body)]
+          (list (quote close) name)
+          result)
+        (list (quote catch) (quote e)
+          (list (quote do)
+            (list (quote close) name)
+            (list (quote throw) (quote e))))))))
+
+; Exception helpers
+(defn ex-info [msg data] {:type :error :message msg :data data})
+
+; --- Namespace support ---
+; ns macro: (ns foo.bar (:require [baz :as b] other))
+; Expands to: (do (in-ns 'foo.bar) (require 'baz :as 'b) (require 'other))
+(defn __ns-require-clause [clause]
+  (if (vector? clause)
+    ; [foo.bar :as fb] => (require 'foo.bar :as 'fb)
+    (if (>= (count clause) 3)
+      (list 'require (list 'quote (first clause))
+            (nth clause 1) (list 'quote (nth clause 2)))
+      (list 'require (list 'quote (first clause))))
+    ; bare symbol => (require 'sym)
+    (list 'require (list 'quote clause))))
+
+(defmacro ns [name & clauses]
+  (let* [in-ns-form (list 'in-ns (list 'quote name))
+         require-forms
+           (if (empty? clauses)
+             '()
+             (let* [clause (first clauses)]
+               (if (and (list? clause) (= (first clause) :require))
+                 (map __ns-require-clause (rest clause))
+                 '())))]
+    (cons 'do (cons in-ns-form require-forms))))
+

@@ -1,0 +1,2 @@
+(def greeting "hello")
+(defn greet [name] (str greeting ", " name "!"))

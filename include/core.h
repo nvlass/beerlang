@@ -1,0 +1,36 @@
+/* Core Native Functions
+ *
+ * Essential native functions provided by the beerlang runtime.
+ */
+
+#ifndef BEERLANG_CORE_H
+#define BEERLANG_CORE_H
+
+/* Register arithmetic operations (+, -, *, /) in the 'user' namespace */
+void core_register_arithmetic(void);
+
+/* Register I/O functions (print, println) in the 'user' namespace */
+void core_register_io(void);
+
+/* Register comparison functions (=, <, >) in the 'user' namespace */
+void core_register_comparison(void);
+
+/* Register collection functions (list, vector, hash-map, cons, first, rest, etc.) */
+void core_register_collections(void);
+
+/* Register type predicates (nil?, number?, string?, etc.) */
+void core_register_predicates(void);
+
+/* Register utility functions (not, str, type, apply) */
+void core_register_utility(void);
+
+/* Register stream/I/O functions (open, close, read-line, slurp, spit, etc.) */
+void core_register_streams(void);
+
+/* Register concurrency functions (chan, >!, <!, close!, channel?, task?) */
+void core_register_concurrency(void);
+
+/* Register core macros (defn, when, and, or) - compiled from beerlang source */
+void core_register_macros(void);
+
+#endif /* BEERLANG_CORE_H */

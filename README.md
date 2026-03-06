@@ -1,0 +1,75 @@
+# Beerlang
+
+**A hops-inspired Clojure flavour**
+
+Beerlang is a Clojure-syntax LISP compiled to bytecode and executed on a stack-based virtual machine written in C. It features cooperative multitasking, reference-counted garbage collection, and a rich standard library — all designed to fit in cache.
+
+## Features
+
+- **Clojure syntax** — lists, vectors, hash maps, keywords, destructuring
+- **Compile everything** — all code (including REPL input) compiles to bytecode
+- **Macros** — `defmacro`, quasiquote, `gensym`; core forms like `defn`, `let`, `cond`, `->`, `->>` are macros
+- **Closures & tail calls** — automatic tail call optimization, named self-recursion
+- **Exception handling** — `try`/`catch`/`finally`/`throw` with map-based exceptions
+- **Namespaces** — `ns`, `require` with `:as` aliases, qualified symbol resolution
+- **Cooperative multitasking** — green threads with `spawn`/`yield`/`await`, CSP channels
+- **Callable non-functions** — keywords, maps, and vectors work in head position
+- **Rich stdlib** — `map`, `filter`, `reduce`, `comp`, `partial`, `sort`, string utilities, file I/O, and more
+- **Numeric tower** — fixnums, floats, arbitrary-precision bigints with auto-promotion
+
+## Quick taste
+
+```clojure
+;; Factorial
+(defn factorial [n]
+  (loop [i n acc 1]
+    (if (<= i 1) acc
+      (recur (- i 1) (* acc i)))))
+
+(factorial 20) ; => 2432902008176640000
+
+;; Pipeline
+(->> (range 1 11)
+     (filter odd?)
+     (map #(* % %))
+     (reduce +))   ; => 165
+
+;; Concurrent tasks with channels
+(let [c (chan)]
+  (spawn (>! c 42))
+  (<! c))           ; => 42
+
+;; Keywords and maps as functions
+(:name {:name "Beerlang" :type "language"}) ; => "Beerlang"
+({:a 1 :b 2} :b)                           ; => 2
+```
+
+## Building
+
+```bash
+make          # Build beerlang
+make test     # Run unit tests + smoke tests
+make repl     # Start the REPL
+make debug    # Debug build (-g -O0)
+make clean    # Clean build artifacts
+```
+
+## Requirements
+
+- C compiler (gcc or clang)
+- POSIX system (Linux, macOS, BSD)
+- Make
+
+## Documentation
+
+- [API Reference](docs/API.md) — native functions and standard library
+- [Quick Start](docs/QUICKSTART.md) — getting started guide
+- [Design Documents](docs/design/) — language architecture and internals
+
+## Credits
+
+Designed by [@nvlass](https://github.com/nvlass). Implemented with [Claude Code](https://claude.ai) (Anthropic's AI coding assistant) — nvlass designed the language and architecture; Claude Code wrote the implementation from that specification.
+
+## License
+
+[MIT](LICENSE)

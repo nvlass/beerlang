@@ -1,0 +1,40 @@
+# Build artifacts
+build/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+
+# Executables
+beerlang
+
+# Debug files
+*.dSYM/
+*.su
+*.core
+
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+
+# Private project files
+prompt_history.md
+.update_checklist.md
+CLAUDE_ARCHIVE01.md
+IDEAS.md
+TODO_BUGS.md
+TODO_OPTIMIZATIONS.md
