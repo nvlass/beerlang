@@ -930,14 +930,40 @@ static void compile_list(Compiler* c, Value form, bool in_tail_pos) {
         if (global_namespace_registry) {
             Namespace* ns = namespace_registry_current(global_namespace_registry);
             if (ns) {
-                Var* var = namespace_lookup(ns, first);
-                /* Fall back to beer.core for macro lookup */
-                if (!var) {
-                    Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
-                    if (core_ns && core_ns != ns) {
-                        var = namespace_lookup(core_ns, first);
+                Var* var = NULL;
+
+                if (symbol_has_namespace(first)) {
+                    /* Qualified symbol: t/deftest — resolve via alias */
+                    const char* sym_str = symbol_str(first);
+                    const char* slash = strchr(sym_str, '/');
+                    if (slash) {
+                        size_t ns_len = (size_t)(slash - sym_str);
+                        char ns_name[256];
+                        if (ns_len < sizeof(ns_name)) {
+                            memcpy(ns_name, sym_str, ns_len);
+                            ns_name[ns_len] = '\0';
+                            Value alias_sym = symbol_intern(ns_name);
+                            const char* resolved = namespace_resolve_alias(ns, alias_sym);
+                            const char* target_name = resolved ? resolved : ns_name;
+                            Namespace* target_ns = namespace_registry_get(global_namespace_registry, target_name);
+                            if (target_ns) {
+                                const char* name_part = slash + 1;
+                                Value name_sym = symbol_intern(name_part);
+                                var = namespace_lookup(target_ns, name_sym);
+                            }
+                        }
+                    }
+                } else {
+                    /* Unqualified: check current ns, then beer.core */
+                    var = namespace_lookup(ns, first);
+                    if (!var) {
+                        Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
+                        if (core_ns && core_ns != ns) {
+                            var = namespace_lookup(core_ns, first);
+                        }
                     }
                 }
+
                 if (var && var->is_macro) {
                     Value macro_fn = var_get_value(var);
                     Value expanded = expand_macro(c, macro_fn, form);

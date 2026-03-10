@@ -396,6 +396,18 @@
             (list (quote close) name)
             (list (quote throw) (quote e))))))))
 
+; doseq: iterate a collection for side effects
+; (doseq [x coll] body...)
+(defmacro doseq [bindings & body]
+  (let* [sym (first bindings)
+         coll-expr (second bindings)
+         s (gensym "s__")]
+    (list 'loop [s coll-expr]
+      (list 'when (list 'not (list 'empty? s))
+        (list 'let* [sym (list 'first s)]
+          (cons 'do body)
+          (list 'recur (list 'rest s)))))))
+
 ; Exception helpers
 (defn ex-info [msg data] {:type :error :message msg :data data})
 

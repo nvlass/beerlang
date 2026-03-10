@@ -30,7 +30,15 @@ void core_register_streams(void);
 /* Register concurrency functions (chan, >!, <!, close!, channel?, task?) */
 void core_register_concurrency(void);
 
+/* Register beer.tar namespace (tar/list, tar/read-entry, tar/create) */
+void core_register_tar(void);
+
 /* Register core macros (defn, when, and, or) - compiled from beerlang source */
 void core_register_macros(void);
+
+/* Load and execute a beerlang source file */
+#include "value.h"
+#include "vm.h"
+Value native_load(VM* vm, int argc, Value* argv);
 
 #endif /* BEERLANG_CORE_H */

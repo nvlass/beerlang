@@ -547,6 +547,134 @@ check '(select-keys {:a 1 :b 2 :c 3} [:a :c])' '{:a 1, :c 3}'
 check '(sort [3 1 2])'                     '(1 2 3)'
 check_multi '(sort-by count ["aaa" "b" "cc"])' '("b" "cc" "aaa")'
 
+# --- ns-publics ---
+check '(list? (ns-publics (quote beer.core)))' 'true'
+check '(contains? (reduce (fn [m s] (assoc m s true)) {} (ns-publics (quote beer.core))) (quote map))' 'true'
+
+# --- doseq ---
+check '(do (doseq [x [1 2 3]] x) nil)' 'nil'
+
+# --- qualified macros ---
+# (tested via check_script below since require needs BEER_LIB_PATH)
+
+# --- beer.test framework ---
+# Test with a failing assertion
+check_script() {
+    local script="$1" expected="$2" label="$3"
+    local tmpfile=$(mktemp /tmp/beer_smoke_XXXXXX.beer)
+    printf '%s\n' "$script" > "$tmpfile"
+    actual=$(BEERPATH=lib "$BEER" "$tmpfile" 2>/dev/null | tail -1)
+    rm -f "$tmpfile"
+    if [ "$actual" = "$expected" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $label => '$actual' (expected '$expected')"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+check_script '(require (quote beer.test) :as (quote t))
+(t/deftest math (t/is (= 2 (+ 1 1))) (t/is (= 6 (* 2 3))))
+(t/deftest strs (t/is (= "ab" (str "a" "b"))))
+(t/run-tests)' '3 passed, 0 failed.' 'beer.test: passing tests'
+
+check_script '(require (quote beer.test) :as (quote t))
+(t/deftest fail-test (t/is (= 1 2)))
+(t/run-tests)' '0 passed, 1 failed.' 'beer.test: failing test'
+
+check_script '(require (quote beer.test) :as (quote t))
+(t/deftest qualified-macro (t/is true) (t/is (= 42 42)))
+(t/run-tests)' '2 passed, 0 failed.' 'qualified macros via beer.test'
+
+# --- circular require detection ---
+check_script_err() {
+    local script="$1" expected="$2" label="$3"
+    local tmpfile=$(mktemp /tmp/beer_smoke_XXXXXX.beer)
+    printf '%s\n' "$script" > "$tmpfile"
+    # Create circular test libs
+    local tmpdir=$(mktemp -d /tmp/beer_circ_XXXXXX)
+    mkdir -p "$tmpdir/circ"
+    printf '(ns circ.a)\n(require (quote circ.b) :as (quote b))\n(def x 1)\n' > "$tmpdir/circ/a.beer"
+    printf '(ns circ.b)\n(require (quote circ.a) :as (quote a))\n(def y 2)\n' > "$tmpdir/circ/b.beer"
+    actual=$(BEERPATH="$tmpdir" "$BEER" "$tmpfile" 2>&1 >/dev/null | head -1)
+    rm -rf "$tmpfile" "$tmpdir"
+    if echo "$actual" | grep -q "$expected"; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $label => '$actual' (expected match '$expected')"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+check_script_err '(require (quote circ.a) :as (quote a))' 'circular dependency' 'circular require detection'
+
+# --- BEERPATH multi-directory support ---
+check_beerpath() {
+    local tmpdir1=$(mktemp -d /tmp/beer_bp1_XXXXXX)
+    local tmpdir2=$(mktemp -d /tmp/beer_bp2_XXXXXX)
+    mkdir -p "$tmpdir1/mylib" "$tmpdir2/otherlib"
+    printf '(ns mylib.greet)\n(def hello "from-dir1")\n' > "$tmpdir1/mylib/greet.beer"
+    printf '(ns otherlib.util)\n(def val "from-dir2")\n' > "$tmpdir2/otherlib/util.beer"
+    local tmpfile=$(mktemp /tmp/beer_smoke_XXXXXX.beer)
+    printf '(require (quote mylib.greet) :as (quote g))\n(require (quote otherlib.util) :as (quote u))\n(println (str g/hello "+" u/val))\n' > "$tmpfile"
+    actual=$(BEERPATH="$tmpdir1:$tmpdir2:lib" "$BEER" "$tmpfile" 2>/dev/null | tail -1)
+    rm -rf "$tmpfile" "$tmpdir1" "$tmpdir2"
+    if [ "$actual" = "from-dir1+from-dir2" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: BEERPATH multi-dir => '$actual' (expected 'from-dir1+from-dir2')"
+        FAIL=$((FAIL + 1))
+    fi
+}
+check_beerpath
+
+# --- Tar-based library distribution ---
+check_tar_require() {
+    local tmpdir=$(mktemp -d /tmp/beer_tar_XXXXXX)
+    mkdir -p "$tmpdir/tarlib"
+    # Create two .beer files
+    printf '(ns tarlib.greet)\n(def greeting "hello-from-tar")\n' > "$tmpdir/tarlib/greet.beer"
+    printf '(ns tarlib.math)\n(def magic 42)\n' > "$tmpdir/tarlib/math.beer"
+    # Bundle into a tar
+    (cd "$tmpdir" && COPYFILE_DISABLE=1 tar cf "$tmpdir/tarlib.tar" tarlib/greet.beer tarlib/math.beer)
+    # Remove loose files, keep only tar
+    rm -rf "$tmpdir/tarlib"
+    # Write test script
+    local tmpfile=$(mktemp /tmp/beer_smoke_XXXXXX.beer)
+    printf '(require (quote tarlib.greet) :as (quote g))\n(require (quote tarlib.math) :as (quote m))\n(println (str g/greeting "+" m/magic))\n' > "$tmpfile"
+    actual=$(BEERPATH="$tmpdir:lib" "$BEER" "$tmpfile" 2>/dev/null | tail -1)
+    rm -rf "$tmpfile" "$tmpdir"
+    if [ "$actual" = "hello-from-tar+42" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: tar require => '$actual' (expected 'hello-from-tar+42')"
+        FAIL=$((FAIL + 1))
+    fi
+}
+check_tar_require
+
+# --- beer.tar namespace natives ---
+check_tar_natives() {
+    local tmpdir=$(mktemp -d /tmp/beer_tarnative_XXXXXX)
+    mkdir -p "$tmpdir"
+    printf 'file-a contents\n' > "$tmpdir/a.txt"
+    printf 'file-b contents\n' > "$tmpdir/b.txt"
+    (cd "$tmpdir" && COPYFILE_DISABLE=1 tar cf "$tmpdir/test.tar" a.txt b.txt)
+    local tmpfile=$(mktemp /tmp/beer_smoke_XXXXXX.beer)
+    printf '(require (quote beer.tar) :as (quote tar))\n(println (count (tar/list "%s/test.tar")))\n(println (tar/read-entry "%s/test.tar" "a.txt"))\n' "$tmpdir" "$tmpdir" > "$tmpfile"
+    local output=$(BEERPATH="lib" "$BEER" "$tmpfile" 2>/dev/null)
+    rm -rf "$tmpfile" "$tmpdir"
+    local line1=$(echo "$output" | sed -n '1p')
+    local line2=$(echo "$output" | sed -n '2p')
+    if [ "$line1" = "2" ] && [ "$line2" = "file-a contents" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: tar natives => line1='$line1' line2='$line2' (expected '2' and 'file-a contents')"
+        FAIL=$((FAIL + 1))
+    fi
+}
+check_tar_natives
+
 echo ""
 echo "===================="
 echo "Passed: $PASS"

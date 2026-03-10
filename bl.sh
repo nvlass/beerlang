@@ -4,7 +4,7 @@
 # and wraps with rlwrap for line editing if available.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-export BEER_LIB_PATH="${SCRIPT_DIR}/lib"
+export BEERPATH="${SCRIPT_DIR}/lib"
 
 BEER="${SCRIPT_DIR}/bin/beerlang"
 if [ ! -x "$BEER" ]; then
@@ -16,8 +16,19 @@ if [ ! -x "$BEER" ]; then
     exit 1
 fi
 
+COMPLETIONS="${SCRIPT_DIR}/.rlwrap_completions"
+
+# Generate completions file if it doesn't exist
+if [ ! -f "$COMPLETIONS" ]; then
+    "$BEER" "${SCRIPT_DIR}/lib/gen-completions.beer" > "$COMPLETIONS" 2>/dev/null || rm -f "$COMPLETIONS"
+fi
+
 if command -v rlwrap >/dev/null 2>&1; then
-    exec rlwrap "$BEER" "$@"
+    if [ -f "$COMPLETIONS" ]; then
+        exec rlwrap -f "$COMPLETIONS" "$BEER" "$@"
+    else
+        exec rlwrap "$BEER" "$@"
+    fi
 else
     exec "$BEER" "$@"
 fi

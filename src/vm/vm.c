@@ -1334,21 +1334,59 @@ void vm_step(VM* vm) {
             if (is_pointer(value)) object_retain(value);
             vm_pop(vm);
 
-            /* Define or update var in current namespace */
+            /* Define or update var in namespace */
             if (!global_namespace_registry) {
                 if (is_pointer(value)) object_release(value);
                 vm_error(vm, "STORE_VAR: namespace system not initialized");
                 return;
             }
 
-            Namespace* ns = namespace_registry_current(global_namespace_registry);
-            if (!ns) {
-                if (is_pointer(value)) object_release(value);
-                vm_error(vm, "STORE_VAR: no current namespace");
-                return;
+            Namespace* target_ns;
+            Value def_symbol = symbol;
+            if (symbol_has_namespace(symbol)) {
+                /* Qualified symbol: def in the target namespace */
+                const char* sym_str = symbol_str(symbol);
+                const char* slash = strchr(sym_str, '/');
+                if (!slash) {
+                    if (is_pointer(value)) object_release(value);
+                    vm_error(vm, "STORE_VAR: malformed qualified symbol");
+                    return;
+                }
+                size_t ns_len = (size_t)(slash - sym_str);
+                char ns_name_buf[256];
+                if (ns_len >= sizeof(ns_name_buf)) {
+                    if (is_pointer(value)) object_release(value);
+                    vm_error(vm, "STORE_VAR: namespace name too long");
+                    return;
+                }
+                memcpy(ns_name_buf, sym_str, ns_len);
+                ns_name_buf[ns_len] = '\0';
+
+                Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
+                Value alias_sym = symbol_intern(ns_name_buf);
+                const char* resolved = cur_ns ? namespace_resolve_alias(cur_ns, alias_sym) : NULL;
+                const char* target_name = resolved ? resolved : ns_name_buf;
+
+                target_ns = namespace_registry_get(global_namespace_registry, target_name);
+                if (!target_ns) {
+                    if (is_pointer(value)) object_release(value);
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "STORE_VAR: namespace '%s' not found", target_name);
+                    vm_error(vm, buf);
+                    return;
+                }
+                /* Use unqualified name for the var */
+                def_symbol = symbol_intern(slash + 1);
+            } else {
+                target_ns = namespace_registry_current(global_namespace_registry);
+                if (!target_ns) {
+                    if (is_pointer(value)) object_release(value);
+                    vm_error(vm, "STORE_VAR: no current namespace");
+                    return;
+                }
             }
 
-            namespace_define(ns, symbol, value);
+            namespace_define(target_ns, def_symbol, value);
 
             /* Push the value back (def returns the value) */
             vm_push(vm, value);

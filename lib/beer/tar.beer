@@ -1,0 +1,13 @@
+(ns beer.tar)
+;; Tar archive operations — wrappers around C natives
+;; Names avoid clashing with beer.core (e.g. "list")
+
+;; (tar/list path) => vector of entry maps [{:name "foo" :size 123 :offset 512} ...]
+(def list tar-list)
+
+;; (tar/read-entry path name) => string contents
+(def read-entry tar-read-entry)
+
+;; (tar/create path file-map) => nil, creates tar file
+;; file-map: {"rel/path" "contents" ...}
+(def create tar-create)

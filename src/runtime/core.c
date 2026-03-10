@@ -28,9 +28,11 @@
 #include "task.h"
 #include "channel.h"
 #include "scheduler.h"
+#include "tarindex.h"
 
 /* Forward declarations */
-static Value native_load(VM* vm, int argc, Value* argv);
+Value native_load(VM* vm, int argc, Value* argv);
+static Value load_from_buffer(VM* caller_vm, const char* source, const char* name);
 static Value native_macroexpand_1(VM* vm, int argc, Value* argv);
 static Value native_macroexpand(VM* vm, int argc, Value* argv);
 static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len);
@@ -1306,6 +1308,18 @@ static Value native_in_ns(VM* vm, int argc, Value* argv) {
 
 /* require: (require 'foo.bar) or (require 'foo.bar :as 'fb)
  * Loads a namespace from file if not already loaded, optionally aliases it. */
+/* Circular require detection */
+#define MAX_REQUIRE_DEPTH 64
+static const char* requiring_stack[MAX_REQUIRE_DEPTH];
+static int requiring_depth = 0;
+
+static bool is_currently_requiring(const char* ns_name) {
+    for (int i = 0; i < requiring_depth; i++) {
+        if (strcmp(requiring_stack[i], ns_name) == 0) return true;
+    }
+    return false;
+}
+
 static Value native_require(VM* vm, int argc, Value* argv) {
     if (argc != 1 && argc != 3) {
         vm_error(vm, "require: usage (require 'ns) or (require 'ns :as 'alias)");
@@ -1387,6 +1401,13 @@ static Value native_require(VM* vm, int argc, Value* argv) {
             }
         }
 
+        /* Fallback: check tar index */
+        TarEntry* tar_entry = NULL;
+        if (!found) {
+            tar_entry = tar_index_lookup(&global_tar_index, rel_path);
+            if (tar_entry) found = true;
+        }
+
         if (!found) {
             char buf[256];
             snprintf(buf, sizeof(buf), "require: cannot find file for '%s'", ns_name);
@@ -1394,17 +1415,43 @@ static Value native_require(VM* vm, int argc, Value* argv) {
             return VALUE_NIL;
         }
 
+        /* Circular require detection */
+        if (is_currently_requiring(ns_name)) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "require: circular dependency detected for '%s'", ns_name);
+            vm_error(vm, buf);
+            return VALUE_NIL;
+        }
+        if (requiring_depth >= MAX_REQUIRE_DEPTH) {
+            vm_error(vm, "require: maximum nesting depth exceeded");
+            return VALUE_NIL;
+        }
+        requiring_stack[requiring_depth++] = ns_name;
+
         /* Save current namespace, switch to target, load, restore */
         Namespace* saved_ns = namespace_registry_current(global_namespace_registry);
         Namespace* target_ns = namespace_registry_get_or_create(global_namespace_registry, ns_name);
         namespace_registry_set_current(global_namespace_registry, target_ns);
 
-        Value path_str = string_from_cstr(full_path);
-        Value load_argv[1] = { path_str };
-        native_load(vm, 1, load_argv);
-        object_release(path_str);
+        if (tar_entry) {
+            char* src = tar_index_read_entry(tar_entry);
+            if (!src) {
+                namespace_registry_set_current(global_namespace_registry, saved_ns);
+                requiring_depth--;
+                vm_error(vm, "require: failed to read tar entry");
+                return VALUE_NIL;
+            }
+            load_from_buffer(vm, src, tar_entry->ns_path);
+            free(src);
+        } else {
+            Value path_str = string_from_cstr(full_path);
+            Value load_argv[1] = { path_str };
+            native_load(vm, 1, load_argv);
+            object_release(path_str);
+        }
 
         namespace_registry_set_current(global_namespace_registry, saved_ns);
+        requiring_depth--;
 
         if (vm->error) return VALUE_NIL;
 
@@ -1925,6 +1972,9 @@ void core_register_predicates(void) {
     register_native(core_ns, "int?", native_int_q);
 }
 
+/* Forward declaration — defined after streams section */
+Value native_ns_publics(VM* vm, int argc, Value* argv);
+
 void core_register_utility(void) {
     Namespace* core_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.core");
     if (!core_ns) {
@@ -1958,6 +2008,7 @@ void core_register_utility(void) {
     register_native(core_ns, "str/ends-with?", native_str_ends_with);
     register_native(core_ns, "str/replace", native_str_replace);
     register_native(core_ns, "require", native_require);
+    register_native(core_ns, "ns-publics", native_ns_publics);
 
     /* Initialize *loaded-libs* as empty map */
     Value loaded_sym = symbol_intern("*loaded-libs*");
@@ -1965,12 +2016,35 @@ void core_register_utility(void) {
     namespace_define(core_ns, loaded_sym, empty_map);
     object_release(empty_map);
 
-    /* Initialize *load-path* — BEER_LIB_PATH first, then "lib/" */
+    /* Initialize *load-path* — BEERPATH (colon-separated) first,
+       then BEER_LIB_PATH (single dir, legacy), then "lib/" */
     Value lp_sym = symbol_intern("*load-path*");
     Value lp_vec = vector_create(4);
+    const char* beerpath_env = getenv("BEERPATH");
     const char* beer_lib_env = getenv("BEER_LIB_PATH");
-    if (beer_lib_env) {
-        /* Add BEER_LIB_PATH with trailing slash */
+    if (beerpath_env) {
+        /* Split BEERPATH on ':' and add each directory */
+        char beerpath_copy[4096];
+        snprintf(beerpath_copy, sizeof(beerpath_copy), "%s", beerpath_env);
+        char* saveptr = NULL;
+        char* token = strtok_r(beerpath_copy, ":", &saveptr);
+        while (token) {
+            if (token[0] != '\0') {
+                char buf[1024];
+                size_t len = strlen(token);
+                if (len > 0 && token[len-1] == '/') {
+                    snprintf(buf, sizeof(buf), "%s", token);
+                } else {
+                    snprintf(buf, sizeof(buf), "%s/", token);
+                }
+                Value env_str = string_from_cstr(buf);
+                vector_push(lp_vec, env_str);
+                object_release(env_str);
+            }
+            token = strtok_r(NULL, ":", &saveptr);
+        }
+    } else if (beer_lib_env) {
+        /* Legacy: single directory from BEER_LIB_PATH */
         char buf[1024];
         size_t len = strlen(beer_lib_env);
         if (len > 0 && beer_lib_env[len-1] == '/') {
@@ -1987,6 +2061,18 @@ void core_register_utility(void) {
     object_release(lib_str);
     namespace_define(core_ns, lp_sym, lp_vec);
     object_release(lp_vec);
+
+    /* Scan BEERPATH directories for .tar files */
+    tar_index_init(&global_tar_index);
+    {
+        size_t n = vector_length(lp_vec);
+        for (size_t i = 0; i < n; i++) {
+            Value dir = vector_get(lp_vec, i);
+            if (is_string(dir)) {
+                tar_index_scan_dir(&global_tar_index, string_cstr(dir));
+            }
+        }
+    }
 
     /* Initialize *ns* to 'user (the default current namespace) */
     Value ns_var_sym = symbol_intern("*ns*");
@@ -2239,6 +2325,107 @@ static Value native_task_q(VM* vm, int argc, Value* argv) {
     return is_task(argv[0]) ? VALUE_TRUE : VALUE_FALSE;
 }
 
+/* =================================================================
+ * beer.tar namespace — tar archive operations
+ * ================================================================= */
+
+/* (tar/list path) => vector of maps [{:name "foo" :size 123 :offset 512} ...] */
+static Value native_tar_list(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_string(argv[0])) {
+        vm_error(vm, "tar/list: requires 1 string argument (path)");
+        return VALUE_NIL;
+    }
+    TarEntry* entries = NULL;
+    int count = tar_list_entries(string_cstr(argv[0]), &entries);
+    Value result = vector_create((size_t)(count > 0 ? count : 0));
+    for (int i = 0; i < count; i++) {
+        Value m = hashmap_create_default();
+        Value k_name = keyword_intern("name");
+        Value k_size = keyword_intern("size");
+        Value k_offset = keyword_intern("offset");
+        Value v_name = string_from_cstr(entries[i].ns_path);
+        Value v_size = make_fixnum((int64_t)entries[i].file_size);
+        Value v_offset = make_fixnum((int64_t)entries[i].data_offset);
+        hashmap_set(m, k_name, v_name);
+        hashmap_set(m, k_size, v_size);
+        hashmap_set(m, k_offset, v_offset);
+        object_release(v_name);
+        vector_push(result, m);
+        object_release(m);
+    }
+    free(entries);
+    return result;
+}
+
+/* (tar/read-entry path entry-name) => string contents */
+static Value native_tar_read_entry(VM* vm, int argc, Value* argv) {
+    if (argc != 2 || !is_string(argv[0]) || !is_string(argv[1])) {
+        vm_error(vm, "tar/read-entry: requires 2 string arguments (path name)");
+        return VALUE_NIL;
+    }
+    char* contents = tar_read_file(string_cstr(argv[0]), string_cstr(argv[1]));
+    if (!contents) {
+        vm_error(vm, "tar/read-entry: entry not found in tar");
+        return VALUE_NIL;
+    }
+    Value result = string_from_cstr(contents);
+    free(contents);
+    return result;
+}
+
+/* (tar/create path file-map) => nil, creates tar file
+   file-map: {"rel/path" "contents" ...} */
+static Value native_tar_create(VM* vm, int argc, Value* argv) {
+    if (argc != 2 || !is_string(argv[0])) {
+        vm_error(vm, "tar/create: requires path (string) and file-map (map)");
+        return VALUE_NIL;
+    }
+    if (!is_pointer(argv[1]) || object_type(argv[1]) != TYPE_HASHMAP) {
+        vm_error(vm, "tar/create: second argument must be a map");
+        return VALUE_NIL;
+    }
+    Value keys = hashmap_keys(argv[1]);
+    size_t n = vector_length(keys);
+    const char** names = malloc(n * sizeof(char*));
+    const char** contents = malloc(n * sizeof(char*));
+    /* We need to hold string Values alive */
+    Value* val_refs = malloc(n * sizeof(Value));
+
+    for (size_t i = 0; i < n; i++) {
+        Value k = vector_get(keys, i);
+        Value v = hashmap_get(argv[1], k);
+        if (!is_string(k) || !is_string(v)) {
+            free(names); free(contents); free(val_refs);
+            object_release(keys);
+            vm_error(vm, "tar/create: all keys and values must be strings");
+            return VALUE_NIL;
+        }
+        names[i] = string_cstr(k);
+        contents[i] = string_cstr(v);
+        val_refs[i] = v;
+    }
+
+    int rc = tar_create(string_cstr(argv[0]), names, contents, (int)n);
+    free(names);
+    free(contents);
+    free(val_refs);
+    object_release(keys);
+
+    if (rc != 0) {
+        vm_error(vm, "tar/create: failed to create tar file");
+        return VALUE_NIL;
+    }
+    return VALUE_NIL;
+}
+
+void core_register_tar(void) {
+    Namespace* tar_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.tar");
+    if (!tar_ns) return;
+    register_native(tar_ns, "tar-list", native_tar_list);
+    register_native(tar_ns, "tar-read-entry", native_tar_read_entry);
+    register_native(tar_ns, "tar-create", native_tar_create);
+}
+
 void core_register_concurrency(void) {
     Namespace* core_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.core");
     if (!core_ns) return;
@@ -2380,7 +2567,94 @@ static CompiledCode* load_units[MAX_LOAD_UNITS];
 static Value* load_constants[MAX_LOAD_UNITS];
 static int n_load_units = 0;
 
-static Value native_load(VM* caller_vm, int argc, Value* argv) {
+/* Load and execute beerlang source from a buffer (used by tar require) */
+static Value load_from_buffer(VM* caller_vm, const char* source, const char* name) {
+    (void)caller_vm;
+    Reader* reader = reader_new(source, name);
+    Value forms = reader_read_all(reader);
+
+    if (reader_has_error(reader)) {
+        fprintf(stderr, "load: read error in %s: %s\n", name, reader_error_msg(reader));
+        reader_free(reader);
+        return VALUE_NIL;
+    }
+    reader_free(reader);
+
+    size_t n_forms = vector_length(forms);
+    Value last_result = VALUE_NIL;
+
+    for (size_t i = 0; i < n_forms; i++) {
+        Value form = vector_get(forms, i);
+
+        Compiler* compiler = compiler_new(name);
+        CompiledCode* code = compile(compiler, form);
+
+        if (compiler_has_error(compiler)) {
+            fprintf(stderr, "load: compile error in %s (form %zu): %s\n", name, i, compiler_error_msg(compiler));
+            compiled_code_free(code);
+            compiler_free(compiler);
+            object_release(forms);
+            return VALUE_NIL;
+        }
+        compiler_free(compiler);
+
+        int n_constants = (int)vector_length(code->constants);
+        Value* constants = malloc((size_t)n_constants * sizeof(Value));
+        for (int j = 0; j < n_constants; j++) {
+            constants[j] = vector_get(code->constants, (size_t)j);
+        }
+
+        Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
+        const char* cur_ns_name = cur_ns ? cur_ns->name : NULL;
+        for (int j = 0; j < n_constants; j++) {
+            if (is_function(constants[j])) {
+                function_set_code(constants[j],
+                                  code->bytecode, (int)code->code_size,
+                                  constants, n_constants);
+                function_set_ns_name(constants[j], cur_ns_name);
+            }
+        }
+
+        VM* vm = vm_new(256);
+        vm->scheduler = global_scheduler;
+        vm_load_code(vm, code->bytecode, (int)code->code_size);
+        vm_load_constants(vm, constants, n_constants);
+        vm_run(vm);
+
+        if (vm->error) {
+            fprintf(stderr, "load: runtime error in %s: %s\n", name, vm->error_msg);
+            vm_free(vm);
+            compiled_code_free(code);
+            free(constants);
+            object_release(forms);
+            return VALUE_NIL;
+        }
+
+        if (is_pointer(last_result)) object_release(last_result);
+        last_result = VALUE_NIL;
+        if (!vm_stack_empty(vm)) {
+            last_result = vm->stack[vm->stack_pointer - 1];
+            if (is_pointer(last_result)) object_retain(last_result);
+        }
+
+        vm_free(vm);
+
+        if (n_load_units < MAX_LOAD_UNITS) {
+            load_units[n_load_units] = code;
+            load_constants[n_load_units] = constants;
+            n_load_units++;
+        } else {
+            fprintf(stderr, "load: warning: too many compiled units\n");
+            compiled_code_free(code);
+            free(constants);
+        }
+    }
+
+    object_release(forms);
+    return last_result;
+}
+
+Value native_load(VM* caller_vm, int argc, Value* argv) {
     if (argc != 1) {
         vm_error(caller_vm, "load: requires exactly 1 argument (filename)");
         return VALUE_NIL;
@@ -2505,6 +2779,30 @@ static Value native_load(VM* caller_vm, int argc, Value* argv) {
     return last_result;
 }
 
+/* ns-publics: (ns-publics 'some-ns) => list of symbols defined in namespace */
+Value native_ns_publics(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "ns-publics: requires exactly 1 argument (a symbol)");
+        return VALUE_NIL;
+    }
+    if (!(is_pointer(argv[0]) && object_type(argv[0]) == TYPE_SYMBOL)) {
+        vm_error(vm, "ns-publics: argument must be a symbol");
+        return VALUE_NIL;
+    }
+    const char* ns_name = symbol_name(argv[0]);
+    Namespace* ns = namespace_registry_get(global_namespace_registry, ns_name);
+    if (!ns) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "ns-publics: namespace '%s' not found", ns_name);
+        vm_error(vm, buf);
+        return VALUE_NIL;
+    }
+    Value keys_vec = hashmap_keys(ns->vars);
+    Value result = vector_to_list(keys_vec);
+    object_release(keys_vec);
+    return result;
+}
+
 /* =================================================================
  * Core Macros Registration (load lib/core.beer)
  * ================================================================= */
@@ -2512,14 +2810,23 @@ static Value native_load(VM* caller_vm, int argc, Value* argv) {
 void core_register_macros(void) {
     /* Build candidate paths for core.beer */
     char env_path[1024] = {0};
+    const char* beerpath = getenv("BEERPATH");
     const char* beer_lib = getenv("BEER_LIB_PATH");
-    if (beer_lib) {
+    if (beerpath) {
+        /* Use first entry from BEERPATH */
+        char tmp[4096];
+        snprintf(tmp, sizeof(tmp), "%s", beerpath);
+        char* colon = strchr(tmp, ':');
+        if (colon) *colon = '\0';
+        if (tmp[0] != '\0')
+            snprintf(env_path, sizeof(env_path), "%s/core.beer", tmp);
+    } else if (beer_lib) {
         snprintf(env_path, sizeof(env_path), "%s/core.beer", beer_lib);
     }
 
     const char* paths[4];
     int n = 0;
-    if (beer_lib) paths[n++] = env_path;
+    if (env_path[0]) paths[n++] = env_path;
     paths[n++] = "lib/core.beer";       /* running from project root */
     paths[n++] = "../lib/core.beer";    /* running from bin/ */
     paths[n] = NULL;

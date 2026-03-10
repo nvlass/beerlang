@@ -27,6 +27,9 @@ beerlang
 .DS_Store
 Thumbs.db
 
+# Generated files
+.rlwrap_completions
+
 # Temporary files
 *.tmp
 *.log

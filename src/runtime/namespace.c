@@ -343,6 +343,7 @@ void namespace_init(void) {
     task_init();
     channel_init();
     core_register_concurrency();
+    core_register_tar();
 
     /* Initialize global scheduler */
     global_scheduler = scheduler_new(DEFAULT_TASK_QUOTA);

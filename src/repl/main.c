@@ -15,6 +15,7 @@
 #include "value.h"
 #include "function.h"
 #include "scheduler.h"
+#include "core.h"
 #include "log.h"
 
 #define INPUT_BUFFER_SIZE 4096
@@ -34,13 +35,6 @@ int main(int argc, char** argv) {
 #endif
         }
     }
-
-    printf("Beerlang v%d.%d.%d\n",
-           BEERLANG_VERSION_MAJOR,
-           BEERLANG_VERSION_MINOR,
-           BEERLANG_VERSION_PATCH);
-
-    printf("Type (exit) to quit\n\n");
 
     /* Initialize systems */
     log_init();
@@ -62,6 +56,50 @@ int main(int argc, char** argv) {
 
     /* REPL loop */
     char input[INPUT_BUFFER_SIZE];
+    /* Check for script file argument */
+    const char* script_file = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] != '-') {
+            script_file = argv[i];
+            break;
+        }
+    }
+
+    if (script_file) {
+        /* Script mode: load and execute the file, then exit */
+        Value path_str = string_from_cstr(script_file);
+        Value load_argv[1] = { path_str };
+        VM* vm = vm_new(256);
+        vm->scheduler = global_scheduler;
+        native_load(vm, 1, load_argv);
+        int had_error = vm->error;
+        if (had_error) {
+            fprintf(stderr, "Error: %s\n", vm->error_msg);
+        }
+        if (global_scheduler) {
+            scheduler_run_until_done(global_scheduler);
+        }
+        vm_free(vm);
+        object_release(path_str);
+
+        namespace_shutdown();
+        symbol_shutdown();
+#ifdef BEER_TRACK_ALLOCS
+        if (dump_leaks) {
+            memory_dump_objects();
+        }
+#endif
+        memory_shutdown();
+        return had_error ? 1 : 0;
+    }
+
+    /* REPL mode: print banner */
+    printf("Beerlang v%d.%d.%d\n",
+           BEERLANG_VERSION_MAJOR,
+           BEERLANG_VERSION_MINOR,
+           BEERLANG_VERSION_PATCH);
+    printf("Type (exit) to quit\n\n");
+
     int line_number = 1;
 
     while (true) {
