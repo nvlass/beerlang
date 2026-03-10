@@ -77,14 +77,22 @@ Then start the REPL with:
 bl.sh
 ```
 
-The wrapper sets `BEER_LIB_PATH` automatically so that `lib/core.beer` is found regardless of your working directory. You can also set `BEER_LIB_PATH` manually if you prefer to invoke the binary directly.
+The wrapper sets `BEER_LIB_PATH` automatically so that `lib/core.beer` is found regardless of your working directory.
+
+You can also set `BEERPATH` to a colon-separated list of directories for library lookup:
+
+```bash
+export BEERPATH=/path/to/libs:/other/libs
+```
+
+Beerlang also supports **tar-based library bundles** — place a `.tar` file in any `BEERPATH` directory and its `.beer` files are transparently available to `require`.
 
 > **Note:** An install script will be added in a future release.
 
 ## Documentation
 
 - [API Reference](docs/API.md) — native functions and standard library
-- [Quick Start](docs/QUICKSTART.md) — getting started guide
+- [Quick Start](docs/QUICKSTART.md) — getting started with the REPL
 - [Design Documents](docs/design/) — language architecture and internals
 
 ## Credits

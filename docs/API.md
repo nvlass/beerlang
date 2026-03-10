@@ -241,6 +241,7 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 | `in-ns` | Switch/create namespace | `(in-ns 'my.ns)` |
 | `require` | Load namespace with optional alias | `(require 'foo.bar :as 'fb)` |
 | `load` | Load and execute a .beer file | `(load "path/to/file.beer")` |
+| `ns-publics` | List symbols defined in a namespace | `(ns-publics 'beer.core)` |
 
 ### Concurrency
 
@@ -250,6 +251,16 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 | `close!` | Close channel | `(close! ch)` |
 
 Use special forms `>!`, `<!`, `spawn`, `await`, `yield` for task/channel operations.
+
+### Tar Archives (beer.tar)
+
+Require with `(require 'beer.tar :as 'tar)`.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `tar/list` | List entries in a tar file | `(tar/list "lib.tar")` → `[{:name "a.beer" :size 42 :offset 512} ...]` |
+| `tar/read-entry` | Read a file from a tar | `(tar/read-entry "lib.tar" "a.beer")` → `"(ns ...)"` |
+| `tar/create` | Create a tar from a map | `(tar/create "out.tar" {"a.txt" "contents"})` |
 
 ---
 
@@ -269,6 +280,7 @@ Use special forms `>!`, `<!`, `spawn`, `await`, `yield` for task/channel operati
 | `let` | Destructuring let bindings | `(let [[a b] [1 2]] (+ a b))` → `3` |
 | `with-open` | Auto-close resource | `(with-open [f (open "x" :read)] (read-line f))` |
 | `ns` | Declare namespace with requires | `(ns my.lib (:require [other :as o]))` |
+| `doseq` | Iterate sequence for side effects | `(doseq [x [1 2 3]] (println x))` |
 
 ### Numeric
 
@@ -370,4 +382,18 @@ Use special forms `>!`, `<!`, `spawn`, `await`, `yield` for task/channel operati
 | `*out*` | Standard output stream |
 | `*err*` | Standard error stream |
 | `*loaded-libs*` | Map of loaded namespace files |
-| `*load-path*` | Vector of library search paths (default: `["lib/"]`) |
+| `*load-path*` | Vector of library search paths (from `BEERPATH` env var + `"lib/"`) |
+| `*loaded-libs*` | Map tracking which namespaces have been loaded |
+
+---
+
+## Testing (beer.test)
+
+Require with `(require 'beer.test :as 't)`.
+
+| Macro/Function | Description | Example |
+|----------------|-------------|---------|
+| `deftest` | Define a named test | `(t/deftest my-test (t/is (= 1 1)))` |
+| `is` | Assert a condition | `(t/is (= 4 (+ 2 2)))` |
+| `testing` | Label a group of assertions | `(t/testing "addition" (t/is (= 2 (+ 1 1))))` |
+| `run-tests` | Run all tests in current namespace | `(t/run-tests)` |

@@ -2,121 +2,158 @@
 
 ## Setup
 
-1. **Clone and enter directory:**
+1. **Clone and build:**
    ```bash
    cd beerlang
-   ```
-
-2. **Build the project:**
-   ```bash
    make
    ```
 
-3. **Run tests:**
+2. **Start the REPL:**
    ```bash
-   make test
+   ./bl.sh           # with rlwrap (line editing + history)
+   ./bin/beerlang     # or directly
    ```
 
-## Testing Framework
+3. **Run a script:**
+   ```bash
+   ./bin/beerlang my_script.beer
+   ```
 
-Beerlang uses a simple, minunit-style testing framework defined in `include/test.h`.
+## Your first session
 
-### Writing Tests
+```clojure
+user:1> (+ 1 2 3)
+6
 
-```c
-#include "test.h"
-#include "value.h"
+user:2> (defn greet [name] (str "Hello, " name "!"))
+#<function greet>
 
-/* Define a test */
-TEST(my_test) {
-    Value v = make_fixnum(42);
-    ASSERT(is_fixnum(v), "Should be fixnum");
-    ASSERT_EQ(untag_fixnum(v), 42, "Should be 42");
-    return NULL;  /* NULL means success */
-}
+user:3> (greet "world")
+"Hello, world!"
 
-/* Test suite */
-static const char* all_tests() {
-    RUN_TEST(my_test);
-    return NULL;
-}
+user:4> (map inc [1 2 3])
+(2 3 4)
 
-/* Main */
-int main(void) {
-    RUN_SUITE(all_tests);
-    return 0;
-}
+user:5> (->> (range 1 11) (filter odd?) (reduce +))
+25
 ```
 
-### Test Macros
+## Defining functions
 
-- `TEST(name)` - Define a test function
-- `ASSERT(condition, message)` - Assert condition is true
-- `ASSERT_EQ(actual, expected, message)` - Assert equality
-- `ASSERT_STR_EQ(actual, expected, message)` - Assert string equality
-- `RUN_TEST(name)` - Run a test
-- `RUN_SUITE(suite)` - Run test suite and print results
+```clojure
+;; Simple function
+(defn square [x] (* x x))
 
-### Running Tests
+;; Multi-arity
+(defn greet
+  ([name] (greet name "Hello"))
+  ([name greeting] (str greeting ", " name "!")))
+
+;; Destructuring
+(let [[a b & rest] [1 2 3 4 5]]
+  (println a b rest))  ; prints: 1 2 (3 4 5)
+```
+
+## Data structures
+
+```clojure
+;; Vectors
+[1 2 3]
+(conj [1 2] 3)          ; => [1 2 3]
+
+;; Maps
+{:name "Alice" :age 30}
+(assoc {:a 1} :b 2)     ; => {:a 1 :b 2}
+(:name {:name "Alice"}) ; => "Alice"
+
+;; Lists
+'(1 2 3)
+(cons 0 '(1 2 3))       ; => (0 1 2 3)
+```
+
+## Namespaces and libraries
+
+```clojure
+;; Create a namespace (in a file: mylib/utils.beer)
+(ns mylib.utils)
+(defn double [x] (* x 2))
+
+;; Use it from another file or the REPL
+(require 'mylib.utils :as 'u)
+(u/double 21)  ; => 42
+```
+
+Set `BEERPATH` to tell beerlang where to find libraries:
 
 ```bash
-make test                     # Run all tests
-./bin/test_vm_test_value     # Run specific test
+export BEERPATH=/path/to/libs:lib
 ```
 
-## Development Workflow
+Libraries can also be distributed as `.tar` files — place a tar in any `BEERPATH` directory and its `.beer` files are available to `require`.
 
-1. **Write tests first** (TDD approach)
-2. **Implement feature** to pass tests
-3. **Run tests:**
-   ```bash
-   make test
-   ```
-4. **Debug if needed:**
-   ```bash
-   make debug
-   gdb ./bin/test_vm_test_value
-   ```
+## Concurrency
 
-## Project Structure
+```clojure
+;; Spawn a task
+(def t (spawn (do (yield) 42)))
+(await t)  ; => 42
 
-```
-include/          # Public headers
-  beerlang.h      # Main header
-  value.h         # Value representation
-  vm.h            # VM interface
-  test.h          # Test framework
-
-src/              # Implementation
-  vm/             # VM implementation
-  types/          # Type implementations
-  repl/           # REPL
-  main.c          # Main entry point
-
-tests/            # Test files
-  vm/             # VM tests
-  types/          # Type tests
-  ...
+;; Channels
+(let [c (chan)]
+  (spawn (>! c "hello"))
+  (println (<! c)))  ; prints: hello
 ```
 
-## Next Steps
+## Exception handling
 
-1. Check `TODO.md` for implementation priorities
-2. Read `CLAUDE.md` for complete design
-3. Start with Phase 1: Foundation
-   - Implement value representation
-   - Implement basic VM
-   - Write tests for everything
+```clojure
+(try
+  (throw (ex-info "oops" {:code 42}))
+  (catch e
+    (println "Caught:" (:message e)))
+  (finally
+    (println "cleanup")))
+```
 
-## Tips
+## File I/O
 
-- **Keep it simple**: Start with minimal implementations
-- **Test everything**: Write tests before code
-- **Small commits**: Commit after each working feature
-- **Read the design**: CLAUDE.md has all the details
+```clojure
+;; Read/write files
+(spit "out.txt" "hello")
+(slurp "out.txt")        ; => "hello"
 
-## Getting Help
+;; Streams
+(with-open [f (open "data.txt" :read)]
+  (println (read-line f)))
+```
 
-- Read the design doc: `CLAUDE.md`
-- Check TODOs: `TODO.md`
-- Look at existing tests for examples
+## Running tests
+
+Beerlang includes a testing framework:
+
+```clojure
+;; In mylib/test.beer
+(ns mylib.test
+  (:require [beer.test :as t]))
+
+(t/deftest addition-test
+  (t/is (= 4 (+ 2 2)))
+  (t/is (= 0 (+ -1 1))))
+
+(t/run-tests)
+```
+
+## Development tools
+
+```bash
+make          # Build
+make test     # Run unit tests (C) + smoke tests (shell)
+make debug    # Debug build (-g -O0)
+make repl     # Start REPL
+make clean    # Clean build artifacts
+```
+
+## Next steps
+
+- [API Reference](API.md) — complete list of functions and macros
+- [Design Documents](design/) — language internals and architecture
