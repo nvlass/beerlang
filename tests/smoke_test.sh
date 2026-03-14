@@ -551,6 +551,14 @@ check_multi '(sort-by count ["aaa" "b" "cc"])' '("b" "cc" "aaa")'
 check '(list? (ns-publics (quote beer.core)))' 'true'
 check '(contains? (reduce (fn [m s] (assoc m s true)) {} (ns-publics (quote beer.core))) (quote map))' 'true'
 
+# --- read-string ---
+check '(read-string "42")'                  '42'
+check '(read-string ":foo")'                ':foo'
+check '(read-string "[1 2 3]")'             '[1 2 3]'
+check '(list? (read-string "(+ 1 2)"))'     'true'
+check '(first (read-string "(+ 1 2)"))'     '+'
+check '(read-string "{:a 1}")'              '{:a 1}'
+
 # --- doseq ---
 check '(do (doseq [x [1 2 3]] x) nil)' 'nil'
 

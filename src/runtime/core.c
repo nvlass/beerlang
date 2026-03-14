@@ -1662,6 +1662,26 @@ static Value native_prn(VM* vm, int argc, Value* argv) {
     return VALUE_NIL;
 }
 
+/* read-string: (read-string s) => parse one form from a string */
+static Value native_read_string(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_string(argv[0])) {
+        vm_error(vm, "read-string: requires 1 string argument");
+        return VALUE_NIL;
+    }
+    const char* src = string_cstr(argv[0]);
+    Reader* reader = reader_new(src, "<read-string>");
+    Value result = reader_read(reader);
+    if (reader_has_error(reader)) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "read-string: %s", reader_error_msg(reader));
+        reader_free(reader);
+        vm_error(vm, buf);
+        return VALUE_NIL;
+    }
+    reader_free(reader);
+    return result;
+}
+
 /* subs: (subs s start) or (subs s start end) => substring by char index */
 static Value native_subs(VM* vm, int argc, Value* argv) {
     if (argc < 2 || argc > 3) {
@@ -1997,6 +2017,7 @@ void core_register_utility(void) {
     register_native(core_ns, "load", native_load);
     register_native(core_ns, "pr-str", native_pr_str);
     register_native(core_ns, "prn", native_prn);
+    register_native(core_ns, "read-string", native_read_string);
     register_native(core_ns, "subs", native_subs);
     register_native(core_ns, "str/upper-case", native_str_upper);
     register_native(core_ns, "str/lower-case", native_str_lower);
