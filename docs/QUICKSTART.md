@@ -71,6 +71,39 @@ user:5> (->> (range 1 11) (filter odd?) (reduce +))
 (cons 0 '(1 2 3))       ; => (0 1 2 3)
 ```
 
+## Project management
+
+Beerlang has built-in project management — no external tools required.
+
+> **Note:** The CLI subcommand interface is experimental and may change in the future.
+> In particular, project management commands (`new`, `run`, `build`, `ubertar`) may
+> move from built-in subcommands to a beerlang library invoked via `beer -m`.
+
+```bash
+# Create a new project
+beer new myproject
+cd myproject
+
+# Run the project
+beer run                    # calls (-main) in the :main namespace
+
+# Build a distributable tar
+beer build                  # creates myproject.tar
+
+# Start a project REPL (with src/ and lib/ on the load path)
+beer repl
+```
+
+A project is defined by a `beer.edn` file (a beerlang map literal):
+
+```clojure
+{:name "myproject"
+ :version "0.1.0"
+ :paths ["src" "lib"]
+ :dependencies []
+ :main myproject.core}
+```
+
 ## Namespaces and libraries
 
 ```clojure
@@ -127,6 +160,15 @@ Libraries can also be distributed as `.tar` files — place a tar in any `BEERPA
   (println (read-line f)))
 ```
 
+## Shell execution
+
+```clojure
+(require 'beer.shell :as 'shell)
+(let [result (shell/exec "ls" "-la")]
+  (println (:out result))
+  (println "exit code:" (:exit result)))
+```
+
 ## Running tests
 
 Beerlang includes a testing framework:
@@ -151,6 +193,11 @@ make test     # Run unit tests (C) + smoke tests (shell)
 make debug    # Debug build (-g -O0)
 make repl     # Start REPL
 make clean    # Clean build artifacts
+
+beer --help   # Show all CLI commands
+beer new      # Create a project
+beer run      # Run project
+beer build    # Build project tar
 ```
 
 ## Next steps

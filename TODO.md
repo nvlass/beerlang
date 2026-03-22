@@ -5,9 +5,9 @@
 ## Implementation Status Summary
 
 **All tests passing, 100% pass rate**
-- Unit tests: 61
-- REPL smoke tests: 303
-- **Last Updated:** 2026-03-06
+- Unit tests: 81
+- REPL smoke tests: 340
+- **Last Updated:** 2026-03-22
 
 ## Completed Phases
 
@@ -183,42 +183,64 @@ The Stream API is unchanged; we add async machinery underneath.
 
 ## Medium-term TODO
 
-### 4. Library Distribution (tar-based)
-Clojure uses JARs (ZIP files); beerlang should use tar files as a lightweight equivalent.
+### 4. Library Distribution (tar-based) — COMPLETE
+- [x] Namespace-to-path convention: `my.namespace.data` → `my/namespace/data.beer`
+- [x] Read `.beer` files from tar archives (library bundles)
+- [x] C-based ustar tar parser (`tarindex.c`) — transparent indexing at startup
+- [x] `BEERPATH` environment variable (colon-separated dirs, scanned for `.tar` files)
+- [x] `beer.tar` namespace: `tar/list`, `tar/read-entry`, `tar/create`
+- [x] `beer build` / `beer ubertar` CLI commands for creating distributable tars
+- [x] Both directory and tar loading supported (dirs for dev, tars for distribution)
 
-- [ ] Namespace-to-path convention: `my.namespace.data` → `my/namespace/data.beer`
-- [ ] Read `.beer` files from tar archives (library bundles)
-- [ ] Pure beerlang tar reader (uses binary I/O from Phase 1)
-- [ ] Library search path / BEERPATH environment variable
-- **Design questions:**
-  - Tar format: use the simplest POSIX ustar format (512-byte header blocks, no compression)?
-    Uncompressed tar is trivial to parse — just fixed-size headers + raw data.
-    Could add optional gzip later (but that IS a bigger dependency).
-  - Should the tar reader be a native C module or written in beerlang?
-    Pure beerlang is elegant and now feasible with binary I/O.
-    A minimal C implementation (~200 lines) could bootstrap faster.
-  - Do we need a `beer` CLI tool (like `lein` / `clj`) for creating/managing tar bundles?
-  - Versioning: embed a manifest file (like `project.beer` or `beer.edn`) in the tar?
-  - Should we support loading from directories too (for development) and tar only for distribution?
-  - Tar bundles should contain **source** (`.beer` files), not just compiled bytecode.
-    "Source distributions" are more Lisp-y — code is data, readable, inspectable.
-    AOT `.beerc` files could be cached alongside or generated on first load.
+### 5. Tooling — PARTIALLY COMPLETE
 
-### 5. Tooling
-- [ ] `beer` CLI tool (project management, REPL, run scripts)
+**Completed:**
+- [x] `beer` CLI with subcommands (`new`, `run`, `build`, `ubertar`, `repl`)
+- [x] `beer.edn` project configuration (parsed by the reader — it's a beerlang map literal)
+- [x] `beer new <name>` — creates project skeleton
+- [x] `beer run` — requires main namespace and calls `-main`
+- [x] `beer build` — collects `.beer` files into a `.tar` archive
+- [x] `beer ubertar` — standalone tar with dependencies
+- [x] `beer.shell/exec` native — fork/exec/pipe, returns `{:exit :out :err}`
+- [x] `beer.tools` library — build/ubertar logic in pure beerlang
+- [x] `beer.test` framework (`deftest`, `is`, `testing`, `run-tests`)
+
+**Remaining:**
 - [ ] REPL enhancements: line editing, history, tab completion
 - [ ] Debugger: breakpoints, stepping, stack inspection
 - [ ] Profiler: sampling or instrumentation-based
-- [ ] Bytecode inspector / disassembler (as REPL tool, `disasm` already exists partially)
-- [ ] Test framework in beerlang (like `clojure.test`)
 - [ ] Documentation generation (docstrings → HTML/markdown)
-- **Design questions:**
-  - Should the CLI tool be a separate binary or the same `beerlang` binary with subcommands?
-    e.g. `beerlang repl`, `beerlang run file.beer`, `beerlang build`, `beerlang test`
-  - Line editing: simplest approach is `rlwrap beerlang` (zero code changes, gives
-    readline-style editing, history, and completion for free). Could document as the
-    recommended way. Built-in editing (linenoise or raw terminal) only if needed later.
-  - For a test framework: `(deftest name & body)`, `(is expr)`, `(are template & args)`?
+
+**Design notes:**
+  - The CLI is the same `beerlang` binary with subcommands. Project management is built into
+    the language itself — no external tool (like leiningen, cargo, etc.) is required.
+  - Line editing: simplest approach is `rlwrap beerlang` (zero code changes). Built-in
+    editing (linenoise or raw terminal) only if needed later.
+
+**Future consideration: separating project management from the core binary**
+  - Currently `new`, `run`, `build`, and `ubertar` are implemented in C in `main.c`.
+    An alternative approach would move them into a beerlang library (`beer.tools`)
+    that the CLI simply delegates to, similar to how Clojure's `clj` wrapper invokes
+    `clojure.main` and `clojure.tools.deps`.
+  - What this would look like:
+    - `beer.tools.new/create-project` — generate skeleton (uses `shell/exec` for mkdir
+      or a new `beer.fs` namespace with `mkdir`, `file-exists?`, etc.)
+    - `beer.tools.project/read-config`, `prepend-load-paths` — move beer.edn parsing to beerlang
+      (currently C `read_beer_edn()`, but `read-string` + `slurp` already exist)
+    - `beer.tools.runner/run-main` — `(require main-ns) (apply (resolve (symbol main-ns "-main")) args)`
+    - The C side would only need: parse argv → find beer.edn → bootstrap load path → eval one form
+  - Trade-offs:
+    - **Pro:** More self-hosted, easier to extend, dogfoods the language
+    - **Pro:** Project management becomes customizable via beerlang code
+    - **Con:** Slower startup (need to compile/load beer.tools before doing anything)
+    - **Con:** Chicken-and-egg: beer.tools needs to be on the load path to load it
+    - **Con:** `beer new` currently doesn't even need runtime init — pure C is fast and dependency-free
+  - A middle ground (like Clojure): keep the binary minimal (`beer <file>`, `beer -m ns`,
+    `beer repl`) and let project management be a library that's invoked via
+    `beer -m beer.tools.cli new myproject`. The binary only needs to know how to
+    find and run a `-main` function — everything else is library code.
+  - **Decision: defer.** Current approach works well. Revisit when the language has
+    a richer filesystem API (`beer.fs`) and startup time is optimized.
 
 ### 6. AOT Compilation
 Ahead-of-time compilation to bytecode — skip the reader+compiler at runtime.

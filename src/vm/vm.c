@@ -1269,9 +1269,21 @@ void vm_step(VM* vm) {
                 memcpy(ns_name, ns_part, ns_len);
                 ns_name[ns_len] = '\0';
 
-                /* Check aliases first */
+                /* Check aliases: current ns first, then function's home ns */
                 Value alias_sym = symbol_intern(ns_name);
                 const char* resolved = namespace_resolve_alias(ns, alias_sym);
+                if (!resolved && vm->frame_count > 0) {
+                    Value fn_val = vm->frames[vm->frame_count - 1].function;
+                    if (is_function(fn_val)) {
+                        const char* fn_ns = function_ns_name(fn_val);
+                        if (fn_ns) {
+                            Namespace* fn_home = namespace_registry_get(global_namespace_registry, fn_ns);
+                            if (fn_home && fn_home != ns) {
+                                resolved = namespace_resolve_alias(fn_home, alias_sym);
+                            }
+                        }
+                    }
+                }
                 const char* target_name = resolved ? resolved : ns_name;
 
                 Namespace* target_ns = namespace_registry_get(global_namespace_registry, target_name);

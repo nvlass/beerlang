@@ -1,0 +1,42 @@
+(ns beer.tools
+  (:require [beer.shell :as shell]
+            [beer.tar :as tar]))
+
+(defn read-config [path]
+  (read-string (slurp path)))
+
+(defn collect-beer-files [paths]
+  "Returns {relative-path => contents} for all .beer files under paths"
+  (reduce
+    (fn [m dir]
+      (let [result (shell/exec "find" dir "-name" "*.beer" "-type" "f")
+            files (filter (fn [s] (not (empty? s)))
+                    (str/split (:out result) "\n"))]
+        (reduce (fn [m2 f]
+                  (assoc m2 f (slurp f)))
+                m files)))
+    {} paths))
+
+(defn build []
+  (let [config (read-config "beer.edn")
+        name (:name config)
+        files (collect-beer-files (:paths config))]
+    (tar/create (str name ".tar") files)
+    (println (str "Built " name ".tar (" (count files) " files)"))))
+
+(defn ubertar []
+  (let [config (read-config "beer.edn")
+        name (:name config)
+        project-files (collect-beer-files (:paths config))
+        ;; For each dependency tar, extract all entries and merge
+        dep-files (reduce
+                    (fn [m dep-tar]
+                      (let [entries (tar/list dep-tar)]
+                        (reduce (fn [m2 entry]
+                                  (assoc m2 (:name entry)
+                                         (tar/read-entry dep-tar (:name entry))))
+                                m entries)))
+                    {} (:dependencies config))
+        all-files (merge project-files dep-files)]
+    (tar/create (str name "-standalone.tar") all-files)
+    (println (str "Built " name "-standalone.tar"))))

@@ -716,6 +716,103 @@ check_multi '(slurp "/tmp/beer_async_test.txt")' \
 # Clean up temp files
 rm -f /tmp/beer_async_test.txt /tmp/beer_async1.txt /tmp/beer_async2.txt
 
+# --- beer.shell/exec ---
+echo ""
+echo "--- beer.shell/exec ---"
+
+check_multi '(require (quote beer.shell) :as (quote shell))
+(:exit (shell/exec "echo" "hello"))' '0' 'shell/exec exit code'
+
+check_multi '(require (quote beer.shell) :as (quote shell))
+(:out (shell/exec "echo" "hello"))' '"hello\n"' 'shell/exec stdout'
+
+check_multi '(require (quote beer.shell) :as (quote shell))
+(:exit (shell/exec "false"))' '1' 'shell/exec non-zero exit'
+
+check_multi '(require (quote beer.shell) :as (quote shell))
+(:err (shell/exec "sh" "-c" "echo oops >&2"))' '"oops\n"' 'shell/exec stderr'
+
+# --- CLI subcommands (beer new / run / build) ---
+echo ""
+echo "--- CLI subcommands ---"
+
+check_cli() {
+    local label="$1" expected="$2"
+    shift 2
+    actual=$("$@" 2>/dev/null)
+    if echo "$actual" | grep -q "$expected"; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $label => '$actual' (expected match '$expected')"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+CLI_TMPDIR=$(mktemp -d /tmp/beer_cli_XXXXXX)
+
+# beer new
+check_cli 'beer new creates project' 'Created project: testproj' \
+    "$BEER" new "$CLI_TMPDIR/testproj"
+
+# Verify beer.edn was created
+if [ -f "$CLI_TMPDIR/testproj/beer.edn" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: beer.edn not created"
+    FAIL=$((FAIL + 1))
+fi
+
+# Verify core.beer was created
+if [ -f "$CLI_TMPDIR/testproj/src/testproj/core.beer" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: src/testproj/core.beer not created"
+    FAIL=$((FAIL + 1))
+fi
+
+# beer run
+BEER_ABS=$(cd "$(dirname "$BEER")" && pwd)/$(basename "$BEER")
+LIB_ABS=$(cd "$(dirname "$BEER")/.." && pwd)/lib
+run_output=$(cd "$CLI_TMPDIR/testproj" && BEERPATH="$LIB_ABS" "$BEER_ABS" run 2>/dev/null)
+if [ "$run_output" = "Hello from testproj!" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: beer run => '$run_output' (expected 'Hello from testproj!')"
+    FAIL=$((FAIL + 1))
+fi
+
+# beer build
+build_output=$(cd "$CLI_TMPDIR/testproj" && BEERPATH="$LIB_ABS" "$BEER_ABS" build 2>/dev/null)
+if echo "$build_output" | grep -q "Built testproj.tar"; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: beer build => '$build_output' (expected 'Built testproj.tar')"
+    FAIL=$((FAIL + 1))
+fi
+
+# Verify tar was created
+if [ -f "$CLI_TMPDIR/testproj/testproj.tar" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: testproj.tar not created"
+    FAIL=$((FAIL + 1))
+fi
+
+# beer --help
+help_output=$("$BEER" --help 2>/dev/null)
+if echo "$help_output" | grep -q "beer.tools"; then
+    # --help doesn't mention beer.tools, but mentions commands
+    :
+fi
+if echo "$help_output" | grep -q "new <name>"; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: beer --help missing 'new <name>'"
+    FAIL=$((FAIL + 1))
+fi
+
+rm -rf "$CLI_TMPDIR"
+
 echo ""
 echo "===================="
 echo "Passed: $PASS"

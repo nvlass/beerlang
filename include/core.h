@@ -33,6 +33,9 @@ void core_register_concurrency(void);
 /* Register beer.tar namespace (tar/list, tar/read-entry, tar/create) */
 void core_register_tar(void);
 
+/* Register beer.shell namespace (shell/exec) */
+void core_register_shell(void);
+
 /* Register core macros (defn, when, and, or) - compiled from beerlang source */
 void core_register_macros(void);
 

@@ -1,0 +1,5 @@
+(ns beer.shell)
+;; Shell operations — wrappers around C natives
+
+;; (shell/exec cmd arg1 arg2 ...) => {:exit N :out "..." :err "..."}
+(def exec shell-exec)

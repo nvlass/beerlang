@@ -98,6 +98,10 @@ $(BIN_DIR)/test_%: $(TEST_DIR)/%.c $(OBJS) $(LIB_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $< $(filter-out $(BUILD_DIR)/repl/main.o,$(OBJS)) $(LIB_OBJS) $(LDFLAGS)
 
+# Tools tar
+lib/tools.tar: lib/tools/beer/tools.beer
+	cd lib/tools && COPYFILE_DISABLE=1 tar cf ../tools.tar beer/tools.beer
+
 # Clean
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
