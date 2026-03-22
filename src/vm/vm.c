@@ -83,6 +83,7 @@ VM* vm_new(int stack_size) {
 
     vm->yield_countdown = 0;  /* Disabled by default for standalone VMs */
     vm->yielded = false;
+    vm->native_blocked = false;
     vm->scheduler = NULL;
 
     vm->running = false;
@@ -875,6 +876,13 @@ void vm_step(VM* vm) {
                     return;
                 }
 
+                /* Native blocked on I/O — rewind PC, don't touch stack */
+                if (vm->yielded) {
+                    vm->native_blocked = false;
+                    vm->pc = pc_at_opcode;
+                    break;
+                }
+
                 /* Pop args and function from stack */
                 for (int i = 0; i < (int)n_args + 1; i++) {
                     vm_pop(vm);
@@ -959,11 +967,19 @@ void vm_step(VM* vm) {
             /* sp points after func, so func is at sp-1, and arg0 is at sp-1-n_args */
             int base = vm->stack_pointer - 1 - n_args;
 
+            /* Retain fn before popping — vm_pop releases, which could free
+             * a function whose only reference is the stack slot (e.g. from
+             * a native call like asm).  push_frame will add its own retain. */
+            if (is_pointer(fn)) object_retain(fn);
+
             /* Pop the function off the stack (it's saved in the frame) */
             vm_pop(vm);
 
             /* Push call frame (saves caller's code/constants) */
             push_frame(vm, fn, vm->pc);
+
+            /* Balance the extra retain — push_frame already retained */
+            if (is_pointer(fn)) object_release(fn);
             if (vm->error) {
                 return;
             }
@@ -1020,6 +1036,13 @@ void vm_step(VM* vm) {
 
                 if (vm->error) {
                     return;
+                }
+
+                /* Native blocked on I/O — rewind PC, don't touch stack */
+                if (vm->yielded) {
+                    vm->native_blocked = false;
+                    vm->pc = pc_at_opcode;
+                    break;
                 }
 
                 /* Pop args and function */

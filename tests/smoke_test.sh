@@ -559,6 +559,14 @@ check '(list? (read-string "(+ 1 2)"))'     'true'
 check '(first (read-string "(+ 1 2)"))'     '+'
 check '(read-string "{:a 1}")'              '{:a 1}'
 
+# --- disasm / asm ---
+check '(do (defn inc2 [x] (+ x 2)) ((asm (disasm inc2)) 5))' '7'
+check '(do (defn f [x] x) (map? (disasm f)))' 'true'
+check '(do (defn f [x] x) (:arity (disasm f)))' '1'
+check '(do (def f (fn [x] (if x 1 2))) ((asm (disasm f)) true))' '1'
+check '(do (def f (fn [x] (if x 1 2))) ((asm (disasm f)) false))' '2'
+check '((asm {:code [[:ENTER 1] [:LOAD_LOCAL 0] [:PUSH_INT 1] [:ADD] [:RETURN]] :constants [] :arity 1}) 5)' '6'
+
 # --- doseq ---
 check '(do (doseq [x [1 2 3]] x) nil)' 'nil'
 
@@ -682,6 +690,31 @@ check_tar_natives() {
     fi
 }
 check_tar_natives
+
+# --- Async I/O (reactor) ---
+# File read from spawned task (non-blocking path)
+echo "async io test data" > /tmp/beer_async_test.txt
+check_multi '(await (spawn (fn [] (read-line (open "/tmp/beer_async_test.txt" :read)))))' \
+    '"async io test data"' 'async file read from task'
+
+# Multiple tasks reading different files concurrently
+echo "file1" > /tmp/beer_async1.txt
+echo "file2" > /tmp/beer_async2.txt
+check_multi '(def t1 (spawn (fn [] (read-line (open "/tmp/beer_async1.txt" :read)))))
+(def t2 (spawn (fn [] (read-line (open "/tmp/beer_async2.txt" :read)))))
+(str (await t1) " " (await t2))' \
+    '"file1 file2"' 'concurrent file reads from tasks'
+
+# Standalone (no spawn) I/O still works
+check_multi '(read-line (open "/tmp/beer_async_test.txt" :read))' \
+    '"async io test data"' 'standalone file read (blocking fallback)'
+
+# slurp still works (uses blocking fd, not stream_open)
+check_multi '(slurp "/tmp/beer_async_test.txt")' \
+    '"async io test data\n"' 'slurp still works'
+
+# Clean up temp files
+rm -f /tmp/beer_async_test.txt /tmp/beer_async1.txt /tmp/beer_async2.txt
 
 echo ""
 echo "===================="

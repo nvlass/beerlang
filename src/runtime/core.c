@@ -28,7 +28,10 @@
 #include "task.h"
 #include "channel.h"
 #include "scheduler.h"
+#include "io_reactor.h"
 #include "tarindex.h"
+#include "disasm.h"
+#include <fcntl.h>
 
 /* Forward declarations */
 Value native_load(VM* vm, int argc, Value* argv);
@@ -1682,6 +1685,557 @@ static Value native_read_string(VM* vm, int argc, Value* argv) {
     return result;
 }
 
+/* =================================================================
+ * disasm / asm — bytecode metaprogramming
+ * ================================================================= */
+
+/* Kept-alive bytecode/constants from asm (same arrays as load) */
+#define MAX_ASM_UNITS 256
+static uint8_t* asm_bytecodes[MAX_ASM_UNITS];
+static Value*   asm_constants[MAX_ASM_UNITS];
+static int n_asm_units = 0;
+
+static int find_label_idx(size_t* label_pcs, int n_labels, size_t target) {
+    for (int i = 0; i < n_labels; i++) {
+        if (label_pcs[i] == target) return i;
+    }
+    return -1;
+}
+
+static bool resolve_label(const char* name, const char** label_names,
+                           size_t* label_pcs, int n_labels, size_t* out_pc) {
+    for (int i = 0; i < n_labels; i++) {
+        if (strcmp(label_names[i], name) == 0) {
+            *out_pc = label_pcs[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+/* disasm: (disasm fn) => {:code [...] :constants [...] :arity N} */
+static Value native_disasm(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "disasm: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    if (!is_function(argv[0])) {
+        vm_error(vm, "disasm: argument must be a bytecode function");
+        return VALUE_NIL;
+    }
+
+    uint8_t* code = function_get_code(argv[0]);
+    int code_size = function_get_code_size(argv[0]);
+    Value* constants = function_get_constants(argv[0]);
+    int num_constants = function_get_num_constants(argv[0]);
+    uint32_t code_offset = function_code_offset(argv[0]);
+    int arity = function_arity(argv[0]);
+
+    if (!code || code_size <= 0) {
+        vm_error(vm, "disasm: function has no bytecode");
+        return VALUE_NIL;
+    }
+
+    /* Pass 1: collect jump targets → assign labels */
+    #define MAX_LABELS 256
+    size_t label_pcs[MAX_LABELS];
+    int n_labels = 0;
+
+    size_t pc = code_offset;
+    while (pc < (size_t)code_size) {
+        uint8_t op = code[pc];
+        const OpcodeInfo* info = opcode_info_by_value(op);
+        if (!info) break;
+
+        if (op == OP_JUMP || op == OP_JUMP_IF_FALSE) {
+            /* Relative int32 offset after the operand */
+            int32_t offset = 0;
+            if (pc + 5 <= (size_t)code_size) {
+                for (int i = 0; i < 4; i++)
+                    offset |= ((int32_t)code[pc + 1 + i]) << (i * 8);
+            }
+            size_t target = pc + 5 + (size_t)offset;
+            /* Add to labels if not already there */
+            bool found = false;
+            for (int i = 0; i < n_labels; i++) {
+                if (label_pcs[i] == target) { found = true; break; }
+            }
+            if (!found && n_labels < MAX_LABELS)
+                label_pcs[n_labels++] = target;
+        } else if (op == OP_PUSH_HANDLER) {
+            /* Absolute uint32 PC */
+            uint32_t target = 0;
+            if (pc + 5 <= (size_t)code_size) {
+                for (int i = 0; i < 4; i++)
+                    target |= ((uint32_t)code[pc + 1 + i]) << (i * 8);
+            }
+            bool found = false;
+            for (int i = 0; i < n_labels; i++) {
+                if (label_pcs[i] == (size_t)target) { found = true; break; }
+            }
+            if (!found && n_labels < MAX_LABELS)
+                label_pcs[n_labels++] = (size_t)target;
+        }
+
+        pc += (size_t)info->total_size;
+    }
+
+    /* Sort labels by PC for consistent naming */
+    for (int i = 0; i < n_labels - 1; i++)
+        for (int j = i + 1; j < n_labels; j++)
+            if (label_pcs[i] > label_pcs[j]) {
+                size_t tmp = label_pcs[i];
+                label_pcs[i] = label_pcs[j];
+                label_pcs[j] = tmp;
+            }
+
+    /* Helper: find label index for a PC (inline, not a macro) */
+
+    /* Pass 2: scan bytecode to find which constants are actually used */
+    bool used_consts[4096] = {false};
+    int max_const_idx = -1;
+    pc = code_offset;
+    while (pc < (size_t)code_size) {
+        uint8_t op = code[pc];
+        const OpcodeInfo* info = opcode_info_by_value(op);
+        if (!info) break;
+
+        /* Opcodes that reference constants by index */
+        if (op == OP_PUSH_CONST) {
+            uint32_t idx = 0;
+            for (int i = 0; i < 4; i++) idx |= ((uint32_t)code[pc+1+i]) << (i*8);
+            if ((int)idx < num_constants && idx < 4096) {
+                used_consts[idx] = true;
+                if ((int)idx > max_const_idx) max_const_idx = (int)idx;
+            }
+        } else if (op == OP_LOAD_VAR || op == OP_STORE_VAR) {
+            uint16_t idx = 0;
+            for (int i = 0; i < 2; i++) idx |= ((uint16_t)code[pc+1+i]) << (i*8);
+            if ((int)idx < num_constants && idx < 4096) {
+                used_consts[idx] = true;
+                if ((int)idx > max_const_idx) max_const_idx = (int)idx;
+            }
+        } else if (op == OP_MAKE_CLOSURE) {
+            /* name_idx at offset 11-12 */
+            uint16_t ni = 0;
+            for (int i = 0; i < 2; i++) ni |= ((uint16_t)code[pc+11+i]) << (i*8);
+            if ((int)ni < num_constants && ni < 4096) {
+                used_consts[ni] = true;
+                if ((int)ni > max_const_idx) max_const_idx = (int)ni;
+            }
+        }
+
+        pc += (size_t)info->total_size;
+        if (op == OP_RETURN || op == OP_HALT) break;
+    }
+
+    /* Build old→new constant index mapping */
+    int const_remap[4096];
+    int new_num_constants = 0;
+    for (int i = 0; i <= max_const_idx && i < 4096; i++) {
+        if (used_consts[i]) {
+            const_remap[i] = new_num_constants++;
+        } else {
+            const_remap[i] = -1;
+        }
+    }
+
+    /* Pass 3: build code vector with remapped constant indices */
+    Value code_vec = vector_create(32);
+    pc = code_offset;
+
+    while (pc < (size_t)code_size) {
+        /* Insert label if this PC is a target */
+        int label_idx = find_label_idx(label_pcs, n_labels, pc);
+        if (label_idx >= 0) {
+            char lname[16];
+            snprintf(lname, sizeof(lname), "L%d", label_idx);
+            Value label_instr = vector_create(2);
+            Value kw_label = keyword_intern("LABEL");
+            Value kw_name = keyword_intern(lname);
+            vector_push(label_instr, kw_label);
+            vector_push(label_instr, kw_name);
+            vector_push(code_vec, label_instr);
+            object_release(label_instr);
+        }
+
+        uint8_t op = code[pc];
+        const OpcodeInfo* info = opcode_info_by_value(op);
+        if (!info) break;
+
+        Value instr = vector_create(2);
+        Value kw_op = keyword_intern(info->name);
+        vector_push(instr, kw_op);
+
+        if (op == OP_JUMP || op == OP_JUMP_IF_FALSE) {
+            int32_t offset = 0;
+            for (int i = 0; i < 4; i++)
+                offset |= ((int32_t)code[pc + 1 + i]) << (i * 8);
+            size_t target = pc + 5 + (size_t)offset;
+            int li = find_label_idx(label_pcs, n_labels, target);
+            if (li >= 0) {
+                char lname[16];
+                snprintf(lname, sizeof(lname), "L%d", li);
+                Value kw = keyword_intern(lname);
+                vector_push(instr, kw);
+            } else {
+                vector_push(instr, make_fixnum(offset));
+            }
+        } else if (op == OP_PUSH_HANDLER) {
+            uint32_t target = 0;
+            for (int i = 0; i < 4; i++)
+                target |= ((uint32_t)code[pc + 1 + i]) << (i * 8);
+            int li = find_label_idx(label_pcs, n_labels, (size_t)target);
+            if (li >= 0) {
+                char lname[16];
+                snprintf(lname, sizeof(lname), "L%d", li);
+                Value kw = keyword_intern(lname);
+                vector_push(instr, kw);
+            } else {
+                vector_push(instr, make_fixnum((int64_t)target));
+            }
+        } else if (op == OP_MAKE_CLOSURE) {
+            uint32_t co = 0;
+            for (int i = 0; i < 4; i++) co |= ((uint32_t)code[pc+1+i]) << (i*8);
+            uint16_t nl = 0, nc = 0, ar = 0, ni = 0;
+            for (int i = 0; i < 2; i++) nl |= ((uint16_t)code[pc+5+i]) << (i*8);
+            for (int i = 0; i < 2; i++) nc |= ((uint16_t)code[pc+7+i]) << (i*8);
+            for (int i = 0; i < 2; i++) ar |= ((uint16_t)code[pc+9+i]) << (i*8);
+            for (int i = 0; i < 2; i++) ni |= ((uint16_t)code[pc+11+i]) << (i*8);
+            vector_push(instr, make_fixnum((int64_t)co));
+            vector_push(instr, make_fixnum((int64_t)nl));
+            vector_push(instr, make_fixnum((int64_t)nc));
+            vector_push(instr, make_fixnum((int16_t)ar));
+            /* Remap name_idx */
+            int remapped_ni = (ni < 4096 && used_consts[ni]) ? const_remap[ni] : (int)ni;
+            vector_push(instr, make_fixnum((int64_t)remapped_ni));
+        } else if (op == OP_PUSH_INT) {
+            int64_t val = 0;
+            for (int i = 0; i < 8; i++)
+                val |= ((int64_t)code[pc + 1 + i]) << (i * 8);
+            vector_push(instr, make_fixnum(val));
+        } else if (op == OP_PUSH_CONST) {
+            /* Remap constant index */
+            uint32_t old_idx = 0;
+            for (int i = 0; i < 4; i++)
+                old_idx |= ((uint32_t)code[pc + 1 + i]) << (i * 8);
+            int new_idx = (old_idx < 4096 && used_consts[old_idx]) ? const_remap[old_idx] : (int)old_idx;
+            vector_push(instr, make_fixnum((int64_t)new_idx));
+        } else if (op == OP_LOAD_VAR || op == OP_STORE_VAR) {
+            /* Remap constant index (uint16) */
+            uint16_t old_idx = 0;
+            for (int i = 0; i < 2; i++)
+                old_idx |= ((uint16_t)code[pc + 1 + i]) << (i * 8);
+            int new_idx = (old_idx < 4096 && used_consts[old_idx]) ? const_remap[old_idx] : (int)old_idx;
+            vector_push(instr, make_fixnum((int64_t)new_idx));
+        } else if (info->total_size == 3) {
+            /* uint16 operand (non-var) */
+            uint16_t operand = 0;
+            for (int i = 0; i < 2; i++)
+                operand |= ((uint16_t)code[pc + 1 + i]) << (i * 8);
+            vector_push(instr, make_fixnum((int64_t)operand));
+        } else if (info->total_size == 5) {
+            /* uint32 operand (non-PUSH_CONST) */
+            uint32_t operand = 0;
+            for (int i = 0; i < 4; i++)
+                operand |= ((uint32_t)code[pc + 1 + i]) << (i * 8);
+            vector_push(instr, make_fixnum((int64_t)operand));
+        }
+        /* total_size == 1: no operand, nothing to push */
+
+        vector_push(code_vec, instr);
+        object_release(instr);
+        pc += (size_t)info->total_size;
+
+        /* Stop after the function's RETURN (first RETURN after ENTER) */
+        if (op == OP_RETURN || op == OP_HALT) break;
+    }
+
+    /* Insert any remaining label at the end */
+    {
+        int label_idx = find_label_idx(label_pcs, n_labels, pc);
+        if (label_idx >= 0) {
+            char lname[16];
+            snprintf(lname, sizeof(lname), "L%d", label_idx);
+            Value label_instr = vector_create(2);
+            vector_push(label_instr, keyword_intern("LABEL"));
+            vector_push(label_instr, keyword_intern(lname));
+            vector_push(code_vec, label_instr);
+            object_release(label_instr);
+        }
+    }
+
+
+    /* Build constants vector — only include used constants */
+    Value const_vec = vector_create(new_num_constants > 0 ? (size_t)new_num_constants : 1);
+    for (int i = 0; i <= max_const_idx && i < 4096; i++) {
+        if (!used_consts[i]) continue;
+        Value c = constants[i];
+        if (is_pointer(c)) object_retain(c);
+        vector_push(const_vec, c);
+        if (is_pointer(c)) object_release(c);
+    }
+
+    /* Build result map */
+    Value result = hashmap_create_default();
+    hashmap_set(result, keyword_intern("code"), code_vec);
+    hashmap_set(result, keyword_intern("constants"), const_vec);
+    hashmap_set(result, keyword_intern("arity"), make_fixnum((int64_t)arity));
+    object_release(code_vec);
+    object_release(const_vec);
+
+    return result;
+}
+
+/* asm: (asm {:code [...] :constants [...] :arity N}) => function */
+static Value native_asm(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "asm: requires exactly 1 argument (a map)");
+        return VALUE_NIL;
+    }
+    if (!is_pointer(argv[0]) || object_type(argv[0]) != TYPE_HASHMAP) {
+        vm_error(vm, "asm: argument must be a map with :code, :constants, :arity");
+        return VALUE_NIL;
+    }
+
+    Value map = argv[0];
+    Value code_val = hashmap_get(map, keyword_intern("code"));
+    Value const_val = hashmap_get(map, keyword_intern("constants"));
+    Value arity_val = hashmap_get(map, keyword_intern("arity"));
+
+    if (is_nil(code_val) || !is_pointer(code_val) || object_type(code_val) != TYPE_VECTOR) {
+        vm_error(vm, "asm: :code must be a vector of instruction vectors");
+        return VALUE_NIL;
+    }
+    if (!is_fixnum(arity_val)) {
+        vm_error(vm, "asm: :arity must be an integer");
+        return VALUE_NIL;
+    }
+
+    int arity = (int)untag_fixnum(arity_val);
+    size_t n_instrs = vector_length(code_val);
+
+    /* Build constants array */
+    int num_constants = 0;
+    Value* const_arr = NULL;
+    if (!is_nil(const_val) && is_pointer(const_val) && object_type(const_val) == TYPE_VECTOR) {
+        num_constants = (int)vector_length(const_val);
+        const_arr = malloc((size_t)num_constants * sizeof(Value));
+        for (int i = 0; i < num_constants; i++) {
+            const_arr[i] = vector_get(const_val, (size_t)i);
+            if (is_pointer(const_arr[i])) object_retain(const_arr[i]);
+        }
+    } else {
+        const_arr = malloc(sizeof(Value));
+        num_constants = 0;
+    }
+
+    /* Pass 1: collect labels and compute PCs */
+    #define MAX_ASM_LABELS 256
+    struct { const char* name; size_t pc; } labels[MAX_ASM_LABELS];
+    int n_labels = 0;
+    size_t total_size = 0;
+
+    for (size_t i = 0; i < n_instrs; i++) {
+        Value instr = vector_get(code_val, i);
+        if (!is_pointer(instr) || object_type(instr) != TYPE_VECTOR || vector_length(instr) < 1) {
+            vm_error(vm, "asm: each instruction must be a non-empty vector");
+            free(const_arr);
+            return VALUE_NIL;
+        }
+        Value op_kw = vector_get(instr, 0);
+        if (!is_pointer(op_kw) || object_type(op_kw) != TYPE_KEYWORD) {
+            vm_error(vm, "asm: instruction opcode must be a keyword");
+            free(const_arr);
+            return VALUE_NIL;
+        }
+        const char* op_name = keyword_name(op_kw);
+
+        if (strcmp(op_name, "LABEL") == 0) {
+            if (vector_length(instr) < 2) {
+                vm_error(vm, "asm: :LABEL requires a label name");
+                free(const_arr);
+                return VALUE_NIL;
+            }
+            Value label_kw = vector_get(instr, 1);
+            if (!is_pointer(label_kw) || object_type(label_kw) != TYPE_KEYWORD) {
+                vm_error(vm, "asm: label name must be a keyword");
+                free(const_arr);
+                return VALUE_NIL;
+            }
+            if (n_labels >= MAX_ASM_LABELS) {
+                vm_error(vm, "asm: too many labels");
+                free(const_arr);
+                return VALUE_NIL;
+            }
+            labels[n_labels].name = keyword_name(label_kw);
+            labels[n_labels].pc = total_size;
+            n_labels++;
+            continue;
+        }
+
+        const OpcodeInfo* info = opcode_info_by_name(op_name);
+        if (!info) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "asm: unknown opcode :%s", op_name);
+            vm_error(vm, buf);
+            free(const_arr);
+            return VALUE_NIL;
+        }
+        total_size += (size_t)info->total_size;
+    }
+
+    /* Extract parallel arrays for resolve_label helper */
+    const char* label_names_arr[MAX_ASM_LABELS];
+    size_t label_pcs_arr[MAX_ASM_LABELS];
+    for (int li = 0; li < n_labels; li++) {
+        label_names_arr[li] = labels[li].name;
+        label_pcs_arr[li] = labels[li].pc;
+    }
+
+    /* Pass 2: emit bytecode */
+    uint8_t* bytecode = malloc(total_size);
+    size_t pc = 0;
+    uint16_t n_locals = 0;
+
+    for (size_t i = 0; i < n_instrs; i++) {
+        Value instr = vector_get(code_val, i);
+        Value op_kw = vector_get(instr, 0);
+        const char* op_name = keyword_name(op_kw);
+
+        if (strcmp(op_name, "LABEL") == 0) continue;
+
+        const OpcodeInfo* info = opcode_info_by_name(op_name);
+        bytecode[pc] = info->opcode;
+
+        if (info->opcode == OP_ENTER && vector_length(instr) >= 2) {
+            n_locals = (uint16_t)untag_fixnum(vector_get(instr, 1));
+        }
+
+        if (info->opcode == OP_JUMP || info->opcode == OP_JUMP_IF_FALSE) {
+            /* Operand: label keyword → resolve to relative offset */
+            if (vector_length(instr) < 2) {
+                vm_error(vm, "asm: jump instruction requires a label operand");
+                free(bytecode); free(const_arr);
+                return VALUE_NIL;
+            }
+            Value operand = vector_get(instr, 1);
+            int32_t offset;
+            if (is_pointer(operand) && object_type(operand) == TYPE_KEYWORD) {
+                size_t target_pc;
+                if (!resolve_label(keyword_name(operand), label_names_arr, label_pcs_arr, n_labels, &target_pc)) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "asm: undefined label :%s", keyword_name(operand));
+                    vm_error(vm, buf);
+                    free(bytecode); free(const_arr);
+                    return VALUE_NIL;
+                }
+                offset = (int32_t)((int64_t)target_pc - (int64_t)(pc + 5));
+            } else {
+                offset = (int32_t)untag_fixnum(operand);
+            }
+            for (int b = 0; b < 4; b++)
+                bytecode[pc + 1 + b] = (uint8_t)((offset >> (b * 8)) & 0xFF);
+        } else if (info->opcode == OP_PUSH_HANDLER) {
+            /* Operand: label keyword → resolve to absolute PC */
+            if (vector_length(instr) < 2) {
+                vm_error(vm, "asm: PUSH_HANDLER requires a label operand");
+                free(bytecode); free(const_arr);
+                return VALUE_NIL;
+            }
+            Value operand = vector_get(instr, 1);
+            uint32_t target;
+            if (is_pointer(operand) && object_type(operand) == TYPE_KEYWORD) {
+                size_t target_pc;
+                if (!resolve_label(keyword_name(operand), label_names_arr, label_pcs_arr, n_labels, &target_pc)) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "asm: undefined label :%s", keyword_name(operand));
+                    vm_error(vm, buf);
+                    free(bytecode); free(const_arr);
+                    return VALUE_NIL;
+                }
+                target = (uint32_t)target_pc;
+            } else {
+                target = (uint32_t)untag_fixnum(operand);
+            }
+            for (int b = 0; b < 4; b++)
+                bytecode[pc + 1 + b] = (uint8_t)((target >> (b * 8)) & 0xFF);
+        } else if (info->opcode == OP_MAKE_CLOSURE) {
+            /* 5 operands: code_offset(u32) n_locals(u16) n_closed(u16) arity(u16) name_idx(u16) */
+            if (vector_length(instr) < 6) {
+                vm_error(vm, "asm: MAKE_CLOSURE requires 5 operands");
+                free(bytecode); free(const_arr);
+                return VALUE_NIL;
+            }
+            uint32_t co = (uint32_t)untag_fixnum(vector_get(instr, 1));
+            uint16_t nl = (uint16_t)untag_fixnum(vector_get(instr, 2));
+            uint16_t nc = (uint16_t)untag_fixnum(vector_get(instr, 3));
+            uint16_t ar = (uint16_t)(int16_t)untag_fixnum(vector_get(instr, 4));
+            uint16_t ni = (uint16_t)untag_fixnum(vector_get(instr, 5));
+            for (int b = 0; b < 4; b++) bytecode[pc+1+b] = (uint8_t)((co >> (b*8)) & 0xFF);
+            for (int b = 0; b < 2; b++) bytecode[pc+5+b] = (uint8_t)((nl >> (b*8)) & 0xFF);
+            for (int b = 0; b < 2; b++) bytecode[pc+7+b] = (uint8_t)((nc >> (b*8)) & 0xFF);
+            for (int b = 0; b < 2; b++) bytecode[pc+9+b] = (uint8_t)((ar >> (b*8)) & 0xFF);
+            for (int b = 0; b < 2; b++) bytecode[pc+11+b] = (uint8_t)((ni >> (b*8)) & 0xFF);
+        } else if (info->opcode == OP_PUSH_INT) {
+            if (vector_length(instr) < 2) {
+                vm_error(vm, "asm: PUSH_INT requires an operand");
+                free(bytecode); free(const_arr);
+                return VALUE_NIL;
+            }
+            int64_t val = untag_fixnum(vector_get(instr, 1));
+            for (int b = 0; b < 8; b++)
+                bytecode[pc + 1 + b] = (uint8_t)((val >> (b * 8)) & 0xFF);
+        } else if (info->total_size == 3) {
+            /* uint16 operand */
+            if (vector_length(instr) < 2) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "asm: :%s requires an operand", op_name);
+                vm_error(vm, buf);
+                free(bytecode); free(const_arr);
+                return VALUE_NIL;
+            }
+            uint16_t operand = (uint16_t)untag_fixnum(vector_get(instr, 1));
+            bytecode[pc + 1] = (uint8_t)(operand & 0xFF);
+            bytecode[pc + 2] = (uint8_t)((operand >> 8) & 0xFF);
+        } else if (info->total_size == 5) {
+            /* uint32 operand (PUSH_CONST) */
+            if (vector_length(instr) < 2) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "asm: :%s requires an operand", op_name);
+                vm_error(vm, buf);
+                free(bytecode); free(const_arr);
+                return VALUE_NIL;
+            }
+            uint32_t operand = (uint32_t)untag_fixnum(vector_get(instr, 1));
+            for (int b = 0; b < 4; b++)
+                bytecode[pc + 1 + b] = (uint8_t)((operand >> (b * 8)) & 0xFF);
+        }
+
+        pc += (size_t)info->total_size;
+    }
+
+
+    /* Create function object */
+    Value fn = function_new(arity, 0, n_locals, "asm-fn");
+
+    /* Set execution context — must keep bytecode+constants alive */
+    function_set_code(fn, bytecode, (int)total_size, const_arr, num_constants);
+
+    /* Set namespace */
+    Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
+    if (cur_ns) function_set_ns_name(fn, cur_ns->name);
+
+    /* Keep bytecode+constants alive for program lifetime */
+    if (n_asm_units < MAX_ASM_UNITS) {
+        asm_bytecodes[n_asm_units] = bytecode;
+        asm_constants[n_asm_units] = const_arr;
+        n_asm_units++;
+    }
+
+    return fn;
+}
+
 /* subs: (subs s start) or (subs s start end) => substring by char index */
 static Value native_subs(VM* vm, int argc, Value* argv) {
     if (argc < 2 || argc > 3) {
@@ -2018,6 +2572,8 @@ void core_register_utility(void) {
     register_native(core_ns, "pr-str", native_pr_str);
     register_native(core_ns, "prn", native_prn);
     register_native(core_ns, "read-string", native_read_string);
+    register_native(core_ns, "disasm", native_disasm);
+    register_native(core_ns, "asm", native_asm);
     register_native(core_ns, "subs", native_subs);
     register_native(core_ns, "str/upper-case", native_str_upper);
     register_native(core_ns, "str/lower-case", native_str_lower);
@@ -2174,6 +2730,42 @@ static Value native_read_line(VM* vm, int argc, Value* argv) {
     if (!is_stream(s)) {
         vm_error(vm, "read-line: argument must be a stream");
         return VALUE_NIL;
+    }
+
+    /* Non-blocking path when running inside a scheduled task */
+    Stream* st = (Stream*)untag_pointer(s);
+    if (st->nonblocking && vm->scheduler && vm->scheduler->current) {
+        bool would_block = false;
+        Value result = stream_read_line_nb(s, &would_block);
+        if (would_block) {
+            Task* task = vm->scheduler->current;
+            /* Guard: another task is already blocked on this stream */
+            if (st->blocked_task && st->blocked_task != task) {
+                vm_error(vm, "read-line: stream is already in use by another task");
+                return VALUE_NIL;
+            }
+            /* Register fd with reactor, block task */
+            st->blocked_task = task;
+            io_reactor_register(vm->scheduler->io_reactor,
+                                st->fd, true, false, task);
+            scheduler_block_io(vm->scheduler, task);
+            vm->native_blocked = true;
+            vm->yielded = true;
+            return VALUE_NIL;  /* ignored — CALL will rewind */
+        }
+        /* Clear blocked_task on successful read (retry succeeded) */
+        st->blocked_task = NULL;
+        return result;
+    }
+
+    /* Blocking fallback (standalone VM or stdio) */
+    if (st->nonblocking) {
+        /* Temporarily clear O_NONBLOCK for blocking read */
+        int fl = fcntl(st->fd, F_GETFL);
+        fcntl(st->fd, F_SETFL, fl & ~O_NONBLOCK);
+        Value result = stream_read_line(s);
+        fcntl(st->fd, F_SETFL, fl);
+        return result;
     }
     return stream_read_line(s);
 }

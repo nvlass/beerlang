@@ -47,12 +47,15 @@ Value stream_from_fd(int fd, bool readable, bool writable, bool owns_fd, StreamK
     s->writable = writable;
     s->closed = false;
     s->owns_fd = owns_fd;
+    s->nonblocking = false;
     s->read_buf = readable ? malloc(STREAM_BUF_SIZE) : NULL;
     s->read_pos = 0;
     s->read_len = 0;
     s->write_buf = writable ? malloc(STREAM_BUF_SIZE) : NULL;
     s->write_len = 0;
+    s->write_flush_pos = 0;
     s->line_buffered = (kind == STREAM_STDOUT || kind == STREAM_STDERR);
+    s->blocked_task = NULL;
     return v;
 }
 
@@ -76,7 +79,16 @@ Value stream_open(const char* path, const char* mode) {
     int fd = open(path, flags, 0644);
     if (fd < 0) return VALUE_NIL;
 
-    return stream_from_fd(fd, readable, writable, true, STREAM_FILE);
+    /* Set non-blocking for file fds (scheduler can retry on EAGAIN) */
+    int fl = fcntl(fd, F_GETFL);
+    if (fl >= 0) {
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    }
+
+    Value v = stream_from_fd(fd, readable, writable, true, STREAM_FILE);
+    Stream* s = (Stream*)untag_pointer(v);
+    s->nonblocking = true;
+    return v;
 }
 
 int stream_close(Value stream) {
@@ -96,12 +108,15 @@ int stream_close(Value stream) {
     return ret;
 }
 
-/* Refill read buffer from fd. Returns bytes read, 0 on EOF, -1 on error. */
+/* Refill read buffer from fd.
+ * Returns bytes read, 0 on EOF, -1 on error, STREAM_WOULDBLOCK on EAGAIN. */
 static ssize_t stream_refill(Stream* s) {
     s->read_pos = 0;
     ssize_t n = read(s->fd, s->read_buf, STREAM_BUF_SIZE);
     if (n < 0) {
         s->read_len = 0;
+        if (s->nonblocking && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return STREAM_WOULDBLOCK;
         return -1;
     }
     s->read_len = (size_t)n;
@@ -152,6 +167,48 @@ done:
     return result;
 }
 
+Value stream_read_line_nb(Value stream, bool* would_block) {
+    *would_block = false;
+    Stream* s = (Stream*)untag_pointer(stream);
+    if (s->closed || !s->readable) return VALUE_NIL;
+
+    size_t cap = 128;
+    char* buf = malloc(cap);
+    size_t len = 0;
+
+    for (;;) {
+        if (s->read_pos >= s->read_len) {
+            ssize_t n = stream_refill(s);
+            if (n == STREAM_WOULDBLOCK) {
+                if (len == 0) {
+                    /* No data accumulated — signal would-block */
+                    free(buf);
+                    *would_block = true;
+                    return VALUE_NIL;
+                }
+                break;  /* Return partial line */
+            }
+            if (n <= 0) {
+                if (len == 0) { free(buf); return VALUE_NIL; }
+                break;
+            }
+        }
+
+        while (s->read_pos < s->read_len) {
+            uint8_t c = s->read_buf[s->read_pos++];
+            if (c == '\n') goto done;
+            if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+            buf[len++] = (char)c;
+        }
+    }
+
+done:
+    buf[len] = '\0';
+    Value result = string_from_buffer(buf, len);
+    free(buf);
+    return result;
+}
+
 int stream_write_string(Value stream, const char* str, size_t len) {
     Stream* s = (Stream*)untag_pointer(stream);
     if (s->closed || !s->writable) return -1;
@@ -185,6 +242,26 @@ int stream_flush(Value stream) {
     }
     s->write_len = 0;
     return 0;
+}
+
+int stream_flush_nb(Value stream) {
+    Stream* s = (Stream*)untag_pointer(stream);
+    if (s->closed || !s->writable || s->write_len == 0) return STREAM_OK;
+
+    while (s->write_flush_pos < s->write_len) {
+        ssize_t n = write(s->fd, s->write_buf + s->write_flush_pos,
+                          s->write_len - s->write_flush_pos);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (s->nonblocking && (errno == EAGAIN || errno == EWOULDBLOCK))
+                return STREAM_WOULDBLOCK;
+            return STREAM_ERROR;
+        }
+        s->write_flush_pos += (size_t)n;
+    }
+    s->write_len = 0;
+    s->write_flush_pos = 0;
+    return STREAM_OK;
 }
 
 Value stream_slurp(const char* path) {

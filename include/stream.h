@@ -19,6 +19,12 @@ typedef enum {
     STREAM_STDERR,
 } StreamKind;
 
+/* Stream operation result codes */
+#define STREAM_OK         0
+#define STREAM_EOF       -1
+#define STREAM_ERROR     -2
+#define STREAM_WOULDBLOCK -3
+
 #define STREAM_BUF_SIZE 8192
 
 typedef struct {
@@ -29,6 +35,7 @@ typedef struct {
     bool writable;
     bool closed;
     bool owns_fd;          /* false for stdin/stdout/stderr */
+    bool nonblocking;      /* O_NONBLOCK set on fd */
     /* Read buffer */
     uint8_t* read_buf;
     size_t read_pos;
@@ -36,7 +43,10 @@ typedef struct {
     /* Write buffer */
     uint8_t* write_buf;
     size_t write_len;
+    size_t write_flush_pos; /* partial flush progress */
     bool line_buffered;    /* flush on newline (stdout/stderr) */
+    /* I/O reactor blocking — track which task is waiting on this stream */
+    struct Task* blocked_task; /* non-NULL if a task is blocked on I/O */
 } Stream;
 
 /* Type check */
@@ -56,11 +66,18 @@ int stream_close(Value stream);
 /* Read a line (up to newline or EOF). Returns string Value or nil at EOF. */
 Value stream_read_line(Value stream);
 
+/* Non-blocking read-line. Sets *would_block = true if EAGAIN encountered
+ * with no data accumulated yet. Returns VALUE_NIL when would-block. */
+Value stream_read_line_nb(Value stream, bool* would_block);
+
 /* Write a string to the stream (buffered). */
 int stream_write_string(Value stream, const char* s, size_t len);
 
-/* Flush the write buffer. */
+/* Flush the write buffer. Returns 0 on success, -1 on error. */
 int stream_flush(Value stream);
+
+/* Non-blocking flush. Returns STREAM_OK, STREAM_ERROR, or STREAM_WOULDBLOCK. */
+int stream_flush_nb(Value stream);
 
 /* Read entire file into a string. */
 Value stream_slurp(const char* path);

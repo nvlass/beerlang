@@ -2,7 +2,9 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 #include "scheduler.h"
+#include "io_reactor.h"
 #include "task.h"
 #include "vm.h"
 #include "memory.h"
@@ -20,6 +22,8 @@ Scheduler* scheduler_new(int quota) {
     sched->ready_head.prev = NULL;
     sched->ready_count = 0;
     sched->current = NULL;
+    sched->io_reactor = io_reactor_new();
+    sched->blocked_count = 0;
     sched->quota = quota > 0 ? quota : DEFAULT_TASK_QUOTA;
 
     return sched;
@@ -28,6 +32,7 @@ Scheduler* scheduler_new(int quota) {
 /* Free scheduler */
 void scheduler_free(Scheduler* sched) {
     if (!sched) return;
+    if (sched->io_reactor) io_reactor_free(sched->io_reactor);
     free(sched);
 }
 
@@ -84,6 +89,19 @@ void scheduler_wake(Scheduler* sched, Task* task) {
     scheduler_enqueue(sched, task);
 }
 
+/* Block a task on I/O (tracked separately for scheduler loop) */
+void scheduler_block_io(Scheduler* sched, Task* task) {
+    task->state = TASK_BLOCKED;
+    sched->blocked_count++;
+}
+
+/* Wake an I/O-blocked task */
+void scheduler_wake_io(Scheduler* sched, Task* task) {
+    if (task->state != TASK_BLOCKED) return;
+    sched->blocked_count--;
+    scheduler_enqueue(sched, task);
+}
+
 /* Spawn a new task */
 Value scheduler_spawn(Scheduler* sched, Value fn, int argc, Value* argv) {
     Value task_val = task_new(fn, argc, argv, sched);
@@ -97,8 +115,20 @@ bool scheduler_has_ready(Scheduler* sched) {
     return sched->ready_count > 0;
 }
 
+/* Drain I/O reactor completions, waking blocked tasks */
+static void scheduler_drain_io(Scheduler* sched) {
+    if (!sched->io_reactor) return;
+    Task* woken[32];
+    int n = io_reactor_drain(sched->io_reactor, woken, 32);
+    for (int i = 0; i < n; i++) {
+        scheduler_wake_io(sched, woken[i]);
+    }
+}
+
 /* Run one task for one quantum */
 bool scheduler_run_one_tick(Scheduler* sched) {
+    scheduler_drain_io(sched);
+
     Task* task = scheduler_dequeue(sched);
     if (!task) return false;
 
@@ -120,10 +150,24 @@ bool scheduler_run_one_tick(Scheduler* sched) {
     return true;
 }
 
-/* Run all tasks until ready queue is empty */
+/* Run all tasks until ready queue and blocked queue are empty */
 void scheduler_run_until_done(Scheduler* sched) {
     int iterations = 0;
-    while (scheduler_has_ready(sched)) {
+    while (scheduler_has_ready(sched) || sched->blocked_count > 0) {
+        if (!scheduler_has_ready(sched) && sched->blocked_count > 0) {
+            /* Only blocked tasks remain — drain I/O and brief sleep */
+            scheduler_drain_io(sched);
+            if (!scheduler_has_ready(sched)) {
+                usleep(1000);  /* 1ms to avoid busy-spin */
+            }
+            iterations++;
+            if (iterations > 1000000) {
+                fprintf(stderr, "scheduler: iteration limit reached, blocked=%d\n",
+                        sched->blocked_count);
+                break;
+            }
+            continue;
+        }
         scheduler_run_one_tick(sched);
         iterations++;
         if (iterations > 1000000) {

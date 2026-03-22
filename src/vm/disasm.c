@@ -209,3 +209,82 @@ void disassemble_code_to_file(FILE* fp, const uint8_t* code, size_t code_size, c
 void disassemble_code(const uint8_t* code, size_t code_size, const char* name) {
     disassemble_code_to_file(stdout, code, code_size, name);
 }
+
+/* =================================================================
+ * Opcode info table for asm/disasm
+ * ================================================================= */
+
+#include <string.h>
+
+static const OpcodeInfo opcode_table[] = {
+    /* Stack operations */
+    { OP_NOP,            "NOP",            1 },
+    { OP_POP,            "POP",            1 },
+    { OP_DUP,            "DUP",            1 },
+    { OP_SWAP,           "SWAP",           1 },
+    { OP_OVER,           "OVER",           1 },
+    /* Constants & literals */
+    { OP_PUSH_NIL,       "PUSH_NIL",       1 },
+    { OP_PUSH_TRUE,      "PUSH_TRUE",      1 },
+    { OP_PUSH_FALSE,     "PUSH_FALSE",     1 },
+    { OP_PUSH_CONST,     "PUSH_CONST",     5 },
+    { OP_PUSH_INT,       "PUSH_INT",       9 },
+    /* Variables & scope */
+    { OP_LOAD_VAR,       "LOAD_VAR",       3 },
+    { OP_STORE_VAR,      "STORE_VAR",      3 },
+    { OP_LOAD_LOCAL,     "LOAD_LOCAL",     3 },
+    { OP_STORE_LOCAL,    "STORE_LOCAL",    3 },
+    { OP_LOAD_CLOSURE,   "LOAD_CLOSURE",   3 },
+    { OP_LOAD_SELF,      "LOAD_SELF",      1 },
+    /* Arithmetic */
+    { OP_ADD,            "ADD",            1 },
+    { OP_SUB,            "SUB",            1 },
+    { OP_MUL,            "MUL",            1 },
+    { OP_DIV,            "DIV",            1 },
+    { OP_NEG,            "NEG",            1 },
+    { OP_INC,            "INC",            1 },
+    { OP_DEC,            "DEC",            1 },
+    /* Comparison */
+    { OP_EQ,             "EQ",             1 },
+    { OP_LT,             "LT",             1 },
+    { OP_GT,             "GT",             1 },
+    /* Control flow */
+    { OP_JUMP,           "JUMP",           5 },
+    { OP_JUMP_IF_FALSE,  "JUMP_IF_FALSE",  5 },
+    { OP_CALL,           "CALL",           3 },
+    { OP_TAIL_CALL,      "TAIL_CALL",      3 },
+    { OP_RETURN,         "RETURN",         1 },
+    { OP_ENTER,          "ENTER",          3 },
+    { OP_HALT,           "HALT",           1 },
+    /* Exception handling */
+    { OP_PUSH_HANDLER,   "PUSH_HANDLER",   5 },
+    { OP_POP_HANDLER,    "POP_HANDLER",    1 },
+    { OP_THROW,          "THROW",          1 },
+    { OP_LOAD_EXCEPTION, "LOAD_EXCEPTION", 1 },
+    /* Closures */
+    { OP_MAKE_CLOSURE,   "MAKE_CLOSURE",   13 },
+    /* Concurrency */
+    { OP_YIELD,          "YIELD",          1 },
+    { OP_SPAWN,          "SPAWN",          3 },
+    { OP_AWAIT,          "AWAIT",          1 },
+    { OP_CHAN_SEND,      "CHAN_SEND",      1 },
+    { OP_CHAN_RECV,      "CHAN_RECV",      1 },
+};
+
+#define OPCODE_TABLE_SIZE (sizeof(opcode_table) / sizeof(opcode_table[0]))
+
+const OpcodeInfo* opcode_info_by_name(const char* name) {
+    for (size_t i = 0; i < OPCODE_TABLE_SIZE; i++) {
+        if (strcmp(opcode_table[i].name, name) == 0)
+            return &opcode_table[i];
+    }
+    return NULL;
+}
+
+const OpcodeInfo* opcode_info_by_value(uint8_t op) {
+    for (size_t i = 0; i < OPCODE_TABLE_SIZE; i++) {
+        if (opcode_table[i].opcode == op)
+            return &opcode_table[i];
+    }
+    return NULL;
+}

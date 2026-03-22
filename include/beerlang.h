@@ -43,5 +43,7 @@ typedef struct VM VM;
 #include "task.h"
 #include "channel.h"
 #include "scheduler.h"
+#include "reactor.h"
+#include "io_reactor.h"
 
 #endif /* BEERLANG_H */

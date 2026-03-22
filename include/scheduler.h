@@ -10,6 +10,9 @@
 #include "value.h"
 #include "task.h"
 
+/* Forward declarations */
+typedef struct IOReactor IOReactor;
+
 /* Default instruction quota per task quantum */
 #define DEFAULT_TASK_QUOTA 1000
 
@@ -21,6 +24,10 @@ typedef struct Scheduler {
 
     /* Currently running task */
     Task* current;
+
+    /* I/O reactor (async fd monitoring) */
+    IOReactor* io_reactor;
+    int blocked_count;      /* Tasks blocked on I/O */
 
     /* Configuration */
     int quota;          /* Instructions per quantum */
@@ -48,6 +55,8 @@ bool scheduler_has_ready(Scheduler* sched);
 void scheduler_enqueue(Scheduler* sched, Task* task);
 void scheduler_block(Scheduler* sched, Task* task);
 void scheduler_wake(Scheduler* sched, Task* task);
+void scheduler_block_io(Scheduler* sched, Task* task);
+void scheduler_wake_io(Scheduler* sched, Task* task);
 
 /* Global scheduler instance */
 extern Scheduler* global_scheduler;

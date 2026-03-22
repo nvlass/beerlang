@@ -122,6 +122,7 @@ typedef struct VM {
     /* Cooperative multitasking */
     int yield_countdown;        /* Instructions until auto-yield (0 = disabled) */
     bool yielded;               /* Set by OP_YIELD or countdown expiry */
+    bool native_blocked;        /* Set by native fn that needs I/O retry */
     struct Scheduler* scheduler; /* Back-pointer (NULL for standalone VMs) */
 
     /* State */
