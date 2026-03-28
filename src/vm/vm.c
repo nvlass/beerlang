@@ -1605,6 +1605,15 @@ void vm_step(VM* vm) {
             function_set_code(closure, vm->code, vm->code_size,
                               vm->constants, vm->num_constants);
 
+            /* Inherit ns_name from enclosing function (if any) */
+            if (vm->frame_count > 0) {
+                Value enc_fn = vm->frames[vm->frame_count - 1].function;
+                if (is_function(enc_fn)) {
+                    const char* enc_ns = function_ns_name(enc_fn);
+                    if (enc_ns) function_set_ns_name(closure, enc_ns);
+                }
+            }
+
             vm_push(vm, closure);
             break;
         }
@@ -1758,18 +1767,6 @@ void vm_step(VM* vm) {
             Task* target = task_get(task_val);
             if (target->state == TASK_DONE) {
                 /* Task already done — extract result before popping task */
-                Value result = target->result;
-                if (is_pointer(result)) object_retain(result);
-                vm_pop(vm);
-                vm_push(vm, result);
-                if (is_pointer(result)) object_release(result);
-            } else if (vm->scheduler && !vm->scheduler->current) {
-                /* Called from REPL (not inside a task) — run scheduler
-                 * until target completes */
-                while (target->state != TASK_DONE &&
-                       scheduler_has_ready(vm->scheduler)) {
-                    scheduler_run_one_tick(vm->scheduler);
-                }
                 Value result = target->result;
                 if (is_pointer(result)) object_retain(result);
                 vm_pop(vm);

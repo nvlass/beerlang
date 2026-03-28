@@ -150,6 +150,25 @@ bool scheduler_run_one_tick(Scheduler* sched) {
     return true;
 }
 
+/* Run a specific task to completion, also running other ready tasks */
+void scheduler_run_task_to_completion(Scheduler* sched, Task* target) {
+    Task* saved_current = sched->current;
+    scheduler_enqueue(sched, target);
+    int iters = 0;
+    while (target->state != TASK_DONE && iters < 1000000) {
+        bool ran = scheduler_run_one_tick(sched);
+        if (!ran) {
+            if (sched->blocked_count > 0) {
+                usleep(1000);
+            } else {
+                break;
+            }
+        }
+        iters++;
+    }
+    sched->current = saved_current;
+}
+
 /* Run all tasks until ready queue and blocked queue are empty */
 void scheduler_run_until_done(Scheduler* sched) {
     int iterations = 0;

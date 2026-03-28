@@ -435,3 +435,35 @@
                  '())))]
     (cons 'do (cons in-ns-form require-forms))))
 
+;; ============================================================
+;; Multimethods
+;; ============================================================
+
+(defmacro defmulti [name dispatch-fn]
+  (let* [methods-sym (symbol (str name "-__methods"))
+         dispatch-sym (symbol (str name "-__dispatch"))
+         dv-sym (gensym "dv")
+         m-sym (gensym "m")
+         bindings (vector dv-sym (list 'apply dispatch-sym 'args)
+                          m-sym (list 'get methods-sym dv-sym
+                                      (list 'get methods-sym :default)))
+         err-expr (list 'throw
+                    (list 'ex-info
+                      (list 'str "No method in " (str name)
+                            " for dispatch value: " dv-sym)
+                      {:name (str name) :dispatch-value dv-sym}))]
+    (list 'do
+      (list 'def methods-sym {})
+      (list 'def dispatch-sym dispatch-fn)
+      (list 'defn name ['& 'args]
+        (list 'let* bindings
+          (list 'if m-sym
+            (list 'apply m-sym 'args)
+            err-expr))))))
+
+(defmacro defmethod [name dispatch-val params & body]
+  (let* [methods-sym (symbol (str name "-__methods"))]
+    (list 'def methods-sym
+      (list 'assoc methods-sym dispatch-val
+        (cons 'fn (cons params body))))))
+

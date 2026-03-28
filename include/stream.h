@@ -17,6 +17,7 @@ typedef enum {
     STREAM_STDIN,
     STREAM_STDOUT,
     STREAM_STDERR,
+    STREAM_SOCKET,
 } StreamKind;
 
 /* Stream operation result codes */
@@ -70,6 +71,13 @@ Value stream_read_line(Value stream);
  * with no data accumulated yet. Returns VALUE_NIL when would-block. */
 Value stream_read_line_nb(Value stream, bool* would_block);
 
+/* Read up to n bytes. Returns string Value (may be shorter than n at EOF). */
+Value stream_read_bytes(Value stream, size_t n);
+
+/* Non-blocking read up to n bytes. Sets *would_block = true on EAGAIN with
+ * no data accumulated. */
+Value stream_read_bytes_nb(Value stream, size_t n, bool* would_block);
+
 /* Write a string to the stream (buffered). */
 int stream_write_string(Value stream, const char* s, size_t len);
 
@@ -90,6 +98,9 @@ void stream_init_standard(void);
 
 /* Get the global stdout stream (for print/println/prn). */
 Value stream_get_stdout(void);
+
+/* Set O_NONBLOCK on a stream's fd. */
+void stream_set_nonblocking(Value stream);
 
 /* Initialize stream type (register destructor). */
 void stream_init(void);

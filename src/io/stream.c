@@ -209,6 +209,69 @@ done:
     return result;
 }
 
+Value stream_read_bytes(Value stream, size_t n) {
+    Stream* s = (Stream*)untag_pointer(stream);
+    if (s->closed || !s->readable || n == 0) return string_from_cstr("");
+
+    char* buf = malloc(n);
+    size_t total = 0;
+
+    while (total < n) {
+        /* Drain from read buffer first */
+        if (s->read_pos < s->read_len) {
+            size_t avail = s->read_len - s->read_pos;
+            size_t want = n - total;
+            size_t take = avail < want ? avail : want;
+            memcpy(buf + total, s->read_buf + s->read_pos, take);
+            s->read_pos += take;
+            total += take;
+            continue;
+        }
+        /* Buffer exhausted — refill */
+        ssize_t rc = stream_refill(s);
+        if (rc <= 0) break; /* EOF or error */
+    }
+
+    Value result = string_from_buffer(buf, total);
+    free(buf);
+    return total == 0 ? string_from_cstr("") : result;
+}
+
+Value stream_read_bytes_nb(Value stream, size_t n, bool* would_block) {
+    *would_block = false;
+    Stream* s = (Stream*)untag_pointer(stream);
+    if (s->closed || !s->readable || n == 0) return string_from_cstr("");
+
+    char* buf = malloc(n);
+    size_t total = 0;
+
+    while (total < n) {
+        if (s->read_pos < s->read_len) {
+            size_t avail = s->read_len - s->read_pos;
+            size_t want = n - total;
+            size_t take = avail < want ? avail : want;
+            memcpy(buf + total, s->read_buf + s->read_pos, take);
+            s->read_pos += take;
+            total += take;
+            continue;
+        }
+        ssize_t rc = stream_refill(s);
+        if (rc == STREAM_WOULDBLOCK) {
+            if (total == 0) {
+                free(buf);
+                *would_block = true;
+                return VALUE_NIL;
+            }
+            break; /* Return partial data */
+        }
+        if (rc <= 0) break;
+    }
+
+    Value result = string_from_buffer(buf, total);
+    free(buf);
+    return result;
+}
+
 int stream_write_string(Value stream, const char* str, size_t len) {
     Stream* s = (Stream*)untag_pointer(stream);
     if (s->closed || !s->writable) return -1;
@@ -315,6 +378,18 @@ int stream_spit(const char* path, const char* content, size_t len, bool append) 
     }
     close(fd);
     return 0;
+}
+
+/* Enable non-blocking I/O on a stream that was created blocking.
+ * Useful for promoting stdin or other fds to reactor-driven I/O. */
+void stream_set_nonblocking(Value stream) {
+    Stream* s = (Stream*)untag_pointer(stream);
+    if (s->nonblocking) return;
+    int fl = fcntl(s->fd, F_GETFL);
+    if (fl >= 0) {
+        fcntl(s->fd, F_SETFL, fl | O_NONBLOCK);
+    }
+    s->nonblocking = true;
 }
 
 /* Standard streams — global Values so print/println can find them */

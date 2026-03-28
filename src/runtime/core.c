@@ -36,6 +36,7 @@
 /* Forward declarations */
 Value native_load(VM* vm, int argc, Value* argv);
 static Value load_from_buffer(VM* caller_vm, const char* source, const char* name);
+static Value native_eval(VM* vm, int argc, Value* argv);
 static Value native_macroexpand_1(VM* vm, int argc, Value* argv);
 static Value native_macroexpand(VM* vm, int argc, Value* argv);
 static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len);
@@ -1223,6 +1224,43 @@ static Value native_symbol(VM* vm, int argc, Value* argv) {
     Value s = symbol_intern(name);
     if (is_pointer(s)) object_retain(s);
     return s;
+}
+
+/* name: (name x) => string name of symbol or keyword */
+static Value native_name(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "name: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    Value x = argv[0];
+    if (is_string(x)) return x;  /* strings return themselves */
+    if (is_pointer(x)) {
+        uint8_t t = object_type(x);
+        if (t == TYPE_SYMBOL)
+            return string_from_cstr(symbol_name(x));
+        if (t == TYPE_KEYWORD)
+            return string_from_cstr(keyword_name(x));
+    }
+    vm_error(vm, "name: argument must be a symbol, keyword, or string");
+    return VALUE_NIL;
+}
+
+/* keyword: (keyword s) => keyword from string */
+static Value native_keyword(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "keyword: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    Value x = argv[0];
+    if (is_pointer(x) && object_type(x) == TYPE_KEYWORD) return x;
+    if (is_pointer(x) && object_type(x) == TYPE_SYMBOL) {
+        return keyword_intern(symbol_name(x));
+    }
+    if (is_string(x)) {
+        return keyword_intern(string_cstr(x));
+    }
+    vm_error(vm, "keyword: argument must be a string, symbol, or keyword");
+    return VALUE_NIL;
 }
 
 /* gensym: (gensym) or (gensym prefix) => unique symbol */
@@ -2559,6 +2597,8 @@ void core_register_utility(void) {
     register_native(core_ns, "not", native_not);
     register_native(core_ns, "str", native_str);
     register_native(core_ns, "symbol", native_symbol);
+    register_native(core_ns, "keyword", native_keyword);
+    register_native(core_ns, "name", native_name);
     register_native(core_ns, "gensym", native_gensym);
     register_native(core_ns, "type", native_type);
     register_native(core_ns, "float", native_float);
@@ -2568,6 +2608,7 @@ void core_register_utility(void) {
     register_native(core_ns, "macroexpand-1", native_macroexpand_1);
     register_native(core_ns, "macroexpand", native_macroexpand);
     register_native(core_ns, "in-ns", native_in_ns);
+    register_native(core_ns, "eval", native_eval);
     register_native(core_ns, "load", native_load);
     register_native(core_ns, "pr-str", native_pr_str);
     register_native(core_ns, "prn", native_prn);
@@ -2732,42 +2773,79 @@ static Value native_read_line(VM* vm, int argc, Value* argv) {
         return VALUE_NIL;
     }
 
-    /* Non-blocking path when running inside a scheduled task */
+    /* Non-blocking path for streams with O_NONBLOCK set */
     Stream* st = (Stream*)untag_pointer(s);
     if (st->nonblocking && vm->scheduler && vm->scheduler->current) {
         bool would_block = false;
         Value result = stream_read_line_nb(s, &would_block);
         if (would_block) {
             Task* task = vm->scheduler->current;
-            /* Guard: another task is already blocked on this stream */
             if (st->blocked_task && st->blocked_task != task) {
                 vm_error(vm, "read-line: stream is already in use by another task");
                 return VALUE_NIL;
             }
-            /* Register fd with reactor, block task */
             st->blocked_task = task;
             io_reactor_register(vm->scheduler->io_reactor,
                                 st->fd, true, false, task);
             scheduler_block_io(vm->scheduler, task);
             vm->native_blocked = true;
             vm->yielded = true;
-            return VALUE_NIL;  /* ignored — CALL will rewind */
+            return VALUE_NIL;
         }
-        /* Clear blocked_task on successful read (retry succeeded) */
         st->blocked_task = NULL;
         return result;
     }
 
-    /* Blocking fallback (standalone VM or stdio) */
-    if (st->nonblocking) {
-        /* Temporarily clear O_NONBLOCK for blocking read */
-        int fl = fcntl(st->fd, F_GETFL);
-        fcntl(st->fd, F_SETFL, fl & ~O_NONBLOCK);
-        Value result = stream_read_line(s);
-        fcntl(st->fd, F_SETFL, fl);
+    /* Blocking read (stdio or non-O_NONBLOCK streams) */
+    return stream_read_line(s);
+}
+
+/* read-bytes: (read-bytes stream n) — read up to n bytes, return string */
+static Value native_read_bytes(VM* vm, int argc, Value* argv) {
+    if (argc != 2) {
+        vm_error(vm, "read-bytes: requires 2 arguments (stream, n)");
+        return VALUE_NIL;
+    }
+    if (!is_stream(argv[0])) {
+        vm_error(vm, "read-bytes: first argument must be a stream");
+        return VALUE_NIL;
+    }
+    if (!is_fixnum(argv[1])) {
+        vm_error(vm, "read-bytes: second argument must be an integer");
+        return VALUE_NIL;
+    }
+    int64_t n = untag_fixnum(argv[1]);
+    if (n < 0) {
+        vm_error(vm, "read-bytes: n must be non-negative");
+        return VALUE_NIL;
+    }
+    Value s = argv[0];
+    Stream* st = (Stream*)untag_pointer(s);
+
+    /* Non-blocking path for streams with O_NONBLOCK set */
+    if (st->nonblocking && vm->scheduler && vm->scheduler->current) {
+        bool would_block = false;
+        Value result = stream_read_bytes_nb(s, (size_t)n, &would_block);
+        if (would_block) {
+            Task* task = vm->scheduler->current;
+            if (st->blocked_task && st->blocked_task != task) {
+                vm_error(vm, "read-bytes: stream is already in use by another task");
+                return VALUE_NIL;
+            }
+            st->blocked_task = task;
+            io_reactor_register(vm->scheduler->io_reactor,
+                                st->fd, true, false, task);
+            scheduler_block_io(vm->scheduler, task);
+            vm->native_blocked = true;
+            vm->yielded = true;
+            return VALUE_NIL;
+        }
+        st->blocked_task = NULL;
         return result;
     }
-    return stream_read_line(s);
+
+    /* Blocking read (stdio or non-O_NONBLOCK streams) */
+    return stream_read_bytes(s, (size_t)n);
 }
 
 /* write: (write stream s) */
@@ -2866,6 +2944,7 @@ void core_register_streams(void) {
     register_native(core_ns, "open", native_open);
     register_native(core_ns, "close", native_close);
     register_native(core_ns, "read-line", native_read_line);
+    register_native(core_ns, "read-bytes", native_read_bytes);
     register_native(core_ns, "write", native_write_stream);
     register_native(core_ns, "flush", native_flush);
     register_native(core_ns, "slurp", native_slurp);
@@ -3181,6 +3260,74 @@ static Value* load_constants[MAX_LOAD_UNITS];
 static int n_load_units = 0;
 
 /* Load and execute beerlang source from a buffer (used by tar require) */
+static Value native_eval(VM* caller_vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(caller_vm, "eval: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+
+    Value form = argv[0];
+
+    Compiler* compiler = compiler_new("<eval>");
+    CompiledCode* code = compile(compiler, form);
+
+    if (compiler_has_error(compiler)) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "eval: compile error: %s", compiler_error_msg(compiler));
+        compiled_code_free(code);
+        compiler_free(compiler);
+        vm_error(caller_vm, buf);
+        return VALUE_NIL;
+    }
+    compiler_free(compiler);
+
+    int n_constants = (int)vector_length(code->constants);
+    Value* constants = malloc((size_t)n_constants * sizeof(Value));
+    for (int j = 0; j < n_constants; j++) {
+        constants[j] = vector_get(code->constants, (size_t)j);
+    }
+
+    Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
+    const char* cur_ns_name = cur_ns ? cur_ns->name : NULL;
+    for (int j = 0; j < n_constants; j++) {
+        if (is_function(constants[j])) {
+            function_set_code(constants[j],
+                              code->bytecode, (int)code->code_size,
+                              constants, n_constants);
+            function_set_ns_name(constants[j], cur_ns_name);
+        }
+    }
+
+    Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
+                                         constants, n_constants, global_scheduler);
+    Task* task = task_get(task_val);
+    scheduler_run_task_to_completion(global_scheduler, task);
+
+    Value result = VALUE_NIL;
+    if (task->vm->error) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "eval: %s", task->vm->error_msg);
+        vm_error(caller_vm, buf);
+    } else {
+        result = task->result;
+        if (is_pointer(result)) object_retain(result);
+    }
+
+    object_release(task_val);
+
+    if (n_load_units < MAX_LOAD_UNITS) {
+        load_units[n_load_units] = code;
+        load_constants[n_load_units] = constants;
+        n_load_units++;
+    } else {
+        fprintf(stderr, "eval: warning: too many compiled units\n");
+        compiled_code_free(code);
+        free(constants);
+    }
+
+    return result;
+}
+
 static Value load_from_buffer(VM* caller_vm, const char* source, const char* name) {
     (void)caller_vm;
     Reader* reader = reader_new(source, name);
@@ -3228,15 +3375,14 @@ static Value load_from_buffer(VM* caller_vm, const char* source, const char* nam
             }
         }
 
-        VM* vm = vm_new(256);
-        vm->scheduler = global_scheduler;
-        vm_load_code(vm, code->bytecode, (int)code->code_size);
-        vm_load_constants(vm, constants, n_constants);
-        vm_run(vm);
+        Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
+                                             constants, n_constants, global_scheduler);
+        Task* task = task_get(task_val);
+        scheduler_run_task_to_completion(global_scheduler, task);
 
-        if (vm->error) {
-            fprintf(stderr, "load: runtime error in %s: %s\n", name, vm->error_msg);
-            vm_free(vm);
+        if (task->vm->error) {
+            fprintf(stderr, "load: runtime error in %s: %s\n", name, task->vm->error_msg);
+            object_release(task_val);
             compiled_code_free(code);
             free(constants);
             object_release(forms);
@@ -3244,13 +3390,10 @@ static Value load_from_buffer(VM* caller_vm, const char* source, const char* nam
         }
 
         if (is_pointer(last_result)) object_release(last_result);
-        last_result = VALUE_NIL;
-        if (!vm_stack_empty(vm)) {
-            last_result = vm->stack[vm->stack_pointer - 1];
-            if (is_pointer(last_result)) object_retain(last_result);
-        }
+        last_result = task->result;
+        if (is_pointer(last_result)) object_retain(last_result);
 
-        vm_free(vm);
+        object_release(task_val);
 
         if (n_load_units < MAX_LOAD_UNITS) {
             load_units[n_load_units] = code;
@@ -3350,31 +3493,27 @@ Value native_load(VM* caller_vm, int argc, Value* argv) {
             }
         }
 
-        /* Execute */
-        VM* vm = vm_new(256);
-        vm->scheduler = global_scheduler;
-        vm_load_code(vm, code->bytecode, (int)code->code_size);
-        vm_load_constants(vm, constants, n_constants);
-        vm_run(vm);
+        /* Execute as task */
+        Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
+                                             constants, n_constants, global_scheduler);
+        Task* task = task_get(task_val);
+        scheduler_run_task_to_completion(global_scheduler, task);
 
-        if (vm->error) {
-            fprintf(stderr, "load: runtime error in %s: %s\n", filename, vm->error_msg);
-            vm_free(vm);
+        if (task->vm->error) {
+            fprintf(stderr, "load: runtime error in %s: %s\n", filename, task->vm->error_msg);
+            object_release(task_val);
             compiled_code_free(code);
             free(constants);
             object_release(forms);
             return VALUE_NIL;
         }
 
-        /* Capture last result — retain before vm_free releases the stack */
+        /* Capture last result */
         if (is_pointer(last_result)) object_release(last_result);
-        last_result = VALUE_NIL;
-        if (!vm_stack_empty(vm)) {
-            last_result = vm->stack[vm->stack_pointer - 1];
-            if (is_pointer(last_result)) object_retain(last_result);
-        }
+        last_result = task->result;
+        if (is_pointer(last_result)) object_retain(last_result);
 
-        vm_free(vm);
+        object_release(task_val);
 
         /* Keep compiled code alive (functions reference it) */
         if (n_load_units < MAX_LOAD_UNITS) {

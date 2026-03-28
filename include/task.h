@@ -40,6 +40,12 @@ typedef struct Task {
  * Returns a tagged Value (TYPE_TASK). The task starts in READY state. */
 Value task_new(Value fn, int argc, Value* argv, Scheduler* sched);
 
+/* Create a task from pre-compiled bytecode.
+ * Clones code and constants (task owns the copies). */
+Value task_new_from_code(uint8_t* code, int code_size,
+                         Value* constants, int n_constants,
+                         Scheduler* sched);
+
 /* Run the task for one quantum. Updates state to DONE or READY. */
 void task_run(Task* task);
 

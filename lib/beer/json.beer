@@ -1,0 +1,187 @@
+(ns beer.json)
+
+;; ============================================================
+;; JSON Parser — recursive descent on strings
+;; Each parse-* fn takes (s i) and returns [value next-index]
+;; ============================================================
+
+(defn ws? [c] (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
+
+(defn skip-ws [s i]
+  (let [len (count s)]
+    (loop [j i]
+      (if (>= j len) j
+        (if (ws? (subs s j (+ j 1)))
+          (recur (+ j 1))
+          j)))))
+
+(defn char-at [s i] (subs s i (+ i 1)))
+
+(defn digit? [c]
+  (or (= c "0") (= c "1") (= c "2") (= c "3") (= c "4")
+      (= c "5") (= c "6") (= c "7") (= c "8") (= c "9")))
+
+(defn parse-string-lit [s i]
+  ;; i points at opening "
+  (let [len (count s)]
+    (loop [j (+ i 1) acc ""]
+      (if (>= j len)
+        (throw (ex-info "json: unterminated string" {}))
+        (let [c (char-at s j)]
+          (if (= c "\"")
+            [acc (+ j 1)]
+            (if (= c "\\")
+              (let [esc (char-at s (+ j 1))]
+                (cond
+                  (= esc "\"") (recur (+ j 2) (str acc "\""))
+                  (= esc "\\") (recur (+ j 2) (str acc "\\"))
+                  (= esc "/")  (recur (+ j 2) (str acc "/"))
+                  (= esc "n")  (recur (+ j 2) (str acc "\n"))
+                  (= esc "t")  (recur (+ j 2) (str acc "\t"))
+                  (= esc "r")  (recur (+ j 2) (str acc "\r"))
+                  :else (recur (+ j 2) (str acc esc))))
+              (recur (+ j 1) (str acc c)))))))))
+
+(defn parse-number [s i]
+  (let [len (count s)]
+    (loop [j i has-dot false]
+      (if (>= j len)
+        (let [numstr (subs s i j)]
+          (if has-dot
+            [(float (read-string numstr)) j]
+            [(read-string numstr) j]))
+        (let [c (char-at s j)]
+          (cond
+            (digit? c) (recur (+ j 1) has-dot)
+            (and (= c ".") (not has-dot)) (recur (+ j 1) true)
+            (and (= c "-") (= j i)) (recur (+ j 1) has-dot)
+            (and (= c "+") (= j i)) (recur (+ j 1) has-dot)
+            (or (= c "e") (= c "E"))
+              (loop [k (+ j 1)]
+                (if (>= k len)
+                  [(float (read-string (subs s i k))) k]
+                  (let [cc (char-at s k)]
+                    (if (or (digit? cc) (= cc "+") (= cc "-"))
+                      (recur (+ k 1))
+                      [(float (read-string (subs s i k))) k]))))
+            :else
+              (let [numstr (subs s i j)]
+                (if has-dot
+                  [(float (read-string numstr)) j]
+                  [(read-string numstr) j]))))))))
+
+;; Forward declaration via var for mutual recursion
+(def  parse-value nil)
+
+(defn parse-array [s i]
+  ;; i points at [
+  (let [len (count s)]
+    (loop [j (skip-ws s (+ i 1)) acc []]
+      (if (>= j len)
+        (throw (ex-info "json: unterminated array" {}))
+        (if (= (char-at s j) "]")
+          [acc (+ j 1)]
+          (let [result (parse-value s j)
+                val (first result)
+                next-j (nth result 1)
+                acc2 (conj acc val)
+                j2 (skip-ws s next-j)]
+            (if (= (char-at s j2) ",")
+              (recur (skip-ws s (+ j2 1)) acc2)
+              (if (= (char-at s j2) "]")
+                [acc2 (+ j2 1)]
+                (throw (ex-info "json: expected , or ] in array" {}))))))))))
+
+(defn parse-object [s i]
+  ;; i points at {
+  (let [len (count s)]
+    (loop [j (skip-ws s (+ i 1)) acc {}]
+      (if (>= j len)
+        (throw (ex-info "json: unterminated object" {}))
+        (if (= (char-at s j) "}")
+          [acc (+ j 1)]
+          (do
+            (when (not (= (char-at s j) "\""))
+              (throw (ex-info "json: expected string key in object" {})))
+            (let [key-result (parse-string-lit s j)
+                  key (first key-result)
+                  j2 (skip-ws s (nth key-result 1))]
+              (when (not (= (char-at s j2) ":"))
+                (throw (ex-info "json: expected : in object" {})))
+              (let [val-result (parse-value s (skip-ws s (+ j2 1)))
+                    val (first val-result)
+                    j3 (skip-ws s (nth val-result 1))
+                    acc2 (assoc acc key val)]
+                (if (= (char-at s j3) ",")
+                  (recur (skip-ws s (+ j3 1)) acc2)
+                  (if (= (char-at s j3) "}")
+                    [acc2 (+ j3 1)]
+                    (throw (ex-info "json: expected , or } in object" {}))))))))))))
+
+(defn parse-value-impl [s i]
+  (let [i2 (skip-ws s i)
+        c (char-at s i2)]
+    (cond
+      (= c "\"") (parse-string-lit s i2)
+      (= c "{")  (parse-object s i2)
+      (= c "[")  (parse-array s i2)
+      (= c "t")  (if (= (subs s i2 (+ i2 4)) "true")
+                    [true (+ i2 4)]
+                    (throw (ex-info "json: unexpected token" {})))
+      (= c "f")  (if (= (subs s i2 (+ i2 5)) "false")
+                    [false (+ i2 5)]
+                    (throw (ex-info "json: unexpected token" {})))
+      (= c "n")  (if (= (subs s i2 (+ i2 4)) "null")
+                    [nil (+ i2 4)]
+                    (throw (ex-info "json: unexpected token" {})))
+      (or (digit? c) (= c "-"))
+                  (parse-number s i2)
+      :else (throw (ex-info (str "json: unexpected char '" c "' at " i2) {})))))
+
+;; Wire up forward declaration
+(def parse-value parse-value-impl)
+
+;; ============================================================
+;; Public API — parse
+;; ============================================================
+
+(defn parse [s]
+  (first (parse-value s 0)))
+
+;; ============================================================
+;; JSON Emitter
+;; ============================================================
+
+(defn emit-string [s]
+  (let [len (count s)]
+    (loop [i 0 acc "\""]
+      (if (>= i len)
+        (str acc "\"")
+        (let [c (subs s i (+ i 1))]
+          (cond
+            (= c "\"") (recur (+ i 1) (str acc "\\\""))
+            (= c "\\") (recur (+ i 1) (str acc "\\\\"))
+            (= c "\n") (recur (+ i 1) (str acc "\\n"))
+            (= c "\r") (recur (+ i 1) (str acc "\\r"))
+            (= c "\t") (recur (+ i 1) (str acc "\\t"))
+            :else (recur (+ i 1) (str acc c))))))))
+
+(defn emit [x]
+  (cond
+    (nil? x) "null"
+    (= x true) "true"
+    (= x false) "false"
+    (string? x) (emit-string x)
+    (keyword? x) (emit-string (name x))
+    (number? x) (str x)
+    (vector? x)
+      (str "[" (str/join "," (map emit x)) "]")
+    (map? x)
+      (str "{"
+           (str/join ","
+             (map (fn [k]
+                    (str (emit-string (if (keyword? k) (name k) (str k)))
+                         ":" (emit (get x k))))
+                  (keys x)))
+           "}")
+    :else (str x)))

@@ -91,6 +91,39 @@ Value task_new(Value fn, int argc, Value* argv, Scheduler* sched) {
     return task_val;
 }
 
+/* Create a task from pre-compiled bytecode */
+Value task_new_from_code(uint8_t* code, int code_size,
+                         Value* constants, int n_constants,
+                         Scheduler* sched) {
+    Task* task = (Task*)object_alloc(TYPE_TASK, sizeof(Task));
+    Value task_val = tag_pointer(task);
+
+    task->state = TASK_READY;
+    task->result = VALUE_NIL;
+    task->next = NULL;
+    task->prev = NULL;
+    task->blocked_value = VALUE_NIL;
+
+    VM* vm = vm_new(256);
+    vm->scheduler = sched;
+    vm->yield_countdown = sched ? sched->quota : 0;
+
+    /* Clone code and constants so the task owns them */
+    uint8_t* code_copy = malloc((size_t)code_size);
+    memcpy(code_copy, code, (size_t)code_size);
+    Value* consts_copy = n_constants > 0
+        ? malloc(sizeof(Value) * (size_t)n_constants) : NULL;
+    for (int i = 0; i < n_constants; i++) {
+        consts_copy[i] = constants[i];
+    }
+
+    vm_load_code(vm, code_copy, code_size);
+    vm_load_constants(vm, consts_copy, n_constants);
+    task->vm = vm;
+
+    return task_val;
+}
+
 /* Run the task for one quantum */
 void task_run(Task* task) {
     if (task->state != TASK_READY) return;

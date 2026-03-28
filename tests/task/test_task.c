@@ -72,27 +72,25 @@ static Value eval_one(const char* source, bool* err) {
         }
     }
 
-    VM* vm = vm_new(256);
-    vm_load_code(vm, code->bytecode, (int)code->code_size);
-    vm_load_constants(vm, const_arr, n_consts);
-    vm->scheduler = global_scheduler;
-    vm_run(vm);
+    Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
+                                         const_arr, n_consts, global_scheduler);
+    Task* task = task_get(task_val);
+    scheduler_run_task_to_completion(global_scheduler, task);
 
-    Value result = VALUE_NIL;
-    if (vm->error) {
-        *err = true;
-    } else if (!vm_stack_empty(vm)) {
-        result = vm->stack[vm->stack_pointer - 1];
-        if (is_pointer(result)) object_retain(result);
-        vm_pop(vm);
-    }
-
-    /* Drain scheduler after eval (like REPL does) */
     if (global_scheduler) {
         scheduler_run_until_done(global_scheduler);
     }
 
-    vm_free(vm);
+    Value result = VALUE_NIL;
+    if (task->vm->error) {
+        *err = true;
+    } else if (!vm_stack_empty(task->vm)) {
+        result = task->vm->stack[task->vm->stack_pointer - 1];
+        if (is_pointer(result)) object_retain(result);
+        vm_pop(task->vm);
+    }
+
+    object_release(task_val);
 
     if (n_kept < MAX_UNITS) {
         kept_code[n_kept] = code;

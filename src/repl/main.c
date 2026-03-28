@@ -22,6 +22,7 @@
 #include "scheduler.h"
 #include "core.h"
 #include "log.h"
+#include "task.h"
 
 #define INPUT_BUFFER_SIZE 4096
 #define MAX_COMPILED_UNITS 1024
@@ -91,22 +92,21 @@ static int eval_form(const char* source, const char* filename) {
         }
     }
 
-    VM* vm = vm_new(256);
-    vm->scheduler = global_scheduler;
-    vm_load_code(vm, code->bytecode, (int)code->code_size);
-    vm_load_constants(vm, constants, n_constants);
-    vm_run(vm);
+    Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
+                                         constants, n_constants, global_scheduler);
+    Task* task = task_get(task_val);
+    scheduler_run_task_to_completion(global_scheduler, task);
 
     if (global_scheduler) {
         scheduler_run_until_done(global_scheduler);
     }
 
-    int had_error = vm->error ? 1 : 0;
-    if (vm->error) {
-        fprintf(stderr, "Error: %s\n", vm->error_msg);
+    int had_error = task->vm->error ? 1 : 0;
+    if (task->vm->error) {
+        fprintf(stderr, "Error: %s\n", task->vm->error_msg);
     }
 
-    vm_free(vm);
+    object_release(task_val);
 
     if (n_compiled_units < MAX_COMPILED_UNITS) {
         compiled_units[n_compiled_units] = code;
@@ -439,31 +439,29 @@ static int run_repl(void) {
             }
         }
 
-        VM* vm = vm_new(256);
-        vm->scheduler = global_scheduler;
-        vm_load_code(vm, code->bytecode, (int)code->code_size);
-        vm_load_constants(vm, constants, n_constants);
-
-        vm_run(vm);
+        Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
+                                             constants, n_constants, global_scheduler);
+        Task* repl_task = task_get(task_val);
+        scheduler_run_task_to_completion(global_scheduler, repl_task);
 
         if (global_scheduler) {
             scheduler_run_until_done(global_scheduler);
         }
 
-        if (vm->error) {
-            printf("Runtime error: %s\n", vm->error_msg);
+        if (repl_task->vm->error) {
+            printf("Runtime error: %s\n", repl_task->vm->error_msg);
         } else {
-            if (!vm_stack_empty(vm)) {
-                Value result = vm->stack[vm->stack_pointer - 1];
+            if (!vm_stack_empty(repl_task->vm)) {
+                Value result = repl_task->vm->stack[repl_task->vm->stack_pointer - 1];
                 if (is_pointer(result)) object_retain(result);
-                vm_pop(vm);
+                vm_pop(repl_task->vm);
                 value_print_readable(result);
                 printf("\n");
                 if (is_pointer(result)) object_release(result);
             }
         }
 
-        vm_free(vm);
+        object_release(task_val);
 
         if (n_compiled_units < MAX_COMPILED_UNITS) {
             compiled_units[n_compiled_units] = code;

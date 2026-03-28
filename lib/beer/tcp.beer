@@ -1,0 +1,7 @@
+(ns beer.tcp)
+;; TCP socket operations — wrappers around C natives
+
+(def listen tcp-listen)
+(def accept tcp-accept)
+(def connect tcp-connect)
+(def local-port tcp-local-port)

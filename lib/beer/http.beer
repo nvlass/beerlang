@@ -1,0 +1,121 @@
+(ns beer.http
+  (:require [beer.tcp :as tcp]))
+
+;; ============================================================
+;; Status text table
+;; ============================================================
+
+(def status-text
+  {200 "OK" 201 "Created" 204 "No Content"
+   301 "Moved Permanently" 302 "Found" 304 "Not Modified"
+   400 "Bad Request" 401 "Unauthorized" 403 "Forbidden"
+   404 "Not Found" 405 "Method Not Allowed"
+   500 "Internal Server Error" 502 "Bad Gateway" 503 "Service Unavailable"})
+
+;; ============================================================
+;; Request parsing
+;; ============================================================
+
+(defn parse-method [s]
+  ;; Return lowercase string method (no keyword fn available)
+  (str/lower-case s))
+
+(defn parse-request-line [line]
+  (let [parts (str/split (str/trim line) " ")]
+    {:method (parse-method (first parts))
+     :uri (nth parts 1)
+     :protocol (nth parts 2)}))
+
+(defn parse-headers [conn]
+  (loop [headers {}]
+    (let [line (read-line conn)]
+      (if (or (nil? line) (= (str/trim line) ""))
+        headers
+        (let [trimmed (str/trim line)
+              parts (str/split trimmed ":")]
+          (if (< (count parts) 2)
+            (recur headers)
+            (let [key (str/lower-case (str/trim (first parts)))
+                  val (str/trim (subs trimmed (+ (count (first parts)) 1) (count trimmed)))]
+              (recur (assoc headers key val)))))))))
+
+(defn read-body [conn headers]
+  (let [cl (get headers "content-length")]
+    (if cl
+      (read-bytes conn (read-string cl))
+      nil)))
+
+(defn parse-request [conn]
+  (let [line (read-line conn)]
+    (when line
+      (let [trimmed (str/trim line)]
+        (when (not (= trimmed ""))
+          (let [req (parse-request-line trimmed)
+                headers (parse-headers conn)
+                body (read-body conn headers)]
+            (merge req {:headers headers :body body})))))))
+
+;; ============================================================
+;; Response formatting
+;; ============================================================
+
+(defn format-response [resp]
+  (let [status (or (:status resp) 200)
+        text (or (get status-text status) "Unknown")
+        body (or (:body resp) "")
+        hdrs (or (:headers resp) {})
+        hdrs (assoc hdrs "content-length" (str (count body)))
+        hdr-str (str/join "\r\n"
+                  (map (fn [k] (str k ": " (get hdrs k)))
+                       (keys hdrs)))]
+    (str "HTTP/1.1 " status " " text "\r\n"
+         hdr-str "\r\n\r\n"
+         body)))
+
+;; ============================================================
+;; Connection handler
+;; ============================================================
+
+(defn handle-connection [handler conn]
+  (try
+    (let [request (parse-request conn)]
+      (if request
+        (let [response (handler request)]
+          (write conn (format-response response))
+          (flush conn))
+        nil))
+    (catch e
+      (let [err-body "Internal Server Error"
+            err-resp (str "HTTP/1.1 500 Internal Server Error\r\n"
+                         "content-length: " (count err-body) "\r\n\r\n"
+                         err-body)]
+        (try
+          (write conn err-resp)
+          (flush conn)
+          (catch e2 nil))))
+    (finally
+      (close conn))))
+
+;; ============================================================
+;; Public API
+;; ============================================================
+
+;; ============================================================
+;; Middleware
+;; ============================================================
+
+(defn wrap-content-type [handler ct]
+  (fn [req]
+    (let [resp (handler req)]
+      (if (get (:headers resp) "content-type")
+        resp
+        (assoc resp :headers (assoc (or (:headers resp) {}) "content-type" ct))))))
+
+(defn run-server [handler opts]
+  (let [port (or (get opts :port) 8080)
+        server (tcp/listen port)]
+    (println (str "Listening on port " port))
+    (loop []
+      (let [conn (tcp/accept server)]
+        (spawn (fn [] (handle-connection handler conn)))
+        (recur)))))

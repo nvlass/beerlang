@@ -1,0 +1,16 @@
+;; Hello World HTTP Server
+;; Run: BEERPATH=lib ./bin/beerlang examples/hello_server.beer
+;; Test: curl http://localhost:8080/
+
+(ns hello-server
+  (:require [beer.http :as http]
+            [beer.json :as json]))
+
+(defn handler [req]
+  {:status 200
+   :headers {"content-type" "application/json"}
+   :body (json/emit {:message "Hello from Beerlang!"
+                     :method (:method req)
+                     :uri (:uri req)})})
+
+(http/run-server handler {:port 8080})

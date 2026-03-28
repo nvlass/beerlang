@@ -567,6 +567,14 @@ check '(do (def f (fn [x] (if x 1 2))) ((asm (disasm f)) true))' '1'
 check '(do (def f (fn [x] (if x 1 2))) ((asm (disasm f)) false))' '2'
 check '((asm {:code [[:ENTER 1] [:LOAD_LOCAL 0] [:PUSH_INT 1] [:ADD] [:RETURN]] :constants [] :arity 1}) 5)' '6'
 
+# --- eval ---
+check '(eval (list (quote +) 1 2))'           '3'          "eval basic"
+check '(eval (read-string "(+ 10 20)"))'       '30'         "eval read-string"
+check '(eval 42)'                              '42'         "eval literal"
+check '(eval (list (quote vector) 1 2 3))'     '[1 2 3]'    "eval vector"
+check_multi '(eval (quote (def evtmp 99)))
+evtmp' '99' "eval def"
+
 # --- doseq ---
 check '(do (doseq [x [1 2 3]] x) nil)' 'nil'
 
@@ -731,6 +739,126 @@ check_multi '(require (quote beer.shell) :as (quote shell))
 
 check_multi '(require (quote beer.shell) :as (quote shell))
 (:err (shell/exec "sh" "-c" "echo oops >&2"))' '"oops\n"' 'shell/exec stderr'
+
+# --- read-bytes ---
+echo ""
+echo "--- read-bytes ---"
+
+check_multi '(spit "/tmp/beer_rb_test.txt" "hello world")
+(def s (open "/tmp/beer_rb_test.txt" :read))
+(read-bytes s 5)' '"hello"' "read-bytes reads N bytes"
+
+check_multi '(spit "/tmp/beer_rb_test.txt" "abcdef")
+(def s (open "/tmp/beer_rb_test.txt" :read))
+(read-bytes s 3)' '"abc"' "read-bytes partial"
+
+# --- TCP round-trip ---
+echo ""
+echo "--- TCP ---"
+
+# TCP test via file (spawn both tasks, use await)
+TCP_TEST=$(mktemp /tmp/beer_tcp_XXXXXX.beer)
+cat > "$TCP_TEST" << 'TCPEOF'
+(require (quote beer.tcp) :as (quote tcp))
+(def srv (tcp/listen 0))
+(def port (tcp/local-port srv))
+(def server-task (spawn (fn []
+  (let [conn (tcp/accept srv)]
+    (let [line (read-line conn)]
+      (close conn)
+      line)))))
+(def client-task (spawn (fn []
+  (let [c (tcp/connect "127.0.0.1" port)]
+    (write c "ping\n")
+    (flush c)
+    (close c)
+    "sent"))))
+(println (await server-task))
+(await client-task)
+(close srv)
+TCPEOF
+tcp_out=$(BEERPATH=lib "$BEER" "$TCP_TEST" 2>/dev/null | head -1)
+rm -f "$TCP_TEST"
+if [ "$tcp_out" = "ping" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: TCP round-trip => '$tcp_out' (expected 'ping')"
+    FAIL=$((FAIL + 1))
+fi
+
+# --- JSON ---
+echo ""
+echo "--- JSON ---"
+
+JSON_BEER="BEERPATH=lib $BEER"
+
+check_multi '(require (quote beer.json) :as (quote json))
+(json/parse "[1, 2, 3]")' '[1 2 3]' "json parse array"
+
+check_multi '(require (quote beer.json) :as (quote json))
+(json/parse "true")' 'true' "json parse true"
+
+check_multi '(require (quote beer.json) :as (quote json))
+(json/parse "null")' 'nil' "json parse null"
+
+check_multi '(require (quote beer.json) :as (quote json))
+(json/emit [1 2 3])' '"[1,2,3]"' "json emit array"
+
+check_multi '(require (quote beer.json) :as (quote json))
+(json/emit nil)' '"null"' "json emit null"
+
+check_multi '(require (quote beer.json) :as (quote json))
+(json/emit true)' '"true"' "json emit true"
+
+check_multi '(require (quote beer.json) :as (quote json))
+(json/emit {:a 1})' '"{\"a\":1}"' "json emit map"
+
+# --- HTTP server ---
+echo ""
+echo "--- HTTP ---"
+
+HTTP_TEST=$(mktemp /tmp/beer_http_XXXXXX.beer)
+cat > "$HTTP_TEST" << 'HTTPEOF'
+(require (quote beer.tcp) :as (quote tcp))
+(require (quote beer.http) :as (quote http))
+(require (quote beer.json) :as (quote json))
+(defn handler [req]
+  {:status 200
+   :headers {"content-type" "application/json"}
+   :body (json/emit {:ok true})})
+(def srv (tcp/listen 0))
+(def port (tcp/local-port srv))
+(def server-task (spawn (fn []
+  (let [conn (tcp/accept srv)]
+    (http/handle-connection handler conn)
+    "ok"))))
+(def client-task (spawn (fn []
+  (let [c (tcp/connect "127.0.0.1" port)]
+    (write c "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    (flush c)
+    (loop [acc ""]
+      (let [line (read-line c)]
+        (if (nil? line)
+          (do (close c) acc)
+          (recur (str acc line "\n")))))))))
+(await server-task)
+(println (await client-task))
+(close srv)
+HTTPEOF
+http_out=$(BEERPATH=lib "$BEER" "$HTTP_TEST" 2>/dev/null)
+rm -f "$HTTP_TEST"
+if echo "$http_out" | grep -q '"ok":true'; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: HTTP server => '$http_out' (expected JSON with ok:true)"
+    FAIL=$((FAIL + 1))
+fi
+if echo "$http_out" | grep -q 'HTTP/1.1 200 OK'; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: HTTP status line => '$http_out' (expected HTTP/1.1 200 OK)"
+    FAIL=$((FAIL + 1))
+fi
 
 # --- CLI subcommands (beer new / run / build) ---
 echo ""

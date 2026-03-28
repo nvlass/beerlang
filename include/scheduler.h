@@ -45,6 +45,10 @@ Value scheduler_spawn(Scheduler* sched, Value fn, int argc, Value* argv);
 /* Run all tasks until ready queue is empty */
 void scheduler_run_until_done(Scheduler* sched);
 
+/* Run a specific task to completion (may run other tasks too).
+ * Saves/restores sched->current for safe re-entrant use from natives. */
+void scheduler_run_task_to_completion(Scheduler* sched, Task* target);
+
 /* Run one task for one quantum (for REPL integration) */
 bool scheduler_run_one_tick(Scheduler* sched);
 
