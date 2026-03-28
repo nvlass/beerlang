@@ -2045,9 +2045,11 @@ CompiledCode* compile(Compiler* c, Value form) {
     result->n_locals = c->local_count;
     result->arity = -1;  /* Top-level code */
 
-    /* Prevent double-free */
+    /* Prevent double-free: nil out transferred vector, release dedup map */
     c->bytecode->code = NULL;
     c->constants->constants_vec = VALUE_NIL;
+    object_release(c->constants->const_map);
+    c->constants->const_map = VALUE_NIL;
 
     /* Clean up environment */
     lexical_env_free(c->env);

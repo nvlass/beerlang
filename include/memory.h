@@ -40,6 +40,16 @@ void memory_print_stats(void);
 void memory_dump_objects(void);
 #endif
 
+/* Immortal refcount — objects marked immortal are never freed.
+ * Used for function template constants that live in compiled code's
+ * constants array and may be shared across tasks/closures.
+ * NOTE: A dedicated flag bit in the object header would be more robust
+ * than a sentinel refcount value, but this is simpler for now. */
+#define REFCOUNT_IMMORTAL UINT32_MAX
+
+/* Mark an object as immortal (retain/release become no-ops) */
+void object_make_immortal(Value v);
+
 /* Object allocation and deallocation */
 
 /* Allocate a new object with given type and size

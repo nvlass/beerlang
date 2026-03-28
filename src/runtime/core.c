@@ -3285,6 +3285,7 @@ static Value native_eval(VM* caller_vm, int argc, Value* argv) {
     Value* constants = malloc((size_t)n_constants * sizeof(Value));
     for (int j = 0; j < n_constants; j++) {
         constants[j] = vector_get(code->constants, (size_t)j);
+        if (is_pointer(constants[j])) object_retain(constants[j]);
     }
 
     Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
@@ -3295,6 +3296,7 @@ static Value native_eval(VM* caller_vm, int argc, Value* argv) {
                               code->bytecode, (int)code->code_size,
                               constants, n_constants);
             function_set_ns_name(constants[j], cur_ns_name);
+            object_make_immortal(constants[j]);
         }
     }
 
@@ -3362,6 +3364,7 @@ static Value load_from_buffer(VM* caller_vm, const char* source, const char* nam
         Value* constants = malloc((size_t)n_constants * sizeof(Value));
         for (int j = 0; j < n_constants; j++) {
             constants[j] = vector_get(code->constants, (size_t)j);
+            if (is_pointer(constants[j])) object_retain(constants[j]);
         }
 
         Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
@@ -3372,6 +3375,10 @@ static Value load_from_buffer(VM* caller_vm, const char* source, const char* nam
                                   code->bytecode, (int)code->code_size,
                                   constants, n_constants);
                 function_set_ns_name(constants[j], cur_ns_name);
+                /* Mark function templates as immortal — they live in the
+                 * constants array forever and may be shared across tasks.
+                 * See docs/design/05_GARBAGE_COLLECTION.md for rationale. */
+                object_make_immortal(constants[j]);
             }
         }
 
@@ -3479,6 +3486,7 @@ Value native_load(VM* caller_vm, int argc, Value* argv) {
         Value* constants = malloc((size_t)n_constants * sizeof(Value));
         for (int j = 0; j < n_constants; j++) {
             constants[j] = vector_get(code->constants, (size_t)j);
+            if (is_pointer(constants[j])) object_retain(constants[j]);
         }
 
         /* Set execution context on function objects */
@@ -3490,6 +3498,7 @@ Value native_load(VM* caller_vm, int argc, Value* argv) {
                                   code->bytecode, (int)code->code_size,
                                   constants, n_constants);
                 function_set_ns_name(constants[j], cur_ns_name);
+                object_make_immortal(constants[j]);
             }
         }
 

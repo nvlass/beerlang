@@ -104,7 +104,17 @@ void object_retain(Value v) {
     assert(obj != NULL);
     assert(obj->refcount > 0);  /* Object should be alive */
 
+    if (obj->refcount == REFCOUNT_IMMORTAL) return;
+
     obj->refcount++;
+}
+
+/* Mark an object as immortal */
+void object_make_immortal(Value v) {
+    if (!is_pointer(v)) return;
+    struct Object* obj = (struct Object*)untag_pointer(v);
+    assert(obj != NULL);
+    obj->refcount = REFCOUNT_IMMORTAL;
 }
 
 /* Decrement reference count and free if zero */
@@ -116,6 +126,8 @@ void object_release(Value v) {
     struct Object* obj = (struct Object*)untag_pointer(v);
     assert(obj != NULL);
     assert(obj->refcount > 0);  /* Object should be alive */
+
+    if (obj->refcount == REFCOUNT_IMMORTAL) return;
 
     obj->refcount--;
 

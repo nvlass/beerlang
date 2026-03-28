@@ -919,7 +919,13 @@ void vm_step(VM* vm) {
                     vm->stack[vm->stack_pointer++] = result;
                     break;
                 }
-                vm_error(vm, "CALL: not a function");
+                {
+                    char buf[256];
+                    int otype = is_pointer(fn) ? object_type(fn) : -1;
+                    snprintf(buf, sizeof(buf), "CALL: not a function (tag=%d, otype=0x%02x, n_args=%d, sp=%d, pc=%u)",
+                             fn.tag, otype, n_args, vm->stack_pointer, pc_at_opcode);
+                    vm_error(vm, buf);
+                }
                 return;
             }
 

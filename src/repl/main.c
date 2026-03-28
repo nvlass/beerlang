@@ -89,6 +89,7 @@ static int eval_form(const char* source, const char* filename) {
             function_set_code(constants[i],
                               code->bytecode, (int)code->code_size,
                               constants, n_constants);
+            object_make_immortal(constants[i]);
         }
     }
 
@@ -436,6 +437,7 @@ static int run_repl(void) {
                 function_set_code(constants[i],
                                   code->bytecode, (int)code->code_size,
                                   constants, n_constants);
+                object_make_immortal(constants[i]);
             }
         }
 

@@ -57,8 +57,31 @@
 5. **Interned objects**: Symbols and keywords are interned — refcount=1 owned by intern table, callers do NOT release them
 6. **Leak tracking**: Build with `make track-leaks`, run with `--dump-leaks` to detect leaks
 
+#### Immortal Function Templates
+
+When code is compiled (either from a file or at the REPL), `fn` forms create **function template objects** that are stored in the compiled code's constants array. These templates serve two roles:
+
+1. **Blueprints for `MAKE_CLOSURE`**: When a `fn` captures variables from an enclosing scope, `OP_MAKE_CLOSURE` creates a fresh function object at runtime. The template's code offset, arity, and name are baked into the bytecode operands — the template object itself isn't used.
+
+2. **Direct values via `PUSH_CONST`**: When a `fn` has no captures, the compiler emits `OP_PUSH_CONST` which pushes the template object directly. The template IS the function — it gets returned, stored in vars, passed to other tasks.
+
+Case 2 creates a lifetime challenge: the template lives in a raw `Value*` array (owned by `load_constants[]`), but user code holds references to it across task boundaries, scheduler ticks, and namespace vars. Any refcount imbalance frees the template while it's still in use.
+
+**Solution: immortal refcount.** Function templates in constants arrays are marked with `REFCOUNT_IMMORTAL` (`UINT32_MAX`). `object_retain` and `object_release` skip immortal objects entirely. The templates live forever alongside their constants arrays (which are already never freed).
+
+This is safe because:
+- Constants arrays persist for the lifetime of the program (stored in static `load_units[]` / `load_constants[]`)
+- Templates are immutable — sharing them across tasks is safe
+- No extra allocations — the template is created once and reused
+- Closures (which DO capture values) are created fresh by `MAKE_CLOSURE` with normal refcounting
+
+**Implementation note:** `REFCOUNT_IMMORTAL` uses a sentinel value (`UINT32_MAX`). A dedicated flag bit in the object header would be more robust and avoid any theoretical overflow concern, but the sentinel approach is simpler and sufficient for now.
+
+**Alternative considered: always emit `MAKE_CLOSURE`** even for zero-capture functions. This would give every returned function an independent lifetime, eliminating the template sharing issue entirely. The tradeoff is one allocation per call (e.g., `(map my-fn big-coll)` would allocate N identical function objects). This approach may be worth revisiting if the immortal template semantics prove too coarse — for instance, if a future "unload module" feature needs to reclaim compiled code.
+
 #### Future Enhancements
 
 1. **Weak references**: Special pointer type that doesn't increment refcount (for cycle-prone patterns)
 2. **Optional cycle detector**: Periodic scan for unreachable cycles
 3. **Deferred deletion**: Queue for cooperative cleanup of large structures
+4. **Immortal flag bit**: Replace `REFCOUNT_IMMORTAL` sentinel with a dedicated bit in the object header for cleaner semantics
