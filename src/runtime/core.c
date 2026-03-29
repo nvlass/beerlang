@@ -1638,6 +1638,7 @@ static Value native_apply(VM* vm, int argc, Value* argv) {
         code[pc++] = OP_HALT;
 
         VM* temp_vm = vm_new(256);
+        temp_vm->scheduler = vm->scheduler;
         vm_load_code(temp_vm, code, (int)pc);
         vm_load_constants(temp_vm, consts, n_consts);
         vm_run(temp_vm);
@@ -3228,6 +3229,7 @@ static Value do_macroexpand_1(VM* vm, Value form) {
     code[pc++] = OP_HALT;
 
     VM* tmp_vm = vm_new(256);
+    tmp_vm->scheduler = vm->scheduler;
     vm_load_code(tmp_vm, code, (int)pc);
     vm_load_constants(tmp_vm, consts, n_consts);
     vm_run(tmp_vm);

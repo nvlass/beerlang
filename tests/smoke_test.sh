@@ -887,6 +887,53 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# --- beer.hive: actors ---
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def pid (hive/spawn-actor (fn [state msg] (+ state (nth msg 1))) 0))
+(hive/send pid [:add 5])
+(hive/send pid [:add 3])
+(hive/send pid [:add 2])
+(hive/stop pid)
+(await (get pid :task))' '10' "actor state accumulation"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def c (chan 1))
+(def pid (hive/spawn-actor (fn [state msg] (cond (= (first msg) :get) (do (>! (nth msg 1) state) state) (= (first msg) :set) (nth msg 1) :else state)) 42))
+(hive/send pid [:set 99])
+(hive/send pid [:get c])
+(await (spawn (fn [] (<! c))))' '99' "actor get/set pattern"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def c (chan 1))
+(def pid (hive/spawn-actor (fn [state msg] (let* [type (first msg)] (cond (= type :set) (nth msg 1) (= type :add) (+ state (nth msg 1)) (= type :read) (do (>! (nth msg 1) state) state) (= type :quit) {:stop state} :else state))) nil))
+(hive/send pid [:set 10])
+(hive/send pid [:add 1])
+(hive/send pid [:add 2])
+(hive/send pid [:add 3])
+(hive/send pid [:add 4])
+(hive/send pid [:add 5])
+(hive/send pid [:add 6])
+(hive/send pid [:read c])
+(await (spawn (fn [] (<! c))))' '31' "actor loop with state"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def pid (hive/spawn-actor (fn [state msg] (let* [type (first msg)] (cond (= type :set) (nth msg 1) (= type :add) (+ state (nth msg 1)) (= type :quit) {:stop state} :else state))) nil))
+(hive/send pid [:set 10])
+(hive/send pid [:add 1])
+(hive/send pid [:add 2])
+(hive/send pid [:add 3])
+(hive/send pid [:add 4])
+(hive/send pid [:add 5])
+(hive/send pid [:add 6])
+(hive/send pid [:quit])
+(await (get pid :task))' '31' "actor quit terminates loop"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def pid (hive/spawn-actor (fn [s m] (+ s 1)) 0 {:name :counter}))
+(hive/send (hive/whereis :counter) [:bump])
+(hive/stop (hive/whereis :counter))
+(await (get (hive/whereis :counter) :task))' '1' "actor registry whereis"
+
 # --- CLI subcommands (beer new / run / build) ---
 echo ""
 echo "--- CLI subcommands ---"
