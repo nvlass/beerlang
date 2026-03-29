@@ -29,6 +29,17 @@ void task_destroy(struct Object* obj) {
         object_release(task->blocked_value);
         task->blocked_value = VALUE_NIL;
     }
+    /* Free any remaining watchers (shouldn't normally have any — fired on completion) */
+    WatcherNode* w = task->watchers;
+    while (w) {
+        WatcherNode* next = w->next;
+        if (is_pointer(w->callback)) {
+            object_release(w->callback);
+        }
+        free(w);
+        w = next;
+    }
+    task->watchers = NULL;
 }
 
 /* Initialize task type */
@@ -48,6 +59,7 @@ Value task_new(Value fn, int argc, Value* argv, Scheduler* sched) {
     task->next = NULL;
     task->prev = NULL;
     task->blocked_value = VALUE_NIL;
+    task->watchers = NULL;
 
     /* Create a VM for this task */
     VM* vm = vm_new(256);
@@ -103,6 +115,7 @@ Value task_new_from_code(uint8_t* code, int code_size,
     task->next = NULL;
     task->prev = NULL;
     task->blocked_value = VALUE_NIL;
+    task->watchers = NULL;
 
     VM* vm = vm_new(256);
     vm->scheduler = sched;
@@ -159,4 +172,15 @@ void task_run(Task* task) {
             task->state = TASK_READY;
         }
     }
+}
+
+/* Add a watcher callback to fire when task completes */
+void task_add_watcher(Task* task, Value callback) {
+    WatcherNode* node = malloc(sizeof(WatcherNode));
+    node->callback = callback;
+    if (is_pointer(callback)) {
+        object_retain(callback);
+    }
+    node->next = task->watchers;
+    task->watchers = node;
 }

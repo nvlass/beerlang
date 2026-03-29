@@ -3118,6 +3118,38 @@ void core_register_tar(void) {
     register_native(tar_ns, "tar-create", native_tar_create);
 }
 
+/* task-watch: register a callback for task completion */
+static Value native_task_watch(VM* vm, int argc, Value* argv) {
+    if (argc != 2) {
+        vm_error(vm, "task-watch: expected 2 arguments (task, callback)");
+        return VALUE_NIL;
+    }
+    if (!is_task(argv[0])) {
+        vm_error(vm, "task-watch: first argument must be a task");
+        return VALUE_NIL;
+    }
+    if (!is_function(argv[1]) && !is_native_function(argv[1])) {
+        vm_error(vm, "task-watch: second argument must be a function");
+        return VALUE_NIL;
+    }
+
+    Task* task = task_get(argv[0]);
+
+    if (task->state == TASK_DONE) {
+        /* Task already done — add watcher and fire immediately */
+        if (vm->scheduler) {
+            task_add_watcher(task, argv[1]);
+            scheduler_fire_watchers(vm->scheduler, task);
+        }
+    } else {
+        task_add_watcher(task, argv[1]);
+    }
+
+    /* Return owned ref — VM expects native to return an owned reference */
+    if (is_pointer(argv[0])) object_retain(argv[0]);
+    return argv[0];
+}
+
 void core_register_concurrency(void) {
     Namespace* core_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.core");
     if (!core_ns) return;
@@ -3127,6 +3159,7 @@ void core_register_concurrency(void) {
     register_native(core_ns, "close!", native_chan_close);
     register_native(core_ns, "channel?", native_channel_q);
     register_native(core_ns, "task?", native_task_q);
+    register_native(core_ns, "task-watch", native_task_watch);
 }
 
 /* =================================================================

@@ -8,6 +8,9 @@
 #include "task.h"
 #include "vm.h"
 #include "memory.h"
+#include "hashmap.h"
+#include "bstring.h"
+#include "symbol.h"
 
 /* Global scheduler instance */
 Scheduler* global_scheduler = NULL;
@@ -125,6 +128,48 @@ static void scheduler_drain_io(Scheduler* sched) {
     }
 }
 
+/* Fire watcher callbacks for a completed task */
+void scheduler_fire_watchers(Scheduler* sched, Task* task) {
+    WatcherNode* w = task->watchers;
+    if (!w) return;
+
+    /* Build result map */
+    Value result_map = hashmap_create_default();
+    if (task->vm && task->vm->error) {
+        /* Error case: {:status :error, :message "..."} */
+        hashmap_set(result_map, keyword_intern("status"), keyword_intern("error"));
+        const char* msg = task->vm->error_msg ? task->vm->error_msg : "unknown error";
+        Value msg_val = string_from_cstr(msg);
+        hashmap_set(result_map, keyword_intern("message"), msg_val);
+        object_release(msg_val);
+    } else {
+        /* Success case: {:status :ok, :result <value>} */
+        hashmap_set(result_map, keyword_intern("status"), keyword_intern("ok"));
+        hashmap_set(result_map, keyword_intern("result"), task->result);
+    }
+
+    /* Spawn a callback task for each watcher.
+     * task_new copies argv values into constants without retaining,
+     * effectively taking ownership of one reference per spawn.
+     * We retain once per spawn so each task owns a ref, then release
+     * our original ref at the end. */
+    while (w) {
+        WatcherNode* next = w->next;
+        object_retain(result_map);
+        object_retain(w->callback);  /* task_new takes ownership */
+        scheduler_spawn(sched, w->callback, 1, &result_map);
+        /* Release the watcher node's ref (separate from the one task_new took) */
+        if (is_pointer(w->callback)) {
+            object_release(w->callback);
+        }
+        free(w);
+        w = next;
+    }
+    task->watchers = NULL;
+
+    object_release(result_map);  /* Release our original ref */
+}
+
 /* Run one task for one quantum */
 bool scheduler_run_one_tick(Scheduler* sched) {
     scheduler_drain_io(sched);
@@ -135,6 +180,10 @@ bool scheduler_run_one_tick(Scheduler* sched) {
     sched->current = task;
     task_run(task);
     sched->current = NULL;
+
+    if (task->state == TASK_DONE && task->watchers) {
+        scheduler_fire_watchers(sched, task);
+    }
 
     if (task->state == TASK_READY) {
         /* Yielded — re-enqueue (enqueue retains, so release our dequeue ref) */

@@ -62,6 +62,9 @@ void scheduler_wake(Scheduler* sched, Task* task);
 void scheduler_block_io(Scheduler* sched, Task* task);
 void scheduler_wake_io(Scheduler* sched, Task* task);
 
+/* Fire watcher callbacks for a completed task */
+void scheduler_fire_watchers(Scheduler* sched, Task* task);
+
 /* Global scheduler instance */
 extern Scheduler* global_scheduler;
 

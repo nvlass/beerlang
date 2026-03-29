@@ -21,6 +21,12 @@ typedef enum {
     TASK_DONE,      /* Completed execution */
 } TaskState;
 
+/* Watcher node — singly-linked list of callbacks to fire on task completion */
+typedef struct WatcherNode {
+    Value callback;           /* Function to call — retained */
+    struct WatcherNode* next;
+} WatcherNode;
+
 /* Task object structure */
 typedef struct Task {
     struct Object header;
@@ -34,6 +40,9 @@ typedef struct Task {
 
     /* Channel blocking info */
     Value blocked_value;    /* Value being sent (for blocked senders) */
+
+    /* Completion watchers */
+    WatcherNode* watchers;
 } Task;
 
 /* Create a new task that will call fn with the given args.
@@ -51,6 +60,9 @@ void task_run(Task* task);
 
 /* Free task resources (called by destructor) */
 void task_destroy(struct Object* obj);
+
+/* Add a watcher callback to be invoked when task completes */
+void task_add_watcher(Task* task, Value callback);
 
 /* Initialize task type (register destructor) */
 void task_init(void);

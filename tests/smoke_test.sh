@@ -462,6 +462,33 @@ check_multi '(def c (chan 10))
 (spawn (fn [] (>! c 3)))
 (+ (<! c) (<! c) (<! c))' '6' "multiple spawns"
 
+# --- Concurrency: task-watch ---
+check_multi '(def c (chan 1))
+(def t (spawn (fn [] (+ 1 2))))
+(task-watch t (fn [r] (>! c (get r :status))))
+(<! c)' ':ok' "task-watch success status"
+
+check_multi '(def c (chan 1))
+(def t (spawn (fn [] (+ 1 2))))
+(task-watch t (fn [r] (>! c (get r :result))))
+(<! c)' '3' "task-watch success result"
+
+check_multi '(def c (chan 1))
+(def t (spawn (fn [] (throw {:message "boom"}))))
+(task-watch t (fn [r] (>! c (get r :status))))
+(<! c)' ':error' "task-watch error status"
+
+check_multi '(def c (chan 1))
+(def t (spawn (fn [] (/ 1 0))))
+(task-watch t (fn [r] (>! c (get r :message))))
+(<! c)' '"/: division by zero"' "task-watch error message"
+
+check_multi '(def c (chan 2))
+(def t (spawn (fn [] 42)))
+(task-watch t (fn [r] (>! c (get r :result))))
+(task-watch t (fn [r] (>! c (get r :result))))
+(+ (<! c) (<! c))' '84' "task-watch multiple watchers"
+
 # ==========================================
 # Float (double) Type
 # ==========================================

@@ -29,7 +29,9 @@ Beerlang's FFI allows calling C functions from shared libraries (or statically l
 
 ## VM Additions
 
-### New Type: `TYPE_CPOINTER` (0x80)
+### New Type: `TYPE_CPOINTER` (0x90)
+
+> **Note:** 0x80 and 0x81 are taken by `TYPE_HAMT_NODE` and `TYPE_HAMT_COLLISION`.
 
 Wraps a raw `void*`. Used for C function pointers, struct pointers, and opaque handles.
 
@@ -123,6 +125,25 @@ The macro computes sizes, alignment, and padding at macro-expansion time. Rules 
 (cpointer Point)    ;; {:kind :pointer :to Point  :size 8 :align 8}
 ```
 
+### Memory Ownership Annotations
+
+Pointer and string types accept an `:ownership` key that controls who is responsible
+for freeing the memory. This is critical for correct interop:
+
+| Ownership | Meaning | Example |
+|---|---|---|
+| `:copy` (default) | Beerlang copies the data; C retains ownership of the original | `char*` return values from most C APIs |
+| `:own` | Beerlang takes ownership and will `cfree` when the value is released | `malloc`'d buffers returned to the caller |
+| `:borrow` | Pointer is valid only for the duration of the call (for callbacks) | Buffer pointers in callback arguments |
+
+```clojure
+;; Return type that beerlang must free:
+(def-cfn strdup "libc" "strdup" [:string] {:type :string :ownership :own})
+
+;; Return type where C retains ownership (default):
+(def-cfn strerror "libc" "strerror" [:int32] :string)
+```
+
 ### Array Types
 
 ```clojure
@@ -148,7 +169,7 @@ The macro computes sizes, alignment, and padding at macro-expansion time. Rules 
 | C Type | Beerlang Type | Notes |
 |---|---|---|
 | `int8..int64` | fixnum (or bigint if overflow) | |
-| `float`, `double` | fixnum (truncated) or future float type | |
+| `float`, `double` | float (TAG_FLOAT, double precision) | Native float type now exists |
 | `int` used as bool | `true`/`false` | Only when return type declared `:bool` |
 | `NULL` | `nil` | |
 | `char*` | string | Copied into beerlang string |
@@ -332,6 +353,62 @@ Allowing C code to call back into beerlang (e.g., for event handlers, comparator
 
 This uses `ffi_closure_alloc` from libffi to create a native trampoline that calls back into the VM. This is more complex (needs to handle VM re-entry, possibly from a different thread) and is deferred to a later phase.
 
+## Threading: Sync vs Async FFI Calls
+
+FFI calls can block the calling thread (e.g., database queries, file operations,
+network calls). Since beerlang uses cooperative multitasking with a single scheduler
+thread, a blocking FFI call freezes ALL tasks.
+
+### Two-path design
+
+**Synchronous (default):** For fast, non-blocking calls (math, GPIO read, memory access).
+The `ffi-call` native calls `ffi_call()` directly on the scheduler thread. Simple and
+zero-overhead.
+
+```clojure
+(sqrt 2.0)              ;; ~nanoseconds, sync is fine
+(gpio-read 4)           ;; ~microseconds, sync is fine
+```
+
+**Asynchronous:** For potentially blocking calls (DB queries, network, disk I/O).
+Uses the same pattern as the I/O reactor: the task yields, the call runs on a
+worker thread, and the scheduler wakes the task when the result is ready.
+
+```clojure
+(def-cfn sqlite3-exec "libsqlite3" "sqlite3_exec"
+  [:pointer :string :pointer :pointer :pointer] :int32
+  :async true)  ;; <-- flag triggers async dispatch
+```
+
+### Async implementation sketch
+
+```
+Task calls async ffi-call
+  → native sets vm->native_blocked = true, vm->yielded = true
+  → scheduler_block_io(task)
+  → dispatch {fn_ptr, args, result_slot} to worker thread pool
+  → worker thread: ffi_call() → store result → scheduler_wake_io(task)
+  → task resumes, ffi-call returns the result
+```
+
+This reuses the existing `native_blocked` / `scheduler_block_io` / `scheduler_wake_io`
+machinery already used by the I/O reactor. The main addition is a worker thread pool
+(or even a single worker thread initially) that executes FFI calls.
+
+### Callback threading caveat
+
+C callbacks (Phase 3) are trickier: a C library calling back into beerlang happens
+on the C library's thread, NOT the scheduler thread. The callback cannot directly
+call into the VM. Instead, it must:
+
+1. Post a message to a scheduler-visible queue (similar to the reactor's completion queue)
+2. The scheduler picks up the message on its next tick
+3. A beerlang task is spawned (or resumed) to handle the callback
+
+This adds latency but preserves the single-threaded cooperative model. For
+latency-sensitive callbacks (audio, real-time), a dedicated native handler may
+be needed.
+
 ## Implementation Phases
 
 ### Phase 1: Core FFI (Minimal)
@@ -379,12 +456,16 @@ This uses `ffi_closure_alloc` from libffi to create a native trampoline that cal
 
 ## Open Questions
 
-1. **Float type in beerlang?** Currently beerlang has no native float type. FFI returning `double` would truncate to fixnum. Options: (a) add `TYPE_FLOAT` to the value system, (b) return as string representation, (c) return as a 2-element vector `[mantissa exponent]`. Adding a proper float type is probably the right call.
+1. ~~**Float type in beerlang?**~~ **RESOLVED** — `TAG_FLOAT` (double precision) is implemented. FFI marshalling uses it directly.
 
 2. **Struct-by-value vs struct-by-pointer?** libffi supports both. By-pointer is simpler and more common in C APIs. By-value is needed for some APIs (e.g., returning small structs). Support both, default to by-pointer.
 
-3. **Memory ownership conventions?** When C returns a `char*`, who owns it? Need conventions: `:copy` (beerlang copies and C retains ownership), `:own` (beerlang takes ownership and will `free`), `:borrow` (valid only during call, for callbacks).
+3. ~~**Memory ownership conventions?**~~ **RESOLVED** — `:ownership` annotation on type descriptors (`:copy`, `:own`, `:borrow`). See "Memory Ownership Annotations" section above.
 
-4. **Thread safety?** If beerlang tasks call FFI functions that block, they block the whole scheduler. Options: (a) document that FFI calls should be fast, (b) dispatch long FFI calls on a separate OS thread and suspend the beerlang task until completion (matches the original design doc's "dispatched on separate threads" for shared libraries).
+4. ~~**Thread safety?**~~ **RESOLVED** — Two-path design: sync (default, on scheduler thread) and async (`:async true`, dispatched to worker thread). See "Threading: Sync vs Async FFI Calls" section above.
 
 5. **Variadic C functions?** (`printf`, etc.) libffi supports variadic calls via `ffi_prep_cif_var`. Expose as a `:variadic` flag on `def-cfn`.
+
+6. **libffi on embedded** — libffi supports ARM Cortex-M and other embedded architectures, so `ffi-call` works unchanged on RPi Zero and similar targets. For very constrained targets (bare-metal without OS), libffi can be vendored as a submodule. Hand-rolling calling conventions is not worth the effort given libffi's platform coverage.
+
+7. **`keyword` and `name` natives** — Now available in beerlang. Useful for the type DSL macros that need to convert between keywords and strings (e.g., `:int32` → `"int32"` for libffi type lookup).

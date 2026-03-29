@@ -264,11 +264,61 @@ Ahead-of-time compilation to bytecode — skip the reader+compiler at runtime.
 - [ ] `beer_call(state, fn, args)` — call a beerlang function from C
 - [ ] `beer_get/set` for values
 
+### 8. CFFI (C Foreign Function Interface)
+- [ ] Call C shared libraries from beerlang (`dlopen`/`dlsym`)
+- [ ] Type marshalling: beerlang values ↔ C types (int, double, char*, structs)
+- [ ] Callback support (pass beerlang fn as C function pointer)
+- **Design questions:**
+  - Use libffi for calling conventions, or hand-roll for common platforms?
+  - How to describe C function signatures from beerlang? (Clojure-style type hints? Schema maps?)
+  - Thread safety: C calls may block — run on separate thread like `beer.shell/exec`?
+  - Memory management: who owns strings/buffers crossing the boundary?
+
+### 9. `task-watch` — Task Completion Monitoring
+- [ ] `(task-watch task callback-fn)` — register a callback invoked when task finishes/crashes
+- [ ] Callback receives task result (or error map on failure)
+- [ ] Callback is spawned as a new task (runs in scheduler, can do channel ops, spawn, etc.)
+- [ ] Implementation: add watcher list to Task struct, scheduler checks on TASK_DONE transition
+- **Enables:** supervisor trees, actor monitoring, distributed node failure detection
+- **Channel sugar** (pure beerlang once task-watch exists):
+  ```clojure
+  (defn task-done-channel [task]
+    (let [c (chan 1)]
+      (task-watch task (fn [result] (>! c result)))
+      c))
+  ```
+
+### 10. `beer.hive` — Distributed Actor Library
+
+Erlang-inspired distributed computing for beerlang. Nodes (beerlang processes)
+register in a "hive" and can send messages, spawn tasks, and ship code to each
+other. Design goal: pure beerlang library with minimal VM changes.
+
+**Architecture:**
+- Node = beerlang process with a TCP server, identified by `{:name "node-a" :host "..." :port N}`
+- Actor = task + channel (mailbox), identified by `{:node "node-a" :id 42}`
+- Wire protocol: length-prefixed S-expressions over TCP (`pr-str` / `read-string`)
+- Remote spawn: send quoted code, remote node `eval`s it (code-is-data advantage)
+
+**Phases:**
+- **Phase 1 — Local actors:** actor abstraction (task+mailbox), `send`/`receive`, supervisor basics. Single-node, get the API right.
+- **Phase 2 — Distribution:** node-to-node TCP, remote send, remote spawn. Two RPi Zeros talking.
+- **Phase 3 — Resilience:** monitoring (requires `task-watch`), heartbeats, reconnection, cross-node supervisors.
+- **Phase 4 — Security:** authentication (shared secret / TLS), eval sandboxing, resource quotas, reader input limits.
+
+**Dependencies:** `task-watch` (item 9), TCP sockets (done), `eval` (done), JSON/serialization (done)
+
+**Security concerns:**
+- Remote `eval` is powerful but dangerous — needs auth + allowlist/sandbox
+- `read-string` of untrusted input — watch for reader bombs (deep nesting, huge strings)
+- Resource exhaustion via remote spawn — need per-node quotas
+- Network partitions — split-brain detection strategy
+
 ---
 
 ## Long-term TODO
 
-### 8. Rename/Fork to `clauj`
+### 11. Rename/Fork to `clauj`
 - ~304 occurrences to rename (purely mechanical)
 - Separate GitHub repo
 - Do after reaching a "complete" release
