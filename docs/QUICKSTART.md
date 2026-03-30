@@ -137,6 +137,61 @@ Libraries can also be distributed as `.tar` files — place a tar in any `BEERPA
   (println (<! c)))  ; prints: hello
 ```
 
+## Atoms
+
+Atoms provide thread-safe mutable state. Use `@` (deref) to read, `swap!` to update.
+
+```clojure
+(def counter (atom 0))
+(swap! counter inc)        ; => 1
+(swap! counter + 10)       ; => 11
+@counter                   ; => 11
+(reset! counter 0)         ; => 0
+(compare-and-set! counter 0 42)  ; => true
+@counter                   ; => 42
+```
+
+## Actors
+
+The `beer.hive` library provides Erlang-inspired message-passing actors.
+
+```clojure
+(require 'beer.hive :as 'hive)
+
+;; Spawn a counter actor
+(def pid (hive/spawn-actor
+  (fn [state msg]
+    (cond
+      (= (:type msg) :inc)  {:state (update state :n inc)}
+      (= (:type msg) :get)  {:state state :reply (:n state)}))
+  {:n 0}))
+
+;; Fire-and-forget
+(hive/send pid {:type :inc})
+(hive/send pid {:type :inc})
+
+;; Request-reply
+(hive/ask pid {:type :get})  ; => 2
+
+(hive/stop pid)
+```
+
+## JSON
+
+```clojure
+(require 'beer.json :as 'json)
+
+(json/parse "{\"name\": \"Beerlang\", \"version\": 1}")
+; => {"name" "Beerlang" "version" 1}
+
+(json/emit {:langs ["beerlang" "clojure"] :count 2})
+; => "{\"langs\":[\"beerlang\",\"clojure\"],\"count\":2}"
+```
+
+## Networking
+
+Beerlang includes TCP sockets (`beer.tcp`) and an HTTP server (`beer.http`). See the [API Reference](API.md) for details.
+
 ## Exception handling
 
 ```clojure

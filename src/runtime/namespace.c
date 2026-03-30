@@ -13,6 +13,7 @@
 #include "stream.h"
 #include "task.h"
 #include "channel.h"
+#include "atom.h"
 #include "scheduler.h"
 #include "core.h"
 
@@ -343,6 +344,10 @@ void namespace_init(void) {
     task_init();
     channel_init();
     core_register_concurrency();
+
+    /* Initialize atom type and register atom natives */
+    atom_init();
+    core_register_atoms();
     core_register_tar();
     core_register_shell();
     core_register_tcp();

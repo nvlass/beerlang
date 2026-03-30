@@ -42,6 +42,7 @@ typedef struct VM VM;
 #include "stream.h"
 #include "task.h"
 #include "channel.h"
+#include "atom.h"
 #include "scheduler.h"
 #include "reactor.h"
 #include "io_reactor.h"

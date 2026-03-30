@@ -187,6 +187,7 @@ All arithmetic supports fixnum, bigint, and float with automatic promotion.
 | `stream?` | I/O stream | `(stream? *out*)` → `true` |
 | `task?` | Task | `(task? (spawn 1))` → `true` |
 | `channel?` | Channel | `(channel? (chan))` → `true` |
+| `atom?` | Atom | `(atom? (atom 0))` → `true` |
 
 ### String Functions
 
@@ -217,6 +218,7 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 | `open` | Open file stream | `(open "f.txt" :read)` |
 | `close` | Close stream | `(close s)` |
 | `read-line` | Read line from stream or stdin | `(read-line)` |
+| `read-bytes` | Read n bytes from stream | `(read-bytes s 1024)` |
 | `write` | Write string to stream | `(write *out* "hi")` |
 | `flush` | Flush stream buffer | `(flush *out*)` |
 | `slurp` | Read entire file as string | `(slurp "f.txt")` |
@@ -240,6 +242,9 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 | `set-macro!` | Mark a var as a macro | `(set-macro! 'my-macro)` |
 | `in-ns` | Switch/create namespace | `(in-ns 'my.ns)` |
 | `require` | Load namespace with optional alias | `(require 'foo.bar :as 'fb)` |
+| `eval` | Compile and execute a form | `(eval '(+ 1 2))` → `3` |
+| `keyword` | Create keyword from string | `(keyword "foo")` → `:foo` |
+| `name` | Get name of symbol or keyword as string | `(name :foo)` → `"foo"` |
 | `load` | Load and execute a .beer file | `(load "path/to/file.beer")` |
 | `ns-publics` | List symbols defined in a namespace | `(ns-publics 'beer.core)` |
 
@@ -249,8 +254,22 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 |----------|-------------|---------|
 | `chan` | Create channel (unbuffered or buffered) | `(chan)`, `(chan 10)` |
 | `close!` | Close channel | `(close! ch)` |
+| `task-watch` | Watch a task; calls callback with result on completion | `(task-watch t (fn [v] (println v)))` |
 
 Use special forms `>!`, `<!`, `spawn`, `await`, `yield` for task/channel operations.
+
+### Atoms
+
+Atoms provide managed mutable state with atomic updates.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `atom` | Create an atom with initial value | `(atom 0)` |
+| `deref` / `@` | Read current value | `(deref a)`, `@a` |
+| `reset!` | Set atom to new value, returns new value | `(reset! a 42)` → `42` |
+| `swap!` | Apply fn to current value (with optional extra args) | `(swap! a inc)`, `(swap! a + 10)` |
+| `compare-and-set!` | CAS: set new if current equals old | `(compare-and-set! a 0 1)` → `true` |
+| `atom?` | Test if value is an atom | `(atom? a)` → `true` |
 
 ### Tar Archives (beer.tar)
 
@@ -261,6 +280,60 @@ Require with `(require 'beer.tar :as 'tar)`.
 | `tar/list` | List entries in a tar file | `(tar/list "lib.tar")` → `[{:name "a.beer" :size 42 :offset 512} ...]` |
 | `tar/read-entry` | Read a file from a tar | `(tar/read-entry "lib.tar" "a.beer")` → `"(ns ...)"` |
 | `tar/create` | Create a tar from a map | `(tar/create "out.tar" {"a.txt" "contents"})` |
+
+### Shell Execution (beer.shell)
+
+Require with `(require 'beer.shell :as 'shell)`.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `shell/exec` | Execute a shell command (variadic args) | `(shell/exec "ls" "-la")` → `{:exit 0 :out "..." :err ""}` |
+
+### TCP Sockets (beer.tcp)
+
+Require with `(require 'beer.tcp :as 'tcp)`.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `tcp/listen` | Listen on a port | `(tcp/listen 8080)` |
+| `tcp/accept` | Accept a connection from a listener | `(tcp/accept listener)` |
+| `tcp/connect` | Connect to host:port | `(tcp/connect "localhost" 8080)` |
+| `tcp/local-port` | Get local port of a stream | `(tcp/local-port listener)` |
+
+### JSON (beer.json)
+
+Require with `(require 'beer.json :as 'json)`.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `json/parse` | Parse JSON string to beerlang data | `(json/parse "{\"a\":1}")` → `{"a" 1}` |
+| `json/emit` | Serialize beerlang data to JSON string | `(json/emit {:a 1})` → `"{\"a\":1}"` |
+
+### HTTP Server (beer.http)
+
+Require with `(require 'beer.http :as 'http)`.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `http/run-server` | Start HTTP server with handler | `(http/run-server handler {:port 8080})` |
+| `http/wrap-content-type` | Middleware: set Content-Type header | `(http/wrap-content-type handler "text/html")` |
+
+The handler receives a request map `{:method :path :headers :body}` and returns a response map `{:status :headers :body}`.
+
+### Actor System (beer.hive)
+
+Require with `(require 'beer.hive :as 'hive)`.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `hive/spawn-actor` | Spawn actor with handler and initial state | `(hive/spawn-actor handler {:count 0})` |
+| `hive/send` | Send async message to actor | `(hive/send pid {:type :inc})` |
+| `hive/ask` | Send message and await reply | `(hive/ask pid {:type :get})` |
+| `hive/stop` | Stop an actor | `(hive/stop pid)` |
+| `hive/whereis` | Look up actor by registered name | `(hive/whereis :counter)` |
+| `hive/supervisor` | Create supervisor for child actors | `(hive/supervisor :one-for-one [...])` |
+
+Actor handlers receive `(state msg)` and return `{:state new-state}` (or `{:state s :reply val}` for `ask`). Pass `{:name :some-name}` in opts to register.
 
 ---
 

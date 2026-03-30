@@ -13,6 +13,9 @@ Beerlang is a Clojure-syntax LISP compiled to bytecode and executed on a stack-b
 - **Exception handling** — `try`/`catch`/`finally`/`throw` with map-based exceptions
 - **Namespaces** — `ns`, `require` with `:as` aliases, qualified symbol resolution
 - **Cooperative multitasking** — green threads with `spawn`/`yield`/`await`, CSP channels
+- **Atoms** — `atom`, `swap!`, `reset!`, `@deref` for managed mutable state
+- **Actor system** — `beer.hive` for Erlang-inspired message-passing actors with supervisors
+- **Networking** — TCP sockets (`beer.tcp`), HTTP server (`beer.http`), JSON parsing (`beer.json`)
 - **Callable non-functions** — keywords, maps, and vectors work in head position
 - **Rich stdlib** — `map`, `filter`, `reduce`, `comp`, `partial`, `sort`, string utilities, file I/O, and more
 - **Numeric tower** — fixnums, floats, arbitrary-precision bigints with auto-promotion
@@ -38,6 +41,11 @@ Beerlang is a Clojure-syntax LISP compiled to bytecode and executed on a stack-b
 (let [c (chan)]
   (spawn (>! c 42))
   (<! c))           ; => 42
+
+;; Mutable state with atoms
+(def counter (atom 0))
+(swap! counter inc)
+@counter  ; => 1
 
 ;; Keywords and maps as functions
 (:name {:name "Beerlang" :type "language"}) ; => "Beerlang"

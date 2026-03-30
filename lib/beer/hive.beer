@@ -24,12 +24,12 @@
 
 ;; --- PID counter & name registry ---
 
-(def beer.hive/*next-id* 0)
-(def beer.hive/*registry* {})
+(def beer.hive/*next-id* (atom 0))
+(def beer.hive/*registry* (atom {}))
 
 (defn -next-id! []
-  (let* [id beer.hive/*next-id*]
-    (def beer.hive/*next-id* (+ id 1))
+  (let* [id @beer.hive/*next-id*]
+    (swap! beer.hive/*next-id* inc)
     id))
 
 ;; --- spawn-actor ---
@@ -63,8 +63,7 @@
                                     :else result)))))))))
           pid {:mailbox mailbox :task task :id id :name name-key}]
      (when name-key
-       (def beer.hive/*registry*
-         (assoc beer.hive/*registry* name-key pid)))
+       (swap! beer.hive/*registry* assoc name-key pid))
      pid)))
 
 ;; --- send ---
@@ -88,7 +87,7 @@
 ;; --- whereis ---
 
 (defn whereis [name]
-  (get beer.hive/*registry* name))
+  (get @beer.hive/*registry* name))
 
 ;; --- supervisor (basic: monitor + log) ---
 

@@ -611,6 +611,14 @@ static Value read_form(Reader* r) {
         case ':':
             return read_keyword(r);
 
+        case '@': {
+            advance(r);
+            Value form = read_form(r);
+            if (r->error) return VALUE_NIL;
+            Value deref_sym = symbol_intern("deref");
+            return cons(deref_sym, cons(form, VALUE_NIL));
+        }
+
         default:
             if (ch == '/' && !is_symbol_char(peek_next(r))) {
                 /* Bare "/" is the division symbol */

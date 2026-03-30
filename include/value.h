@@ -180,6 +180,7 @@ typedef enum {
     TYPE_CHANNEL = 0x70,
     TYPE_HAMT_NODE = 0x80,
     TYPE_HAMT_COLLISION = 0x81,
+    TYPE_ATOM = 0x85,
 } ObjectType;
 
 /* Get object type */

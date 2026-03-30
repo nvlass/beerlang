@@ -1304,6 +1304,7 @@ static Value native_type(VM* vm, int argc, Value* argv) {
             case TYPE_HASHMAP:   name = "map";       break;
             case TYPE_FUNCTION:  name = "function";  break;
             case TYPE_NATIVE_FN: name = "function";  break;
+            case TYPE_ATOM:      name = "atom";      break;
             default:             name = "unknown";   break;
         }
     } else {
@@ -3161,6 +3162,106 @@ void core_register_concurrency(void) {
     register_native(core_ns, "channel?", native_channel_q);
     register_native(core_ns, "task?", native_task_q);
     register_native(core_ns, "task-watch", native_task_watch);
+}
+
+/* =================================================================
+ * Atoms
+ * ================================================================= */
+
+#include "atom.h"
+
+/* (atom val) */
+static Value native_atom(VM* vm, int argc, Value* argv) {
+    (void)vm;
+    if (argc != 1) {
+        vm_error(vm, "atom expects 1 argument");
+        return VALUE_NIL;
+    }
+    return atom_new(argv[0]);
+}
+
+/* (deref ref) */
+static Value native_deref(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "deref expects 1 argument");
+        return VALUE_NIL;
+    }
+    if (!is_atom(argv[0])) {
+        vm_error(vm, "deref expects an atom");
+        return VALUE_NIL;
+    }
+    Value val = atom_deref(argv[0]);
+    /* Return owned ref */
+    if (is_pointer(val)) object_retain(val);
+    return val;
+}
+
+/* (reset! atom val) */
+static Value native_reset(VM* vm, int argc, Value* argv) {
+    if (argc != 2) {
+        vm_error(vm, "reset! expects 2 arguments");
+        return VALUE_NIL;
+    }
+    if (!is_atom(argv[0])) {
+        vm_error(vm, "reset! expects an atom as first argument");
+        return VALUE_NIL;
+    }
+    Value result = atom_reset(argv[0], argv[1]);
+    /* Return owned ref */
+    if (is_pointer(result)) object_retain(result);
+    return result;
+}
+
+/* (swap! atom f & args) — variadic */
+static Value native_swap(VM* vm, int argc, Value* argv) {
+    if (argc < 2) {
+        vm_error(vm, "swap! expects at least 2 arguments");
+        return VALUE_NIL;
+    }
+    if (!is_atom(argv[0])) {
+        vm_error(vm, "swap! expects an atom as first argument");
+        return VALUE_NIL;
+    }
+    Value fn = argv[1];
+    if (!is_pointer(fn) || (object_type(fn) != TYPE_FUNCTION && object_type(fn) != TYPE_NATIVE_FN)) {
+        vm_error(vm, "swap! expects a function as second argument");
+        return VALUE_NIL;
+    }
+    int extra_argc = argc - 2;
+    Value* extra_argv = (extra_argc > 0) ? &argv[2] : NULL;
+    return atom_swap(vm, argv[0], fn, extra_argc, extra_argv);
+}
+
+/* (compare-and-set! atom old new) */
+static Value native_compare_and_set(VM* vm, int argc, Value* argv) {
+    if (argc != 3) {
+        vm_error(vm, "compare-and-set! expects 3 arguments");
+        return VALUE_NIL;
+    }
+    if (!is_atom(argv[0])) {
+        vm_error(vm, "compare-and-set! expects an atom as first argument");
+        return VALUE_NIL;
+    }
+    return atom_compare_and_set(argv[0], argv[1], argv[2]) ? VALUE_TRUE : VALUE_FALSE;
+}
+
+/* (atom? x) */
+static Value native_atom_q(VM* vm, int argc, Value* argv) {
+    (void)vm;
+    if (argc != 1) return VALUE_FALSE;
+    return is_atom(argv[0]) ? VALUE_TRUE : VALUE_FALSE;
+}
+
+void core_register_atoms(void) {
+    Namespace* core_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.core");
+    if (!core_ns) return;
+
+    register_native(core_ns, "atom", native_atom);
+    register_native(core_ns, "deref", native_deref);
+    register_native(core_ns, "reset!", native_reset);
+    register_native(core_ns, "swap!", native_swap);
+    register_native(core_ns, "compare-and-set!", native_compare_and_set);
+    register_native(core_ns, "atom?", native_atom_q);
 }
 
 /* =================================================================

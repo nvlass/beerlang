@@ -840,6 +840,68 @@ check_multi '(require (quote beer.json) :as (quote json))
 check_multi '(require (quote beer.json) :as (quote json))
 (json/emit {:a 1})' '"{\"a\":1}"' "json emit map"
 
+# --- Atoms ---
+echo ""
+echo "--- Atoms ---"
+
+# atom creation and deref
+check '(deref (atom 42))' '42'
+check '@(atom 42)' '42'
+
+# reset!
+check_multi '(def a (atom 0))
+(reset! a 99)
+@a' '99' "reset! atom"
+
+# swap! with native fn
+check_multi '(def a (atom 0))
+(swap! a inc)
+@a' '1' "swap! inc"
+
+# swap! with extra args
+check_multi '(def a (atom 10))
+(swap! a + 5)
+@a' '15' "swap! with extra args"
+
+# swap! with bytecode fn
+check_multi '(def a (atom 0))
+(swap! a (fn [x] (+ (* x 2) 1)))' '1' "swap! bytecode fn on 0"
+
+check_multi '(def a (atom 3))
+(swap! a (fn [x] (* x 10)))
+@a' '30' "swap! bytecode fn"
+
+# compare-and-set!
+check_multi '(def a (atom 10))
+(compare-and-set! a 10 20)' 'true' "CAS success"
+
+check_multi '(def a (atom 10))
+(compare-and-set! a 999 20)' 'false' "CAS failure"
+
+check_multi '(def a (atom 10))
+(compare-and-set! a 10 20)
+@a' '20' "CAS updates value"
+
+# atom? predicate
+check '(atom? (atom 1))' 'true'
+check '(atom? 42)' 'false'
+check '(atom? nil)' 'false'
+
+# type
+check '(type (atom 1))' ':atom'
+
+# multiple swaps
+check_multi '(def a (atom 0))
+(swap! a inc)
+(swap! a inc)
+(swap! a inc)
+@a' '3' "multiple swaps"
+
+# swap! with string values
+check_multi '(def a (atom "hello"))
+(swap! a (fn [s] (str s " world")))
+@a' '"hello world"' "swap! with strings"
+
 # --- HTTP server ---
 echo ""
 echo "--- HTTP ---"

@@ -1,25 +1,23 @@
 (ns beer.test)
 
-;; State lives in beer.test namespace.
-;; Helper functions use qualified def to mutate beer.test vars
-;; regardless of which namespace is current at runtime.
+;; State lives in beer.test namespace as atoms.
 
-(def *tests* [])
-(def *test-count* 0)
-(def *pass-count* 0)
-(def *fail-count* 0)
+(def *tests* (atom []))
+(def *test-count* (atom 0))
+(def *pass-count* (atom 0))
+(def *fail-count* (atom 0))
 
 (defn -register-test! [name tfn]
-  (def beer.test/*tests* (conj beer.test/*tests* [name tfn])))
+  (swap! beer.test/*tests* conj [name tfn]))
 
 (defn -inc-test-count! []
-  (def beer.test/*test-count* (+ beer.test/*test-count* 1)))
+  (swap! beer.test/*test-count* inc))
 
 (defn -inc-pass-count! []
-  (def beer.test/*pass-count* (+ beer.test/*pass-count* 1)))
+  (swap! beer.test/*pass-count* inc))
 
 (defn -inc-fail-count! []
-  (def beer.test/*fail-count* (+ beer.test/*fail-count* 1)))
+  (swap! beer.test/*fail-count* inc))
 
 (defmacro is [expr]
   (if (and (list? expr) (= (first expr) (quote =)) (= (count expr) 3))
@@ -57,13 +55,13 @@
               body)))
 
 (defn run-tests []
-  (def beer.test/*test-count* 0)
-  (def beer.test/*pass-count* 0)
-  (def beer.test/*fail-count* 0)
+  (reset! beer.test/*test-count* 0)
+  (reset! beer.test/*pass-count* 0)
+  (reset! beer.test/*fail-count* 0)
   (println "")
   (println "Running tests...")
   (println "")
-  (doseq [t beer.test/*tests*]
+  (doseq [t @beer.test/*tests*]
     (let* [tname (nth t 0)
            tfn (nth t 1)]
       (println (str "Testing " tname))
@@ -71,8 +69,8 @@
         (tfn)
         (catch e
           (println (str "ERROR in " tname ": " (get e :message "unknown error")))
-          (def beer.test/*fail-count* (+ beer.test/*fail-count* 1))))))
+          (swap! beer.test/*fail-count* inc)))))
   (println "")
-  (println (str "Ran " (count beer.test/*tests*) " tests containing " beer.test/*test-count* " assertions."))
-  (println (str beer.test/*pass-count* " passed, " beer.test/*fail-count* " failed."))
-  (if (= beer.test/*fail-count* 0) 0 1))
+  (println (str "Ran " (count @beer.test/*tests*) " tests containing " @beer.test/*test-count* " assertions."))
+  (println (str @beer.test/*pass-count* " passed, " @beer.test/*fail-count* " failed."))
+  (if (= @beer.test/*fail-count* 0) 0 1))

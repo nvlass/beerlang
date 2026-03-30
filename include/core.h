@@ -39,6 +39,9 @@ void core_register_shell(void);
 /* Register beer.tcp namespace (tcp/listen, tcp/accept, etc.) */
 void core_register_tcp(void);
 
+/* Register atom functions (atom, deref, reset!, swap!, compare-and-set!, atom?) */
+void core_register_atoms(void);
+
 /* Register core macros (defn, when, and, or) - compiled from beerlang source */
 void core_register_macros(void);
 

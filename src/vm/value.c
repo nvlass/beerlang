@@ -12,6 +12,7 @@
 #include "bigint.h"
 #include "function.h"
 #include "native.h"
+#include "atom.h"
 
 /* Print a value (for debugging) */
 void value_print(Value v) {
@@ -89,6 +90,13 @@ void value_print(Value v) {
             case TYPE_CHANNEL:
                 printf("#<channel>");
                 break;
+            case TYPE_ATOM: {
+                Atom* a = (Atom*)untag_pointer(v);
+                printf("#<atom ");
+                value_print(a->value);
+                printf(">");
+                break;
+            }
 
             default: {
                 Object* obj = (Object*)untag_pointer(v);
@@ -201,6 +209,13 @@ void value_print_readable(Value v) {
             case TYPE_CHANNEL:
                 printf("#<channel>");
                 break;
+            case TYPE_ATOM: {
+                Atom* a = (Atom*)untag_pointer(v);
+                printf("#<atom ");
+                value_print_readable(a->value);
+                printf(">");
+                break;
+            }
             default: {
                 Object* obj = (Object*)untag_pointer(v);
                 printf("#<object type=%d @%p>", obj->type & 0xFF, (void*)obj);
@@ -480,6 +495,7 @@ const char* value_type_name(Value v) {
             case TYPE_STREAM: return "stream";
             case TYPE_TASK: return "task";
             case TYPE_CHANNEL: return "channel";
+            case TYPE_ATOM: return "atom";
             default: return "unknown-object";
         }
     }
