@@ -10,10 +10,16 @@
 ;;   (spawn-actor handler initial-state)
 ;;   (spawn-actor handler initial-state {:name :foo})
 ;;   (send pid msg)
+;;   (ask pid msg)          — request-reply (blocks caller)
 ;;   (stop pid)
 ;;   (whereis :name)
 ;;
-;; Handler returns new state, or {:stop value} to terminate.
+;; Handler returns:
+;;   plain-value        → new state
+;;   {:reply v}         → reply v, state unchanged
+;;   {:reply v :state s}→ reply v, state = s
+;;   {:stop v}          → terminate with v
+;;   {:stop v :reply r} → reply r, then terminate
 ;; ============================================================
 
 ;; --- PID counter & name registry ---
@@ -36,13 +42,25 @@
           name-key (get opts :name)
           task (spawn (fn []
                  (loop [state initial-state]
-                   (let* [msg (<! mailbox)]
-                     (if (nil? msg)
+                   (let* [envelope (<! mailbox)]
+                     (if (nil? envelope)
                        state
-                       (let* [result (handler state msg)]
-                         (if (and (map? result) (contains? result :stop))
+                       (let* [kind      (first envelope)
+                              msg       (nth envelope 1)
+                              result    (handler state msg)
+                              is-map    (map? result)
+                              has-reply (and is-map (contains? result :reply))
+                              has-stop  (and is-map (contains? result :stop))]
+                         (when (= kind :call)
+                           (>! (nth envelope 2)
+                               (if has-reply (get result :reply) nil)))
+                         (if has-stop
                            (get result :stop)
-                           (recur result))))))))
+                           (recur (cond
+                                    (and has-reply (contains? result :state))
+                                      (get result :state)
+                                    has-reply state
+                                    :else result)))))))))
           pid {:mailbox mailbox :task task :id id :name name-key}]
      (when name-key
        (def beer.hive/*registry*
@@ -52,8 +70,15 @@
 ;; --- send ---
 
 (defn send [pid msg]
-  (>! (get pid :mailbox) msg)
+  (>! (get pid :mailbox) [:cast msg])
   true)
+
+;; --- ask (request-reply) ---
+
+(defn ask [pid msg]
+  (let* [reply-ch (chan 1)]
+    (>! (get pid :mailbox) [:call msg reply-ch])
+    (<! reply-ch)))
 
 ;; --- stop (graceful) ---
 

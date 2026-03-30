@@ -15,6 +15,7 @@ beerlang.test          ; Testing framework                      — NOT YET IMPL
 beerlang.repl          ; REPL utilities                         — NOT YET IMPLEMENTED
 beerlang.bytecode      ; Bytecode metaprogramming               — NOT YET IMPLEMENTED
 beerlang.system        ; System interface                       — NOT YET IMPLEMENTED
+beer.hive              ; Actor system (Erlang-inspired)          — WORK IN PROGRESS
 ```
 
 ### Core Library (beerlang.core)
@@ -830,4 +831,40 @@ But this is **not recommended** because:
 (defprotocol ISeq
   (first [s])
   (rest [s]))
+```
+
+### beer.hive — Actor System *(Work in progress)*
+
+> **Note:** Phase 1 (local actors) is implemented. Distribution, supervised restarts with backoff, receive with pattern matching, and actor linking are planned for future phases.
+
+Erlang-inspired actor library. Actors are lightweight tasks with a mailbox channel and a handler function that threads state through messages.
+
+```clojure
+(require (quote beer.hive) :as (quote hive))
+
+;; Spawn an actor — handler receives [state msg], returns new state
+(def pid (hive/spawn-actor handler initial-state))
+(def pid (hive/spawn-actor handler initial-state {:name :my-actor}))
+
+;; Send a message (non-blocking)
+(hive/send pid [:some-command arg1 arg2])
+
+;; Lookup actor by name
+(hive/whereis :my-actor)
+
+;; Graceful shutdown (closes mailbox, actor finishes current message)
+(hive/stop pid)
+
+;; Handler can self-terminate by returning {:stop value}
+(defn my-handler [state msg]
+  (cond
+    (= (first msg) :add)  (+ state (nth msg 1))
+    (= (first msg) :read) (do (>! (nth msg 1) state) state)
+    (= (first msg) :quit) {:stop state}
+    :else state))
+
+;; Basic supervisor (monitors children, logs failures)
+(hive/supervisor :one-for-one
+  [(fn [] (hive/spawn-actor handler1 0))
+   (fn [] (hive/spawn-actor handler2 nil))])
 ```

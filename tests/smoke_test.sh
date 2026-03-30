@@ -934,6 +934,23 @@ check_multi '(require (quote beer.hive) :as (quote hive))
 (hive/stop (hive/whereis :counter))
 (await (get (hive/whereis :counter) :task))' '1' "actor registry whereis"
 
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def pid (hive/spawn-actor (fn [s m] (cond (= (first m) :add) (+ s (nth m 1)) (= (first m) :read) {:reply s} :else s)) 0))
+(hive/send pid [:add 10])
+(hive/send pid [:add 5])
+(def ch (chan 1))
+(spawn (fn [] (>! ch (hive/ask pid [:read]))))
+(<! ch)' '15' "actor ask/reply"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def pid (hive/spawn-actor (fn [s m] (cond (= (first m) :inc) {:reply (+ s 1) :state (+ s 1)} (= (first m) :read) {:reply s} :else s)) 0))
+(hive/send pid [:inc])
+(hive/send pid [:inc])
+(hive/send pid [:inc])
+(def ch (chan 1))
+(spawn (fn [] (>! ch (hive/ask pid [:read]))))
+(<! ch)' '3' "actor ask with state update"
+
 # --- CLI subcommands (beer new / run / build) ---
 echo ""
 echo "--- CLI subcommands ---"
