@@ -17,8 +17,7 @@
 ;; ============================================================
 
 (defn parse-method [s]
-  ;; Return lowercase string method (no keyword fn available)
-  (str/lower-case s))
+  (keyword (str/lower-case s)))
 
 (defn parse-request-line [line]
   (let [parts (str/split (str/trim line) " ")]

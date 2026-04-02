@@ -330,3 +330,10 @@ other. Design goal: pure beerlang library with minimal VM changes.
 ## Branch Notes
 
 - **`compiler-destructuring`** — preserves the C-based `let` destructuring approach (superseded by macro approach on `main`)
+
+
+
+## NVlass TODO
+
+### Multi arity `keyword`
+Should also accept namespace (?) -- also namespace qualified keywords should be printed with namespaces

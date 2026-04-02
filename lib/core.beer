@@ -4,22 +4,31 @@
 ; defn: convenience for (def name (fn name ...))
 ; Single arity:  (defn name [params] body...)
 ; Multi-arity:   (defn name ([params1] body1...) ([params2] body2...) ...)
+; Optional docstring: (defn name "docstring" [params] body...)
 (defmacro defn [name & fdecl]
-  (if (vector? (first fdecl))
-    ; Single arity: (defn name [params] body...)
-    (list (quote def) name (cons (quote fn) (cons name fdecl)))
-    ; Multi-arity: each fdecl element is ([params] body...)
-    (let* [arities fdecl
-           clauses (__multi-arity-clauses arities)
-           err-expr (list (quote __arity-error)
-                          (list (quote str)
-                                (str name)
-                                " called with wrong number of args: "
-                                (list (quote count) (quote __args))))
-           full-clauses (concat clauses (list :else err-expr))]
-      (list (quote def) name
-            (list (quote fn) name (quote [& __args])
-                  (cons (quote cond) full-clauses))))))
+  (let* [has-doc (string? (first fdecl))
+         docstring (if has-doc (first fdecl) nil)
+         fdecl (if has-doc (rest fdecl) fdecl)
+         base (if (vector? (first fdecl))
+                ; Single arity
+                (list (quote def) name (cons (quote fn) (cons name fdecl)))
+                ; Multi-arity
+                (let* [arities fdecl
+                       clauses (__multi-arity-clauses arities)
+                       err-expr (list (quote __arity-error)
+                                      (list (quote str)
+                                            (str name)
+                                            " called with wrong number of args: "
+                                            (list (quote count) (quote __args))))
+                       full-clauses (concat clauses (list :else err-expr))]
+                  (list (quote def) name
+                        (list (quote fn) name (quote [& __args])
+                              (cons (quote cond) full-clauses)))))]
+    (if has-doc
+      (list (quote do) base
+            (list (quote alter-meta!) (list (quote quote) name) (quote assoc) :doc docstring)
+            name)
+      base)))
 
 ; Helper: build cond clauses for multi-arity dispatch
 (defn __multi-arity-clauses [arities]
@@ -32,6 +41,10 @@
       (concat (list (list (quote =) (list (quote count) (quote __args)) n)
                     (list (quote apply) (cons (quote fn) arity) (quote __args)))
               (__multi-arity-clauses (rest arities))))))
+
+; doc: print documentation for a symbol
+(defmacro doc [sym]
+  (list (quote __print-doc) (str sym) (list (quote meta) (list (quote quote) sym))))
 
 ; when: (when test body...) => (if test (do body...) nil)
 (defmacro when [test & body]

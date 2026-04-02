@@ -165,6 +165,7 @@ All arithmetic supports fixnum, bigint, and float with automatic promotion.
 | `dissoc` | Remove keys from map | `(dissoc {:a 1 :b 2} :b)` → `{:a 1}` |
 | `keys` | Map keys as list | `(keys {:a 1 :b 2})` → `(:a :b)` |
 | `vals` | Map values as list | `(vals {:a 1 :b 2})` → `(1 2)` |
+| `reduce-kv` | Reduce over map key-value pairs | `(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2})` → `3` |
 | `contains?` | Check key existence (maps and vector indices) | `(contains? {:a 1} :a)` → `true` |
 | `concat` | Concatenate sequences | `(concat [1 2] [3 4])` → `(1 2 3 4)` |
 
@@ -271,6 +272,27 @@ Atoms provide managed mutable state with atomic updates.
 | `compare-and-set!` | CAS: set new if current equals old | `(compare-and-set! a 0 1)` → `true` |
 | `atom?` | Test if value is an atom | `(atom? a)` → `true` |
 
+### Metadata
+
+Functions and vars can carry metadata (arbitrary maps).
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `meta` | Get metadata from a symbol's var or a function | `(meta 'foo)` → `{:doc "..."}` |
+| `with-meta` | Return function with new metadata | `(with-meta f {:tag "x"})` |
+| `alter-meta!` | Apply fn to var's current metadata | `(alter-meta! 'foo assoc :added true)` |
+| `doc` | Print documentation for a symbol (macro) | `(doc map)` |
+
+`defn` and `defmacro` support an optional docstring after the name:
+```clojure
+(defn greet "Greet a person by name." [name] (str "Hello, " name))
+(doc greet)
+;; -------------------------
+;; greet
+;;   Greet a person by name.
+;; -------------------------
+```
+
 ### Tar Archives (beer.tar)
 
 Require with `(require 'beer.tar :as 'tar)`.
@@ -343,7 +365,8 @@ Actor handlers receive `(state msg)` and return `{:state new-state}` (or `{:stat
 
 | Macro | Description | Example |
 |-------|-------------|---------|
-| `defn` | Define named function (multi-arity supported) | `(defn add [a b] (+ a b))` |
+| `defn` | Define named function (optional docstring, multi-arity) | `(defn add "Add two nums" [a b] (+ a b))` |
+| `doc` | Print documentation for a symbol | `(doc add)` |
 | `when` | Conditional without else branch | `(when (> x 0) (println "pos"))` |
 | `and` | Short-circuit logical AND | `(and true 42)` → `42` |
 | `or` | Short-circuit logical OR | `(or nil false 42)` → `42` |

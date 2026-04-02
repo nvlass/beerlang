@@ -22,6 +22,7 @@ typedef struct Function {
     int num_constants;       /* Number of constants */
     char* name;              /* Function name (owned, always non-NULL) */
     char* ns_name;           /* Defining namespace name (owned, NULL = current) */
+    Value    meta;           /* Metadata map (or nil) */
     Value    closed[];       /* Flexible array: closure environment */
 } Function;
 
@@ -59,6 +60,10 @@ const char* function_name(Value fn);
 /* Get/set defining namespace */
 const char* function_ns_name(Value fn);
 void function_set_ns_name(Value fn, const char* ns_name);
+
+/* Get/set metadata */
+Value function_get_meta(Value fn);
+void function_set_meta(Value fn, Value meta);
 
 /* Type check */
 bool is_function(Value v);

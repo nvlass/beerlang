@@ -42,6 +42,9 @@ void core_register_tcp(void);
 /* Register atom functions (atom, deref, reset!, swap!, compare-and-set!, atom?) */
 void core_register_atoms(void);
 
+/* Register metadata functions (meta, with-meta, alter-meta!, __print-doc) */
+void core_register_metadata(void);
+
 /* Register core macros (defn, when, and, or) - compiled from beerlang source */
 void core_register_macros(void);
 

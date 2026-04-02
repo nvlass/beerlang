@@ -348,6 +348,7 @@ void namespace_init(void) {
     /* Initialize atom type and register atom natives */
     atom_init();
     core_register_atoms();
+    core_register_metadata();
     core_register_tar();
     core_register_shell();
     core_register_tcp();

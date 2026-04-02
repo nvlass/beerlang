@@ -1543,6 +1543,112 @@ static Value native_set_macro(VM* vm, int argc, Value* argv) {
     return VALUE_NIL;
 }
 
+/* reduce-kv: (reduce-kv f init map)
+ * Calls (f acc key value) for each map entry, threading the accumulator. */
+typedef struct {
+    VM* vm;
+    Value fn;
+    Value acc;
+    bool error;
+} ReduceKvCtx;
+
+static void reduce_kv_native_cb(Value key, Value value, void* ctx_ptr) {
+    ReduceKvCtx* ctx = (ReduceKvCtx*)ctx_ptr;
+    if (ctx->error) return;
+    NativeFn native_fn = native_function_ptr(ctx->fn);
+    Value argv[3] = { ctx->acc, key, value };
+    Value result = native_fn(ctx->vm, 3, argv);
+    if (ctx->vm->error) { ctx->error = true; return; }
+    if (is_pointer(ctx->acc)) object_release(ctx->acc);
+    ctx->acc = result;
+}
+
+static void reduce_kv_bytecode_cb(Value key, Value value, void* ctx_ptr) {
+    ReduceKvCtx* ctx = (ReduceKvCtx*)ctx_ptr;
+    if (ctx->error) return;
+
+    /* Build mini bytecode: PUSH_CONST acc, PUSH_CONST key, PUSH_CONST value, PUSH_CONST fn, CALL 3, HALT */
+    Value consts[4] = { ctx->acc, key, value, ctx->fn };
+    uint8_t code[4 * 5 + 3 + 1]; /* 4 PUSH_CONST (5 bytes each) + CALL (3 bytes) + HALT */
+    size_t pc = 0;
+    for (int i = 0; i < 4; i++) {
+        code[pc++] = OP_PUSH_CONST;
+        code[pc++] = (uint8_t)(i & 0xFF);
+        code[pc++] = (uint8_t)((i >> 8) & 0xFF);
+        code[pc++] = (uint8_t)((i >> 16) & 0xFF);
+        code[pc++] = (uint8_t)((i >> 24) & 0xFF);
+    }
+    code[pc++] = OP_CALL;
+    code[pc++] = 3;
+    code[pc++] = 0;
+    code[pc++] = OP_HALT;
+
+    VM* temp_vm = vm_new(256);
+    temp_vm->scheduler = ctx->vm->scheduler;
+    vm_load_code(temp_vm, code, (int)pc);
+    vm_load_constants(temp_vm, consts, 4);
+    vm_run(temp_vm);
+
+    if (temp_vm->error) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf), "reduce-kv: %s", temp_vm->error_msg);
+        vm_error(ctx->vm, errbuf);
+        ctx->error = true;
+    } else if (temp_vm->stack_pointer > 0) {
+        Value result = temp_vm->stack[temp_vm->stack_pointer - 1];
+        if (is_pointer(result)) object_retain(result);
+        if (is_pointer(ctx->acc)) object_release(ctx->acc);
+        ctx->acc = result;
+    }
+
+    vm_free(temp_vm);
+}
+
+static Value native_reduce_kv(VM* vm, int argc, Value* argv) {
+    if (argc != 3) {
+        vm_error(vm, "reduce-kv: requires exactly 3 arguments (f init map)");
+        return VALUE_NIL;
+    }
+
+    Value fn = argv[0];
+    Value init = argv[1];
+    Value map = argv[2];
+
+    if (!is_function(fn) && !is_native_function(fn)) {
+        vm_error(vm, "reduce-kv: first argument must be a function");
+        return VALUE_NIL;
+    }
+
+    /* nil or empty map → return init */
+    if (is_nil(map)) {
+        if (is_pointer(init)) object_retain(init);
+        return init;
+    }
+
+    if (!is_hashmap(map)) {
+        vm_error(vm, "reduce-kv: third argument must be a map or nil");
+        return VALUE_NIL;
+    }
+
+    /* Retain init — ctx owns the accumulator */
+    if (is_pointer(init)) object_retain(init);
+
+    ReduceKvCtx ctx = { .vm = vm, .fn = fn, .acc = init, .error = false };
+
+    if (is_native_function(fn)) {
+        hashmap_foreach(map, reduce_kv_native_cb, &ctx);
+    } else {
+        hashmap_foreach(map, reduce_kv_bytecode_cb, &ctx);
+    }
+
+    if (ctx.error) {
+        if (is_pointer(ctx.acc)) object_release(ctx.acc);
+        return VALUE_NIL;
+    }
+
+    return ctx.acc; /* owned ref transferred to caller */
+}
+
 /* apply: (apply f args) or (apply f a b ... args)
  * Last argument must be a sequence; preceding args are prepended */
 static Value native_apply(VM* vm, int argc, Value* argv) {
@@ -2562,6 +2668,7 @@ void core_register_collections(void) {
     register_native(core_ns, "keys", native_keys);
     register_native(core_ns, "vals", native_vals);
     register_native(core_ns, "contains?", native_contains_q);
+    register_native(core_ns, "reduce-kv", native_reduce_kv);
     register_native(core_ns, "concat", native_concat);
 }
 
@@ -3262,6 +3369,228 @@ void core_register_atoms(void) {
     register_native(core_ns, "swap!", native_swap);
     register_native(core_ns, "compare-and-set!", native_compare_and_set);
     register_native(core_ns, "atom?", native_atom_q);
+}
+
+/* =================================================================
+ * Metadata: meta, with-meta, alter-meta!, __print-doc
+ * ================================================================= */
+
+/* Helper: resolve a symbol to its Var (current ns, then beer.core) */
+static Var* resolve_symbol_to_var(VM* vm __attribute__((unused)), Value sym) {
+    Namespace* ns = namespace_registry_current(global_namespace_registry);
+    if (!ns) return NULL;
+    Var* var = namespace_lookup(ns, sym);
+    if (var) return var;
+    Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
+    if (core_ns && core_ns != ns) {
+        var = namespace_lookup(core_ns, sym);
+    }
+    return var;
+}
+
+/* (meta x) — if x is symbol, resolve to Var and return its meta;
+ *            if x is function, return function meta;
+ *            otherwise nil */
+static Value native_meta(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "meta: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    Value x = argv[0];
+
+    if (is_pointer(x) && object_type(x) == TYPE_SYMBOL) {
+        Var* var = resolve_symbol_to_var(vm, x);
+        if (!var) return VALUE_NIL;
+        Value m = var->meta;
+        if (is_pointer(m)) object_retain(m);
+        return m;
+    }
+
+    if (is_function(x)) {
+        Value m = function_get_meta(x);
+        if (is_pointer(m)) object_retain(m);
+        return m;
+    }
+
+    return VALUE_NIL;
+}
+
+/* (with-meta x m) — set metadata on a function, return x */
+static Value native_with_meta(VM* vm, int argc, Value* argv) {
+    if (argc != 2) {
+        vm_error(vm, "with-meta: requires exactly 2 arguments");
+        return VALUE_NIL;
+    }
+    Value x = argv[0];
+    Value m = argv[1];
+
+    if (is_function(x)) {
+        function_set_meta(x, m);
+        object_retain(x);
+        return x;
+    }
+
+    vm_error(vm, "with-meta: first argument must be a function");
+    return VALUE_NIL;
+}
+
+/* (alter-meta! sym f & args) — resolve sym to Var, apply f to current meta + args,
+ * set result as new meta, return new meta */
+static Value native_alter_meta(VM* vm, int argc, Value* argv) {
+    if (argc < 2) {
+        vm_error(vm, "alter-meta!: requires at least 2 arguments (symbol, fn)");
+        return VALUE_NIL;
+    }
+
+    Value sym = argv[0];
+    if (!is_pointer(sym) || object_type(sym) != TYPE_SYMBOL) {
+        vm_error(vm, "alter-meta!: first argument must be a symbol");
+        return VALUE_NIL;
+    }
+
+    Value f = argv[1];
+    if (!is_function(f) && !is_native_function(f)) {
+        vm_error(vm, "alter-meta!: second argument must be a function");
+        return VALUE_NIL;
+    }
+
+    Var* var = resolve_symbol_to_var(vm, sym);
+    if (!var) {
+        vm_error(vm, "alter-meta!: var not found");
+        return VALUE_NIL;
+    }
+
+    /* Build args: current-meta, then argv[2..argc-1] */
+    Value current_meta = var->meta;
+    if (is_nil(current_meta)) {
+        current_meta = hashmap_create_default();
+    } else {
+        if (is_pointer(current_meta)) object_retain(current_meta);
+    }
+
+    int total_args = 1 + (argc - 2);  /* current_meta + extra args */
+    Value* call_args = malloc(sizeof(Value) * (size_t)total_args);
+    call_args[0] = current_meta;
+    for (int i = 2; i < argc; i++) {
+        call_args[i - 2 + 1] = argv[i];
+    }
+
+    Value result;
+    if (is_native_function(f)) {
+        NativeFn native_fn = native_function_ptr(f);
+        result = native_fn(vm, total_args, call_args);
+    } else {
+        /* Bytecode function: temp VM pattern */
+        int n_consts = total_args + 1;
+        Value* consts = malloc(sizeof(Value) * (size_t)n_consts);
+        for (int i = 0; i < total_args; i++) consts[i] = call_args[i];
+        consts[total_args] = f;
+
+        int bc_size = n_consts * 5 + 4;
+        uint8_t* bc = calloc(1, (size_t)bc_size);
+        int pc = 0;
+        for (int i = 0; i < total_args; i++) {
+            bc[pc++] = OP_PUSH_CONST;
+            bc[pc++] = (uint8_t)(i & 0xFF);
+            bc[pc++] = (uint8_t)((i >> 8) & 0xFF);
+            bc[pc++] = (uint8_t)((i >> 16) & 0xFF);
+            bc[pc++] = (uint8_t)((i >> 24) & 0xFF);
+        }
+        bc[pc++] = OP_PUSH_CONST;
+        uint32_t fn_idx = (uint32_t)total_args;
+        bc[pc++] = (uint8_t)(fn_idx & 0xFF);
+        bc[pc++] = (uint8_t)((fn_idx >> 8) & 0xFF);
+        bc[pc++] = (uint8_t)((fn_idx >> 16) & 0xFF);
+        bc[pc++] = (uint8_t)((fn_idx >> 24) & 0xFF);
+        bc[pc++] = OP_CALL;
+        bc[pc++] = (uint8_t)(total_args & 0xFF);
+        bc[pc++] = (uint8_t)((total_args >> 8) & 0xFF);
+        bc[pc++] = OP_HALT;
+
+        VM* temp = vm_new(pc);
+        temp->code = bc;
+        temp->code_size = pc;
+        temp->constants = consts;
+        temp->num_constants = n_consts;
+        temp->scheduler = vm->scheduler;
+
+        vm_run(temp);
+        if (temp->error) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "alter-meta!: %s", temp->error_msg);
+            vm_error(vm, buf);
+            result = VALUE_NIL;
+        } else {
+            result = vm_pop(temp);
+            if (is_pointer(result)) object_retain(result);
+        }
+
+        temp->code = NULL;
+        temp->constants = NULL;
+        temp->scheduler = NULL;
+        vm_free(temp);
+        free(bc);
+        free(consts);
+    }
+
+    /* Release the temp current_meta we retained/created */
+    if (is_pointer(current_meta)) object_release(current_meta);
+
+    free(call_args);
+
+    /* Set new meta on var */
+    Value old_meta = var->meta;
+    var->meta = result;
+    if (is_pointer(result)) object_retain(result);
+    if (is_pointer(old_meta)) object_release(old_meta);
+
+    /* result is already an owned ref (from native call or retained from temp VM) */
+    return result;
+}
+
+/* (__print-doc name-str meta-map) — print documentation */
+static Value native___print_doc(VM* vm, int argc, Value* argv) {
+    (void)vm;
+    if (argc != 2) return VALUE_NIL;
+
+    Value name_str = argv[0];
+    Value meta_map = argv[1];
+    Value out = stream_get_stdout();
+
+    stream_write_string(out, "-------------------------\n", 26);
+
+    if (is_string(name_str)) {
+        stream_write_string(out, string_cstr(name_str), (int)string_byte_length(name_str));
+    }
+    stream_write_string(out, "\n", 1);
+
+    if (is_pointer(meta_map) && object_type(meta_map) == TYPE_HASHMAP) {
+        Value doc_key = keyword_intern("doc");
+        Value doc_val = hashmap_get(meta_map, doc_key);
+        if (!is_nil(doc_val) && is_string(doc_val)) {
+            stream_write_string(out, "  ", 2);
+            stream_write_string(out, string_cstr(doc_val), (int)string_byte_length(doc_val));
+            stream_write_string(out, "\n", 1);
+        } else {
+            stream_write_string(out, "  No documentation found.\n", 26);
+        }
+    } else {
+        stream_write_string(out, "  No documentation found.\n", 26);
+    }
+
+    stream_write_string(out, "-------------------------\n", 26);
+    stream_flush(out);
+    return VALUE_NIL;
+}
+
+void core_register_metadata(void) {
+    Namespace* core_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.core");
+    if (!core_ns) return;
+
+    register_native(core_ns, "meta", native_meta);
+    register_native(core_ns, "with-meta", native_with_meta);
+    register_native(core_ns, "alter-meta!", native_alter_meta);
+    register_native(core_ns, "__print-doc", native___print_doc);
 }
 
 /* =================================================================

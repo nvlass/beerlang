@@ -15,6 +15,11 @@ static void function_destructor(struct Object* obj) {
     free(fn->name);
     free(fn->ns_name);
 
+    /* Release metadata */
+    if (is_pointer(fn->meta)) {
+        object_release(fn->meta);
+    }
+
     /* Release all closed-over values */
     for (uint16_t i = 0; i < fn->n_closed; i++) {
         if (is_pointer(fn->closed[i])) {
@@ -51,6 +56,7 @@ Value function_new_closure(int arity, uint32_t code_offset, uint16_t n_locals,
     fn->num_constants = 0;
     fn->name = strdup(name ? name : "anonymous-fn");
     fn->ns_name = NULL;
+    fn->meta = VALUE_NIL;
 
     /* Copy and retain closed-over values */
     if (n_closed > 0 && closed_values) {
@@ -160,6 +166,23 @@ void function_set_ns_name(Value fn, const char* ns_name) {
     Function* f = (Function*)untag_pointer(fn);
     free(f->ns_name);
     f->ns_name = ns_name ? strdup(ns_name) : NULL;
+}
+
+/* Get metadata */
+Value function_get_meta(Value fn) {
+    assert(is_function(fn));
+    Function* f = (Function*)untag_pointer(fn);
+    return f->meta;
+}
+
+/* Set metadata */
+void function_set_meta(Value fn, Value meta) {
+    assert(is_function(fn));
+    Function* f = (Function*)untag_pointer(fn);
+    Value old = f->meta;
+    f->meta = meta;
+    if (is_pointer(meta)) object_retain(meta);
+    if (is_pointer(old)) object_release(old);
 }
 
 /* Type check */

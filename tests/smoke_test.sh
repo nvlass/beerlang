@@ -840,6 +840,39 @@ check_multi '(require (quote beer.json) :as (quote json))
 check_multi '(require (quote beer.json) :as (quote json))
 (json/emit {:a 1})' '"{\"a\":1}"' "json emit map"
 
+# --- Metadata & Docstrings ---
+echo ""
+echo "--- Metadata & Docstrings ---"
+
+# meta on builtin returns nil (no doc set)
+check '(meta (quote +))' 'nil'
+
+# defn with docstring
+check_multi '(defn foo "a docstring" [x] x)
+(:doc (meta (quote foo)))' '"a docstring"' "defn docstring"
+
+# defn without docstring => nil meta
+check_multi '(defn bar [x] x)
+(meta (quote bar))' 'nil' "defn no docstring meta is nil"
+
+# alter-meta! on a var
+check_multi '(defn baz [x] x)
+(alter-meta! (quote baz) assoc :added true)
+(:added (meta (quote baz)))' 'true' "alter-meta! assoc"
+
+# with-meta on a function
+check_multi '(def f (with-meta (fn [x] x) {:tag "anon"}))
+(:tag (meta f))' '"anon"' "with-meta on fn"
+
+# defmacro with docstring
+check_multi '(defmacro my-when "like when" [test & body] (list (quote if) test (cons (quote do) body) nil))
+(:doc (meta (quote my-when)))' '"like when"' "defmacro docstring"
+
+# multiple metadata keys
+check_multi '(defn documented "hello world" [x] x)
+(alter-meta! (quote documented) assoc :added "1.0")
+(:added (meta (quote documented)))' '"1.0"' "multiple meta keys"
+
 # --- Atoms ---
 echo ""
 echo "--- Atoms ---"
@@ -1093,6 +1126,13 @@ else
 fi
 
 rm -rf "$CLI_TMPDIR"
+
+# reduce-kv
+check '(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2 :c 3})' '6'
+check '(reduce-kv (fn [acc k v] (+ acc 1)) 0 {})' '0'
+check '(reduce-kv (fn [acc k v] (+ acc 1)) 0 nil)' '0'
+check '(get (reduce-kv (fn [acc k v] (assoc acc k (* v 2))) {} {:a 1 :b 2 :c 3}) :b)' '4'
+check '(count (reduce-kv (fn [acc k v] (conj acc k)) [] {:x 1 :y 2}))' '2'
 
 echo ""
 echo "===================="

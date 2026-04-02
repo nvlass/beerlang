@@ -1110,7 +1110,8 @@ static void compile_def(Compiler* c, Value form) {
  * ================================================================= */
 
 static void compile_defmacro(Compiler* c, Value form) {
-    /* (defmacro name [params] body...) */
+    /* (defmacro name [params] body...)
+     * (defmacro name "docstring" [params] body...) */
     Value name = list_nth_or_nil(form, 1);
 
     if (!is_pointer(name) || object_type(name) != TYPE_SYMBOL) {
@@ -1118,9 +1119,21 @@ static void compile_defmacro(Compiler* c, Value form) {
         return;
     }
 
-    /* Build (fn name [params] body...) and compile it */
-    Value fn_form = cons(symbol_intern("fn"), cdr(form));  /* (fn name [params] body...) */
-    compile_fn(c, fn_form);
+    /* Check for optional docstring */
+    Value docstring = VALUE_NIL;
+    Value rest_after_name = cdr(cdr(form));  /* skip 'defmacro' and name */
+    if (is_cons(rest_after_name) && is_string(car(rest_after_name))) {
+        docstring = car(rest_after_name);
+        /* Build fn form skipping the docstring:
+         * (fn name [params] body...) from (defmacro name "doc" [params] body...) */
+        Value fn_rest = cons(name, cdr(rest_after_name));
+        Value fn_form = cons(symbol_intern("fn"), fn_rest);
+        compile_fn(c, fn_form);
+    } else {
+        /* No docstring: (fn name [params] body...) */
+        Value fn_form = cons(symbol_intern("fn"), cdr(form));
+        compile_fn(c, fn_form);
+    }
 
     /* Store in namespace (like def) */
     int name_idx = constant_pool_add(c->constants, name);
@@ -1141,7 +1154,34 @@ static void compile_defmacro(Compiler* c, Value form) {
     /* Call set-macro! with 1 arg */
     emit_uint16(c, OP_CALL, 1);
 
-    /* Discard set-macro! return (nil), load the defined var as result */
+    /* If docstring present, call (alter-meta! 'name assoc :doc docstring) */
+    if (!is_nil(docstring)) {
+        emit_op(c, OP_POP);  /* discard set-macro! return */
+
+        /* Push args: name-symbol, assoc, :doc, docstring */
+        emit_uint32(c, OP_PUSH_CONST, (uint32_t)sym_const_idx);
+
+        Value assoc_sym = symbol_intern("assoc");
+        int assoc_idx = constant_pool_add(c->constants, assoc_sym);
+        emit_uint16(c, OP_LOAD_VAR, (uint16_t)assoc_idx);
+
+        Value doc_kw = keyword_intern("doc");
+        int doc_kw_idx = constant_pool_add(c->constants, doc_kw);
+        emit_uint32(c, OP_PUSH_CONST, (uint32_t)doc_kw_idx);
+
+        int doc_str_idx = constant_pool_add(c->constants, docstring);
+        emit_uint32(c, OP_PUSH_CONST, (uint32_t)doc_str_idx);
+
+        /* Load alter-meta! */
+        Value alter_meta_sym = symbol_intern("alter-meta!");
+        int alter_meta_idx = constant_pool_add(c->constants, alter_meta_sym);
+        emit_uint16(c, OP_LOAD_VAR, (uint16_t)alter_meta_idx);
+
+        /* Call alter-meta! with 4 args */
+        emit_uint16(c, OP_CALL, 4);
+    }
+
+    /* Discard last return, load the defined var as result */
     emit_op(c, OP_POP);
     emit_uint16(c, OP_LOAD_VAR, (uint16_t)name_idx);
 }
