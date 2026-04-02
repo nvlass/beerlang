@@ -5,9 +5,9 @@
 ## Implementation Status Summary
 
 **All tests passing, 100% pass rate**
-- Unit tests: 81
-- REPL smoke tests: 340
-- **Last Updated:** 2026-03-22
+- Unit tests: 61
+- REPL smoke tests: 397
+- **Last Updated:** 2026-04-03
 
 ## Completed Phases
 
@@ -91,6 +91,42 @@
 - `max`, `min`, `abs` numeric functions
 - `sort`, `sort-by` (merge sort), `flatten`, `distinct`, `select-keys`
 
+### TCP Sockets — COMPLETE
+- `tcp-listen`, `tcp-accept`, `tcp-connect`, `tcp-local-port` natives
+- `beer.tcp` wrapper library with `listen`, `accept`, `connect`, `local-port`
+- Integrates with async I/O reactor for non-blocking socket operations
+
+### JSON & HTTP — COMPLETE
+- `beer.json` — pure beerlang JSON parser and emitter
+- `beer.http` — Ring-inspired HTTP server library
+- Middleware support (`wrap-content-type`)
+
+### Bytecode Metaprogramming — COMPLETE
+- `disasm` native: disassemble function bytecode to data structure
+- `asm` native: assemble data structure to executable bytecode function
+- Labels, constants remapping, all opcodes supported
+
+### `read-string` & `eval` — COMPLETE
+- `read-string` native: parse one form from a string
+- `eval` native: compile-and-run single form (temp VM pattern)
+- `keyword` and `name` natives
+
+### Immortal Function Templates — COMPLETE
+- `REFCOUNT_IMMORTAL` prevents use-after-free on shared function constants
+- Functions without captures share the template object (`PUSH_CONST` instead of `MAKE_CLOSURE`)
+- Templates live forever in `load_constants[]`/`load_units[]` arrays
+
+### Atoms — COMPLETE
+- `atom`, `deref`/`@`, `reset!`, `swap!`, `compare-and-set!`, `atom?`
+- Mutable reference type for managed state
+- `beer.test` and `beer.hive` refactored to use atoms instead of `re-def`
+
+### Docstrings & Metadata — COMPLETE
+- `meta`, `with-meta`, `alter-meta!` natives for var/function metadata
+- `defn` and `defmacro` support optional docstrings after the name
+- `doc` macro for printing documentation
+- `__print-doc` native for formatted output
+
 ---
 
 ## Near-term TODO (priority order)
@@ -163,21 +199,18 @@ changes to user-facing code.
   - `*ns*` dynamic var
   - `BEERPATH` env var
 
-### 3. I/O System — Phase 2: Async Reactor
+### 3. I/O System — Phase 2: Async Reactor — COMPLETE
 
-Integrate I/O with the cooperative scheduler (already implemented).
-The Stream API is unchanged; we add async machinery underneath.
-
-- [ ] Reactor thread(s): epoll (Linux) / kqueue (macOS)
-  - Register stream fds for read/write readiness
-  - Wake blocked tasks when I/O ready
-  - Completion queue for reactor → scheduler communication
-- [ ] Retrofit Stream: add `waiting_readers`/`waiting_writers` task queues
-- [ ] `stream_read`/`stream_write` yield task instead of blocking
-- [ ] Set fds to `O_NONBLOCK` when reactor is active
-- [ ] Channels: `(chan)`, `(>! ch val)`, `(<! ch)` — CSP-style communication
-- [ ] `select` becomes reactor-backed (no more blocking `poll()`)
-- [ ] `with-timeout` for I/O operations
+- [x] Reactor thread with kqueue (macOS) / epoll (Linux)
+- [x] Completion queue for reactor → scheduler communication
+- [x] Non-blocking streams with `O_NONBLOCK` on file fds
+- [x] `native_blocked` flag with `OP_CALL`/`OP_TAIL_CALL` retry logic
+- [x] Tasks block on I/O and wake when data is available
+- [x] Guard against concurrent stream access from multiple tasks
+- [x] Standalone VMs (no scheduler) fall back to blocking I/O
+- **Not yet implemented:**
+  - `with-timeout` for I/O operations
+  - `select` for multiplexed I/O
 
 ---
 
@@ -274,39 +307,27 @@ Ahead-of-time compilation to bytecode — skip the reader+compiler at runtime.
   - Thread safety: C calls may block — run on separate thread like `beer.shell/exec`?
   - Memory management: who owns strings/buffers crossing the boundary?
 
-### 9. `task-watch` — Task Completion Monitoring
-- [ ] `(task-watch task callback-fn)` — register a callback invoked when task finishes/crashes
-- [ ] Callback receives task result (or error map on failure)
-- [ ] Callback is spawned as a new task (runs in scheduler, can do channel ops, spawn, etc.)
-- [ ] Implementation: add watcher list to Task struct, scheduler checks on TASK_DONE transition
-- **Enables:** supervisor trees, actor monitoring, distributed node failure detection
-- **Channel sugar** (pure beerlang once task-watch exists):
-  ```clojure
-  (defn task-done-channel [task]
-    (let [c (chan 1)]
-      (task-watch task (fn [result] (>! c result)))
-      c))
-  ```
+### 9. `task-watch` — Task Completion Monitoring — COMPLETE
+- [x] `(task-watch task callback-fn)` — register a callback invoked when task finishes/crashes
+- [x] Callback receives task result (or error map on failure)
+- [x] Callback is spawned as a new task (runs in scheduler, can do channel ops, spawn, etc.)
+- [x] Implementation: watcher list on Task struct, scheduler checks on TASK_DONE transition
 
-### 10. `beer.hive` — Distributed Actor Library
+### 10. `beer.hive` — Distributed Actor Library — Phase 1 COMPLETE
 
-Erlang-inspired distributed computing for beerlang. Nodes (beerlang processes)
-register in a "hive" and can send messages, spawn tasks, and ship code to each
-other. Design goal: pure beerlang library with minimal VM changes.
+Erlang-inspired distributed computing for beerlang. Design goal: pure beerlang library with minimal VM changes.
 
-**Architecture:**
-- Node = beerlang process with a TCP server, identified by `{:name "node-a" :host "..." :port N}`
-- Actor = task + channel (mailbox), identified by `{:node "node-a" :id 42}`
-- Wire protocol: length-prefixed S-expressions over TCP (`pr-str` / `read-string`)
-- Remote spawn: send quoted code, remote node `eval`s it (code-is-data advantage)
+**Phase 1 — Local actors: COMPLETE**
+- [x] Actor abstraction (task + mailbox channel), `hive/spawn-actor`, `hive/send`, `hive/receive`
+- [x] `hive/ask` / `hive/reply` — request-reply pattern with envelope wrapping
+- [x] `hive/register` / `hive/whereis` — actor name registry
+- [x] `hive/supervisor` — supervisor trees with `:one-for-one` strategy
+- [x] Refactored to use atoms instead of re-def for mutable state
 
-**Phases:**
-- **Phase 1 — Local actors:** actor abstraction (task+mailbox), `send`/`receive`, supervisor basics. Single-node, get the API right.
-- **Phase 2 — Distribution:** node-to-node TCP, remote send, remote spawn. Two RPi Zeros talking.
-- **Phase 3 — Resilience:** monitoring (requires `task-watch`), heartbeats, reconnection, cross-node supervisors.
-- **Phase 4 — Security:** authentication (shared secret / TLS), eval sandboxing, resource quotas, reader input limits.
-
-**Dependencies:** `task-watch` (item 9), TCP sockets (done), `eval` (done), JSON/serialization (done)
+**Remaining phases:**
+- **Phase 2 — Distribution:** node-to-node TCP, remote send, remote spawn
+- **Phase 3 — Resilience:** monitoring, heartbeats, reconnection, cross-node supervisors
+- **Phase 4 — Security:** authentication, eval sandboxing, resource quotas
 
 **Security concerns:**
 - Remote `eval` is powerful but dangerous — needs auth + allowlist/sandbox

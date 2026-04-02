@@ -130,31 +130,27 @@ Special forms are the minimal set of primitives that cannot be implemented as fu
     (yield)  ; Allow other tasks to run
     ```
 
-11. **`var`** - Get the var object itself (not its value)
+11. **`spawn`** - Create a new task (green thread)
     ```clojure
-    (var my-function)  ; or #'my-function
+    (spawn (fn [] (do-work)))
     ```
 
-12. **`disasm`** - Disassemble bytecode (for metaprogramming and debugging)
+12. **`await`** - Wait for a task to complete and get its result
     ```clojure
-    (disasm my-function)
-    ;; Returns bytecode as data structure (list of instruction vectors)
+    (await (spawn (fn [] 42)))  ;=> 42
     ```
 
-13. **`asm`** - Assemble bytecode from data structure
+13. **`defmacro`** - Define a macro (compile-time expansion)
     ```clojure
-    (asm [[ENTER 0]
-          [LOAD_LOCAL 0]
-          [INC]
-          [RETURN]])
-    ;; Returns a function object with the specified bytecode
+    (defmacro my-when "optional docstring" [test & body]
+      (list 'if test (cons 'do body) nil))
     ```
 
-These special forms enable powerful metaprogramming and optimization workflows. See the Bytecode Metaprogramming section for details.
+> **Note:** `var` (special form #11 in original design) is not yet implemented. Instead, metadata functions (`meta`, `alter-meta!`) accept quoted symbols and resolve them to Vars internally. `disasm` and `asm` are implemented as native functions rather than special forms. See the Bytecode Metaprogramming section for details.
 
 #### Everything Else is Macros
 
-Forms like `defn`, `when`, `cond`, `and`, `or`, `->`, `->>`, etc. are all implemented as macros on top of these special forms.
+Forms like `defn` (with optional docstrings), `doc`, `when`, `cond`, `and`, `or`, `->`, `->>`, `let`, `with-open`, `doseq`, `ns`, etc. are all implemented as macros on top of these special forms.
 
 ### Reader
 
@@ -958,9 +954,29 @@ Then iterate to add remaining features!
 
 ## Implementation Status
 
-**Planning Phase Complete**: Language specification and architecture fully designed.
+**All phases complete — feature-rich language runtime.** See PROGRESS.md for full details.
 
-**Next Step**: Begin Phase 1 - Foundation (VM core and basic types)
+**Test suite:** 61 unit tests + 397 REPL smoke tests (100% pass rate)
+
+**What's implemented:**
+- All 11 planned phases plus extensive post-plan work
+- Stack-based VM with 30+ opcodes, cooperative multitasking, async I/O (kqueue/epoll)
+- Full compiler: all special forms, closures, tail calls, macros, defmacro docstrings
+- Rich type system: fixnum, float, bigint, string, symbol, keyword, cons, vector, HAMT hashmap, atom
+- Namespace system with `require`, aliases, qualified symbols, `beer.core` fallback
+- TCP sockets, JSON parser/emitter, HTTP server library
+- Actor system (`beer.hive`): spawn, send, receive, ask/reply, supervisors, name registry
+- Project tooling: `beer` CLI (new, run, build, ubertar), `beer.test` framework
+- Tar-based library distribution with `BEERPATH`
+- Bytecode metaprogramming (`asm`/`disasm`), `eval`, `read-string`
+- Docstrings and metadata on vars and functions
+- Immortal function templates, atoms with CAS, task-watch
+
+**Remaining work (see TODO.md):**
+- `beer.hive` Phase 2: distributed actors (node-to-node TCP)
+- CFFI: C foreign function interface via libffi
+- Embeddable library: `libbeerlang` with C API
+- AOT compilation: serialize bytecode to `.beerc` files
 
 ## References
 
