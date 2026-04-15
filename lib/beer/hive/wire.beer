@@ -1,0 +1,118 @@
+(ns beer.hive.wire
+  "Wire protocol framing for beer.hive distributed actors.
+
+  Frame format:
+    [varint: payload-length] [1 byte: msg-type] [payload (EDN)]
+
+  Length covers msg-type + payload together.
+  Varint encoding: MQTT/LEB128 — 7 bits per byte, MSB=1 means more bytes follow.")
+
+;; ============================================================
+;; Message type constants
+;; ============================================================
+
+;; Handshake
+(def MSG-HELLO          0x01)
+(def MSG-CHALLENGE      0x02)
+(def MSG-CHALLENGE-REPLY 0x03)
+(def MSG-WELCOME        0x04)
+(def MSG-REJECT         0x05)
+
+;; Actors
+(def MSG-SEND           0x20)
+(def MSG-SPAWN          0x21)
+(def MSG-DOWN           0x22)
+
+;; Housekeeping
+(def MSG-BYE            0xFF)
+
+;; ============================================================
+;; Varint encoding (MQTT / LEB128 style)
+;; ============================================================
+
+(defn encode-varint
+  "Encode non-negative integer n as a varint byte sequence.
+  Returns a string (byte buffer) of 1-4 bytes."
+  [n]
+  (loop [n n acc []]
+    (let [b    (bit-and n 0x7F)
+          rest (bit-shift-right n 7)]
+      (if (zero? rest)
+        (apply str (map char (conj acc b)))
+        (recur rest (conj acc (bit-or b 0x80)))))))
+
+(defn decode-varint
+  "Decode a varint from string bytes starting at offset.
+  Returns [value new-offset]."
+  [bytes offset]
+  (loop [shift 0 value 0 i offset]
+    (let [b (char-code (nth bytes i))]
+      (let [value-next (bit-or value (bit-shift-left (bit-and b 0x7F) shift))]
+        (if (zero? (bit-and b 0x80))
+          [value-next (inc i)]
+          (recur (+ shift 7) value-next (inc i)))))))
+
+;; ============================================================
+;; Frame encoding
+;; ============================================================
+
+(defn encode-frame
+  "Encode a message as a wire frame.
+  msg-type is a byte constant (e.g. MSG-SEND).
+  payload is a map — will be serialized as EDN via pr-str."
+  [msg-type payload]
+  (let [body    (pr-str payload)
+        payload-len (+ 1 (count body))  ; 1 for msg-type byte
+        varint  (encode-varint payload-len)
+        type-ch (str (char msg-type))]
+    (str varint type-ch body)))
+
+(defn decode-frame
+  "Decode a complete frame from string bytes starting at offset.
+  Returns {:msg-type t :payload map :next-offset n}
+  or nil if not enough bytes."
+  [bytes offset]
+  (when (< offset (count bytes))
+    (let [[payload-len body-start] (decode-varint bytes offset)]
+      (when (<= (+ body-start payload-len) (count bytes))
+        (let [msg-type (char-code (nth bytes body-start))
+              edn-start (inc body-start)
+              edn-end   (+ body-start payload-len)
+              edn-str   (subs bytes edn-start edn-end)]
+          {:msg-type    msg-type
+           :payload     (read-string edn-str)
+           :next-offset edn-end})))))
+
+;; ============================================================
+;; Stream I/O
+;; ============================================================
+
+(defn write-frame
+  "Write a frame to a stream."
+  [stream msg-type payload]
+  (write stream (encode-frame msg-type payload))
+  (flush stream))
+
+(defn read-frame
+  "Read one complete frame from stream.
+  Blocks until a full frame is available.
+  Returns {:msg-type t :payload map} or nil on EOF/error."
+  [stream]
+  ;; Read varint byte by byte
+  (let [varint-val
+        (loop [shift 0 value 0]
+          (let [b-str (read-bytes stream 1)]
+            (when (and b-str (= (count b-str) 1))
+              (let [b (char-code (nth b-str 0))]
+                (let [value-next (bit-or value (bit-shift-left (bit-and b 0x7F) shift))]
+                  (if (zero? (bit-and b 0x80))
+                    value-next
+                    (recur (+ shift 7) value-next)))))))]
+    (when varint-val
+      ;; Read msg-type byte + payload
+      (let [frame-body (read-bytes stream varint-val)]
+        (when (and frame-body (= (count frame-body) varint-val))
+          (let [msg-type (char-code (nth frame-body 0))
+                edn-str  (subs frame-body 1 varint-val)]
+            {:msg-type msg-type
+             :payload  (read-string edn-str)}))))))

@@ -96,13 +96,26 @@ void scheduler_wake(Scheduler* sched, Task* task) {
 void scheduler_block_io(Scheduler* sched, Task* task) {
     task->state = TASK_BLOCKED;
     sched->blocked_count++;
+    /* Retain to keep task alive while IO-blocked — paired release in scheduler_wake_io.
+     * Without this, scheduler_run_one_tick releases the dequeue ref after blocking,
+     * freeing spawned tasks that have no other owner. */
+    Value task_val = tag_pointer(task);
+    object_retain(task_val);
 }
 
 /* Wake an I/O-blocked task */
 void scheduler_wake_io(Scheduler* sched, Task* task) {
-    if (task->state != TASK_BLOCKED) return;
+    if (task->state != TASK_BLOCKED) {
+        /* Unexpected state — release the retain from scheduler_block_io to avoid leak */
+        Value task_val = tag_pointer(task);
+        object_release(task_val);
+        return;
+    }
     sched->blocked_count--;
-    scheduler_enqueue(sched, task);
+    scheduler_enqueue(sched, task);  /* enqueue retains */
+    /* Release the retain from scheduler_block_io */
+    Value task_val = tag_pointer(task);
+    object_release(task_val);
 }
 
 /* Spawn a new task */

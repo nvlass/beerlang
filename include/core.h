@@ -48,6 +48,14 @@ void core_register_metadata(void);
 /* Register core macros (defn, when, and, or) - compiled from beerlang source */
 void core_register_macros(void);
 
+/* Register bitwise operations (bit-and, bit-or, bit-xor, bit-not, bit-shift-left,
+ * bit-shift-right) and character utilities (char, char-code) in beer.core */
+void core_register_bits(void);
+
+/* Register crypto primitives (sha256, hmac-sha256, constant-time-eq?, random-bytes)
+ * in beer.crypto namespace */
+void core_register_crypto(void);
+
 /* Load and execute a beerlang source file */
 #include "value.h"
 #include "vm.h"

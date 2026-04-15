@@ -235,7 +235,7 @@ check '(apply (fn [a b] (+ a b)) [10 20])'               '30'
 check '(apply (fn [& args] (count args)) [1 2 3])'       '3'
 
 # --- map ---
-check '(->> [1 2 3 4 5] (map (fn [x] (+ x 1)))))'  '(2 3 4 5 6)'
+check '(->> [1 2 3 4 5] (map (fn [x] (+ x 1))))'  '(2 3 4 5 6)'
 
 # --- Fibonacci (exercises recursion, cond, arithmetic) ---
 check_multi '(defn fib [x] (cond (= x 0) 1 (= x 1) 1 :else (+ (fib (- x 1)) (fib (- x 2)))))
@@ -813,6 +813,33 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# TCP: spawned task does tcp/accept (channel rendezvous — no await holding ref)
+TCP_SPAWN_TEST=$(mktemp /tmp/beer_tcp_spawn_XXXXXX.beer)
+cat > "$TCP_SPAWN_TEST" << 'TCPSPAWNEOF'
+(require (quote beer.tcp) :as (quote tcp))
+(let [srv (tcp/listen 0)
+      port (tcp/local-port srv)
+      done (chan 1)]
+  (spawn (fn []
+    (let [cli (tcp/accept srv)]
+      (>! done (read-line cli))
+      (close cli))))
+  (spawn (fn []
+    (let [c (tcp/connect "127.0.0.1" port)]
+      (write c "hello\n")
+      (flush c)
+      (close c))))
+  (println (<! done)))
+TCPSPAWNEOF
+tcp_spawn_out=$(BEERPATH=lib "$BEER" "$TCP_SPAWN_TEST" 2>/dev/null | head -1)
+rm -f "$TCP_SPAWN_TEST"
+if [ "$tcp_spawn_out" = '"hello"' ] || [ "$tcp_spawn_out" = 'hello' ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: TCP spawned accept => '$tcp_spawn_out' (expected 'hello')"
+    FAIL=$((FAIL + 1))
+fi
+
 # --- JSON ---
 echo ""
 echo "--- JSON ---"
@@ -1045,6 +1072,293 @@ check_multi '(require (quote beer.hive) :as (quote hive))
 (def ch (chan 1))
 (spawn (fn [] (>! ch (hive/ask pid [:read]))))
 (<! ch)' '3' "actor ask with state update"
+
+# --- Bitwise operations ---
+echo ""
+echo "--- Bitwise ops ---"
+
+check '(bit-and 0xFF 0x0F)' '15' "bit-and"
+check '(bit-or 0xF0 0x0F)' '255' "bit-or"
+check '(bit-xor 0xFF 0x0F)' '240' "bit-xor"
+check '(bit-not 0)' '-1' "bit-not"
+check '(bit-shift-left 1 8)' '256' "bit-shift-left"
+check '(bit-shift-right 256 4)' '16' "bit-shift-right"
+check '(bit-and 0xFF 0x36)' '54' "bit-and ipad byte"
+check '(bit-and (bit-shift-right 0xAB 4) 0xF)' '10' "bit ops combined"
+
+# char/char-code
+check '(char-code \A)' '65' "char-code"
+check '(= (char 65) \A)' 'true' "char from code"
+check '(char-code (char 0x2764))' '10084' "char roundtrip unicode"
+
+# --- Crypto ---
+echo ""
+echo "--- beer.crypto / beer.digest ---"
+
+check_multi '(require (quote beer.crypto) :as (quote crypto))
+(count (crypto/sha256 ""))' '64' "sha256 empty string length"
+
+check_multi '(require (quote beer.crypto) :as (quote crypto))
+(= (crypto/sha256 "abc") "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")' 'true' "sha256 abc known value"
+
+check_multi '(require (quote beer.crypto) :as (quote crypto))
+(= (crypto/sha256 "") "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")' 'true' "sha256 empty string known value"
+
+check_multi '(require (quote beer.crypto) :as (quote crypto))
+(crypto/constant-time-eq? "hello" "hello")' 'true' "constant-time-eq? equal"
+
+check_multi '(require (quote beer.crypto) :as (quote crypto))
+(crypto/constant-time-eq? "hello" "world")' 'false' "constant-time-eq? unequal"
+
+check_multi '(require (quote beer.crypto) :as (quote crypto))
+(crypto/constant-time-eq? "abc" "abcd")' 'false' "constant-time-eq? length mismatch"
+
+check_multi '(require (quote beer.crypto) :as (quote crypto))
+(= (count (crypto/random-bytes 16)) 16)' 'true' "random-bytes length"
+
+check_multi '(require (quote beer.digest) :as (quote digest))
+(= (count (digest/hmac-sha256 "key" "message")) 64)' 'true' "hmac-sha256 length"
+
+check_multi '(require (quote beer.digest) :as (quote digest))
+(= (digest/hmac-sha256 "key" "The quick brown fox jumps over the lazy dog") "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")' 'true' "hmac-sha256 known vector"
+
+check_multi '(require (quote beer.digest) :as (quote digest))
+(= (count (digest/random-hex 8)) 16)' 'true' "random-hex length"
+
+# --- Distributed hive (single-process API tests) ---
+echo ""
+echo "--- beer.hive distributed (loopback) ---"
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def nid (hive/start-node! {:host "127.0.0.1" :port 0 :secret "test-secret"}))
+(string? nid)' 'true' "start-node! returns node-id string"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host "127.0.0.1" :port 0 :secret "test-secret"})
+(hive/stop-node!)
+true' 'true' "start-node! and stop-node! lifecycle"
+
+# Local actor still reachable after start-node!
+check_multi '(require (quote beer.hive) :as (quote hive))
+;; Spawn a named local actor, start a node, verify actor is reachable via whereis
+(def pid (hive/spawn-actor (fn [s m] (if (= m :ping) {:reply :pong :state s} s)) nil {:name :ponger}))
+(hive/start-node! {:host "127.0.0.1" :port 0 :secret "test-secret"})
+(def result (hive/ask pid :ping))
+(hive/stop-node!)
+result' ':pong' "local actor still works after start-node!"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(nil? (hive/node-id))' 'true' "node-id is nil before start"
+
+# FIXME: shouldn't `hive/node-id` be nil after `stop-node!`?
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host "127.0.0.1" :port 0 :secret "s"} "my-custom-id")
+(= (hive/node-id) "my-custom-id")' 'true' "custom node-id via 2-arity start-node!"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def nid (hive/start-node! {:host "127.0.0.1" :port 0 :secret "s"}))
+(def same? (= nid (hive/node-id)))
+(hive/stop-node!)
+same?' 'true' "node-id matches start-node! return value"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host "127.0.0.1" :port 0 :secret "s"})
+(hive/stop-node!)
+(hive/stop-node!)
+true' 'true' "stop-node! is idempotent"
+
+# --- Wire protocol tests ---
+echo ""
+echo "--- beer.hive.wire protocol ---"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(= (wire/decode-varint (wire/encode-varint 0) 0) [0 1])' 'true' "varint roundtrip 0"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(= (wire/decode-varint (wire/encode-varint 127) 0) [127 1])' 'true' "varint roundtrip 127 (1 byte)"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(= (wire/decode-varint (wire/encode-varint 128) 0) [128 2])' 'true' "varint roundtrip 128 (2 bytes)"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(= (wire/decode-varint (wire/encode-varint 16383) 0) [16383 2])' 'true' "varint roundtrip 16383 (max 2-byte)"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(= (wire/decode-varint (wire/encode-varint 16384) 0) [16384 3])' 'true' "varint roundtrip 16384 (3 bytes)"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(= (:msg-type (wire/decode-frame (wire/encode-frame wire/MSG-SEND {:to "actor" :msg 42}) 0)) wire/MSG-SEND)' 'true' "frame encode/decode preserves msg-type"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(def payload {:to "actor" :msg :ping :reply-to nil})
+(= (:payload (wire/decode-frame (wire/encode-frame wire/MSG-SEND payload) 0)) payload)' 'true' "frame encode/decode preserves payload"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(def payload {:to "worker" :msg {:x 1 :y 2} :reply-to {:node "n1" :actor "r"}})
+(= (:payload (wire/decode-frame (wire/encode-frame wire/MSG-SEND payload) 0)) payload)' 'true' "frame encode/decode nested payload"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(= (:msg-type (wire/decode-frame (wire/encode-frame wire/MSG-HELLO {:node-id "x" :version "0.1"}) 0)) wire/MSG-HELLO)' 'true' "frame encode/decode MSG-HELLO"
+
+check_multi '(require (quote beer.hive.wire) :as (quote wire))
+(= (:msg-type (wire/decode-frame (wire/encode-frame wire/MSG-BYE {}) 0)) wire/MSG-BYE)' 'true' "frame encode/decode MSG-BYE"
+
+# --- Two-node loopback (two separate beerlang processes) ---
+# Server runs setup forms, then blocks on (<! (chan 1)) to keep the scheduler alive.
+# The IO reactor thread (background pthread) detects client connections within 10ms
+# and pushes wakeups into the completion ring. The scheduler's 1ms tick loop drains
+# the ring, so connections are accepted promptly even while the main task is blocked.
+echo ""
+echo "--- beer.hive two-node loopback ---"
+
+# Port constants for this test group
+HIVE_SRV_PORT=17700
+HIVE_CLI_PORT=17701
+HIVE_SECRET="smoke-hive-secret"
+HIVE_SRV_ID="smoke-srv"
+HIVE_CLI_ID="smoke-cli"
+
+# Helper: start server in background, run client, check result, kill server
+# Server blocks on (<! (chan 1)) so scheduler keeps processing IO.
+check_two_node() {
+    local label="$1"
+    local server_forms="$2"
+    local client_forms="$3"
+    local expected="$4"
+
+    echo "  two-node: $label ..."
+
+    # Server: run setup forms then block on empty channel to keep scheduler alive.
+    # Redirect stdout too (server's REPL prompts would pollute test output otherwise).
+    printf '%s\n(<! (chan 1))\n' "$server_forms" | "$BEER" >/dev/null 2>&1 &
+    local spid=$!
+
+    # Give server time to start beerlang, load all .beer dependencies, bind/listen.
+    sleep 3.0
+
+    local actual
+    actual=$(printf '%s\n(exit)\n' "$client_forms" | "$BEER" 2>/dev/null \
+        | sed -n 's/^[a-zA-Z._]*:[0-9]*> //p' \
+        | grep -v '^$\|^Goodbye' \
+        | tail -1)
+
+    kill "$spid" 2>/dev/null
+    wait "$spid" 2>/dev/null
+
+    if [ "$actual" = "$expected" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $label => '$actual' (expected '$expected')"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# Basic remote ask: keyword reply
+check_two_node "remote ask :ping => :pong" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/spawn-actor (fn [s m] (if (= m :ping) {:reply :pong :state s} s)) nil {:name :ponger})
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_SRV_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_SRV_ID\")" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_CLI_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_CLI_ID\")
+(hive/connect-node! \"$HIVE_SRV_ID\" \"127.0.0.1\" $HIVE_SRV_PORT)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"ponger\"} :ping)" \
+":pong"
+
+# Remote ask: numeric reply
+check_two_node "remote ask with numeric reply" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/spawn-actor (fn [s m] (if (= m :double) {:reply (* s 2) :state s} s)) 21 {:name :doubler})
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_SRV_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_SRV_ID\")" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_CLI_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_CLI_ID\")
+(hive/connect-node! \"$HIVE_SRV_ID\" \"127.0.0.1\" $HIVE_SRV_PORT)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"doubler\"} :double)" \
+"42"
+
+# Remote ask: string reply (use string? to avoid bash double-quote escaping)
+check_two_node "remote ask with string reply" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/spawn-actor (fn [s m] (if (= m :greet) {:reply \"beer\" :state s} s)) nil {:name :greeter})
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_SRV_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_SRV_ID\")" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_CLI_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_CLI_ID\")
+(hive/connect-node! \"$HIVE_SRV_ID\" \"127.0.0.1\" $HIVE_SRV_PORT)
+(string? (hive/ask {:node \"$HIVE_SRV_ID\" :actor \"greeter\"} :greet))" \
+"true"
+
+# Remote ask: map payload
+check_two_node "remote ask with map message" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/spawn-actor (fn [s m] (if (map? m) {:reply (+ (:x m) (:y m)) :state s} s)) nil {:name :adder})
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_SRV_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_SRV_ID\")" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_CLI_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_CLI_ID\")
+(hive/connect-node! \"$HIVE_SRV_ID\" \"127.0.0.1\" $HIVE_SRV_PORT)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"adder\"} {:x 10 :y 32})" \
+"42"
+
+# Multiple sequential asks to same actor
+check_two_node "multiple sequential remote asks" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/spawn-actor (fn [s m] (if (= m :ping) {:reply :pong :state s} s)) nil {:name :echo})
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_SRV_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_SRV_ID\")" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_CLI_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_CLI_ID\")
+(hive/connect-node! \"$HIVE_SRV_ID\" \"127.0.0.1\" $HIVE_SRV_PORT)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"echo\"} :ping)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"echo\"} :ping)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"echo\"} :ping)" \
+":pong"
+
+# Stateful actor: send increments, ask returns count
+check_two_node "remote ask stateful actor" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/spawn-actor (fn [s m] (cond (= m :inc) (+ s 1) (= m :get) {:reply s :state s} :else s)) 0 {:name :counter})
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_SRV_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_SRV_ID\")" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_CLI_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_CLI_ID\")
+(hive/connect-node! \"$HIVE_SRV_ID\" \"127.0.0.1\" $HIVE_SRV_PORT)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"counter\"} :inc)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"counter\"} :inc)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"counter\"} :inc)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"counter\"} :get)" \
+"3"
+
+# Two actors on server, ask both
+check_two_node "two actors on server" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/spawn-actor (fn [s m] (if (= m :q) {:reply :alice :state s} s)) nil {:name :alice})
+(hive/spawn-actor (fn [s m] (if (= m :q) {:reply :bob :state s} s)) nil {:name :bob})
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_SRV_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_SRV_ID\")" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_CLI_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_CLI_ID\")
+(hive/connect-node! \"$HIVE_SRV_ID\" \"127.0.0.1\" $HIVE_SRV_PORT)
+(def a (hive/ask {:node \"$HIVE_SRV_ID\" :actor \"alice\"} :q))
+(def b (hive/ask {:node \"$HIVE_SRV_ID\" :actor \"bob\"} :q))
+(= [a b] [:alice :bob])" \
+"true"
+
+# Actor echoes the message back
+check_two_node "remote ask echo" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/spawn-actor (fn [s m] {:reply m :state s}) nil {:name :mirror})
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_SRV_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_SRV_ID\")" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_CLI_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_CLI_ID\")
+(hive/connect-node! \"$HIVE_SRV_ID\" \"127.0.0.1\" $HIVE_SRV_PORT)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"mirror\"} 99)" \
+"99"
+
+# Remote ask with vector payload
+check_two_node "remote ask vector message and reply" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/spawn-actor (fn [s m] (if (vector? m) {:reply (count m) :state s} {:reply -1 :state s})) nil {:name :counter2})
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_SRV_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_SRV_ID\")" \
+"(require (quote beer.hive) :as (quote hive))
+(hive/start-node! {:host \"127.0.0.1\" :port $HIVE_CLI_PORT :secret \"$HIVE_SECRET\"} \"$HIVE_CLI_ID\")
+(hive/connect-node! \"$HIVE_SRV_ID\" \"127.0.0.1\" $HIVE_SRV_PORT)
+(hive/ask {:node \"$HIVE_SRV_ID\" :actor \"counter2\"} [1 2 3 4 5])" \
+"5"
 
 # --- CLI subcommands (beer new / run / build) ---
 echo ""

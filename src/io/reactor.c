@@ -6,6 +6,8 @@
 #include "reactor.h"
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <errno.h>
 
 #ifdef __APPLE__
 /* ================================================================
@@ -49,7 +51,8 @@ int reactor_add(Reactor* r, int fd, bool read, bool write, void* userdata) {
     }
     if (nchanges == 0) return -1;
 
-    return kevent(r->kq, changes, nchanges, NULL, 0, NULL) < 0 ? -1 : 0;
+    int ret = kevent(r->kq, changes, nchanges, NULL, 0, NULL);
+    return ret < 0 ? -1 : 0;
 }
 
 int reactor_remove(Reactor* r, int fd) {

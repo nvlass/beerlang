@@ -956,7 +956,7 @@ Then iterate to add remaining features!
 
 **All phases complete — feature-rich language runtime.** See PROGRESS.md for full details.
 
-**Test suite:** 61 unit tests + 397 REPL smoke tests (100% pass rate)
+**Test suite:** 61 unit tests + 445 REPL smoke tests (100% pass rate)
 
 **What's implemented:**
 - All 11 planned phases plus extensive post-plan work
@@ -965,7 +965,7 @@ Then iterate to add remaining features!
 - Rich type system: fixnum, float, bigint, string, symbol, keyword, cons, vector, HAMT hashmap, atom
 - Namespace system with `require`, aliases, qualified symbols, `beer.core` fallback
 - TCP sockets, JSON parser/emitter, HTTP server library
-- Actor system (`beer.hive`): spawn, send, receive, ask/reply, supervisors, name registry
+- Actor system (`beer.hive`): local actors + distributed two-node TCP messaging with HMAC-SHA256 auth
 - Project tooling: `beer` CLI (new, run, build, ubertar), `beer.test` framework
 - Tar-based library distribution with `BEERPATH`
 - Bytecode metaprogramming (`asm`/`disasm`), `eval`, `read-string`
@@ -973,7 +973,7 @@ Then iterate to add remaining features!
 - Immortal function templates, atoms with CAS, task-watch
 
 **Remaining work (see TODO.md):**
-- `beer.hive` Phase 2: distributed actors (node-to-node TCP)
+- `beer.hive` Phase 3: resilience (heartbeats, reconnection, cross-node supervisors)
 - CFFI: C foreign function interface via libffi
 - Embeddable library: `libbeerlang` with C API
 - AOT compilation: serialize bytecode to `.beerc` files

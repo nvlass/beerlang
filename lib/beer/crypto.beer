@@ -1,0 +1,11 @@
+(ns beer.crypto
+  "Cryptographic primitives — natives registered by core_register_crypto().
+
+  Functions:
+    (sha256 str)                    → hex-string (64 chars)
+    (hmac-sha256 key-str msg-str)   → hex-string (64 chars)
+    (constant-time-eq? a b)         → bool
+    (random-bytes n)                → byte-string of n random bytes")
+
+;; Natives are pre-registered by core_register_crypto() in C.
+;; This file exists so (require 'beer.crypto) finds the namespace.

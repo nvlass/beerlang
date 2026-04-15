@@ -405,80 +405,82 @@ static int run_repl(void) {
         if (strcmp(input, "(exit)") == 0 || strcmp(input, "exit") == 0) break;
 
         Reader* reader = reader_new(input, "<repl>");
-        Value form = reader_read(reader);
+        Value all_forms = reader_read_all(reader);
 
         if (reader_has_error(reader)) {
             printf("Read error: %s\n", reader_error_msg(reader));
             reader_free(reader);
+            object_release(all_forms);
             line_number++;
             continue;
         }
-
-        Compiler* compiler = compiler_new("<repl>");
-        CompiledCode* code = compile(compiler, form);
-
-        if (compiler_has_error(compiler)) {
-            printf("Compile error: %s\n", compiler_error_msg(compiler));
-            compiled_code_free(code);
-            compiler_free(compiler);
-            reader_free(reader);
-            object_release(form);
-            line_number++;
-            continue;
-        }
-
-        int n_constants = (int)vector_length(code->constants);
-        Value* constants = malloc(n_constants * sizeof(Value));
-        for (int i = 0; i < n_constants; i++) {
-            constants[i] = vector_get(code->constants, i);
-        }
-        for (int i = 0; i < n_constants; i++) {
-            if (is_function(constants[i])) {
-                function_set_code(constants[i],
-                                  code->bytecode, (int)code->code_size,
-                                  constants, n_constants);
-                object_make_immortal(constants[i]);
-            }
-        }
-
-        Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
-                                             constants, n_constants, global_scheduler);
-        Task* repl_task = task_get(task_val);
-        scheduler_run_task_to_completion(global_scheduler, repl_task);
-
-        if (global_scheduler) {
-            scheduler_run_until_done(global_scheduler);
-        }
-
-        if (repl_task->vm->error) {
-            printf("Runtime error: %s\n", repl_task->vm->error_msg);
-        } else {
-            if (!vm_stack_empty(repl_task->vm)) {
-                Value result = repl_task->vm->stack[repl_task->vm->stack_pointer - 1];
-                if (is_pointer(result)) object_retain(result);
-                vm_pop(repl_task->vm);
-                value_print_readable(result);
-                printf("\n");
-                if (is_pointer(result)) object_release(result);
-            }
-        }
-
-        object_release(task_val);
-
-        if (n_compiled_units < MAX_COMPILED_UNITS) {
-            compiled_units[n_compiled_units] = code;
-            constant_arrays[n_compiled_units] = constants;
-            n_compiled_units++;
-        } else {
-            fprintf(stderr, "Warning: too many compiled units\n");
-            compiled_code_free(code);
-            free(constants);
-        }
-
-        compiler_free(compiler);
         reader_free(reader);
-        object_release(form);
 
+        size_t n_forms = vector_length(all_forms);
+        for (size_t fi = 0; fi < n_forms; fi++) {
+            Value form = vector_get(all_forms, fi);
+
+            Compiler* compiler = compiler_new("<repl>");
+            CompiledCode* code = compile(compiler, form);
+
+            if (compiler_has_error(compiler)) {
+                printf("Compile error: %s\n", compiler_error_msg(compiler));
+                compiled_code_free(code);
+                compiler_free(compiler);
+                continue;
+            }
+
+            int n_constants = (int)vector_length(code->constants);
+            Value* constants = malloc(n_constants * sizeof(Value));
+            for (int i = 0; i < n_constants; i++) {
+                constants[i] = vector_get(code->constants, i);
+            }
+            for (int i = 0; i < n_constants; i++) {
+                if (is_function(constants[i])) {
+                    function_set_code(constants[i],
+                                      code->bytecode, (int)code->code_size,
+                                      constants, n_constants);
+                    object_make_immortal(constants[i]);
+                }
+            }
+
+            Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
+                                                 constants, n_constants, global_scheduler);
+            Task* repl_task = task_get(task_val);
+            scheduler_run_task_to_completion(global_scheduler, repl_task);
+            /* Do NOT call scheduler_run_until_done here — background tasks (server loops,
+             * actors, etc.) should persist across REPL prompts and get CPU time during
+             * scheduler_run_task_to_completion of the next evaluated form. */
+
+            if (repl_task->vm->error) {
+                printf("Runtime error: %s\n", repl_task->vm->error_msg);
+            } else {
+                if (!vm_stack_empty(repl_task->vm)) {
+                    Value result = repl_task->vm->stack[repl_task->vm->stack_pointer - 1];
+                    if (is_pointer(result)) object_retain(result);
+                    vm_pop(repl_task->vm);
+                    value_print_readable(result);
+                    printf("\n");
+                    if (is_pointer(result)) object_release(result);
+                }
+            }
+
+            object_release(task_val);
+
+            if (n_compiled_units < MAX_COMPILED_UNITS) {
+                compiled_units[n_compiled_units] = code;
+                constant_arrays[n_compiled_units] = constants;
+                n_compiled_units++;
+            } else {
+                fprintf(stderr, "Warning: too many compiled units\n");
+                compiled_code_free(code);
+                free(constants);
+            }
+
+            compiler_free(compiler);
+        }
+
+        object_release(all_forms);
         line_number++;
     }
 

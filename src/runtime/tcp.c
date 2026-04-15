@@ -49,7 +49,9 @@ static Value native_tcp_listen(VM* vm, int argc, Value* argv) {
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        vm_error(vm, "tcp/listen: socket() failed");
+        char buf[128];
+        snprintf(buf, sizeof(buf), "tcp/listen: socket() failed [Error: %s]", strerror(errno));
+        vm_error(vm, buf);
         return VALUE_NIL;
     }
 
@@ -63,14 +65,18 @@ static Value native_tcp_listen(VM* vm, int argc, Value* argv) {
     addr.sin_port = htons((uint16_t)port);
 
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "tcp/listen: bind() failed on port %d [Error: %s]", port, strerror(errno));
         close(fd);
-        vm_error(vm, "tcp/listen: bind() failed");
+        vm_error(vm, buf);
         return VALUE_NIL;
     }
 
     if (listen(fd, backlog) < 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "tcp/listen: listen() failed [Error: %s]", strerror(errno));
         close(fd);
-        vm_error(vm, "tcp/listen: listen() failed");
+        vm_error(vm, buf);
         return VALUE_NIL;
     }
 
@@ -96,6 +102,9 @@ static Value native_tcp_accept(VM* vm, int argc, Value* argv) {
     }
 
     Stream* lst = (Stream*)untag_pointer(argv[0]);
+
+    /* If stream was closed (e.g. by stop!) return nil gracefully */
+    if (lst->closed) return VALUE_NIL;
 
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);

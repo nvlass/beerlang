@@ -1,0 +1,41 @@
+(ns beer.digest
+  "Cryptographic digest functions.
+  Wraps beer.crypto primitives with a stable public API.
+
+  Usage:
+    (require '[beer.digest :as digest])
+    (digest/sha256 \"hello\")               ;=> \"2cf24dba...\"
+    (digest/hmac-sha256 secret message)    ;=> \"b0344c61...\"
+    (digest/constant-time-eq? a b)         ;=> true/false"
+  (:require [beer.crypto :as crypto]))
+
+(defn sha256
+  "SHA-256 hash of string s. Returns 64-char lowercase hex string."
+  [s]
+  (crypto/sha256 s))
+
+(defn hmac-sha256
+  "HMAC-SHA256 of message using key. Both must be strings (byte buffers).
+  Returns 64-char lowercase hex string."
+  [key message]
+  (crypto/hmac-sha256 key message))
+
+(defn constant-time-eq?
+  "Compare two strings in constant time (safe for HMAC verification).
+  Returns false immediately if lengths differ."
+  [a b]
+  (crypto/constant-time-eq? a b))
+
+(defn random-bytes
+  "Returns a vector of n random bytes (integers 0-255) from /dev/urandom."
+  [n]
+  (crypto/random-bytes n))
+
+(defn random-hex
+  "Returns a string of n random bytes formatted as a 2n-char hex string."
+  [n]
+  (let [raw (random-bytes n)]
+    (apply str (mapcat (fn [b]
+                         [(nth "0123456789abcdef" (bit-shift-right b 4))
+                          (nth "0123456789abcdef" (bit-and b 0xF))])
+                       raw))))

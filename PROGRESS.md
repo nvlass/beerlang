@@ -1,6 +1,6 @@
 # Beerlang Implementation Progress
 
-**Last Updated:** 2026-04-03
+**Last Updated:** 2026-04-15
 
 ## Current Status
 
@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 61 unit tests
-- 397 REPL smoke tests
+- 445 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -37,6 +37,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - Phase 22: `beer.hive` — local actor system with mailbox-based messaging
 - Phase 23: Atoms — mutable reference type with CAS
 - Phase 24: Docstrings & metadata for vars and functions
+- Phase 25: Distributed `beer.hive` — two-node TCP actor messaging with HMAC-SHA256 auth
 
 ## Completed Components
 

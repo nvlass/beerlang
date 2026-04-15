@@ -1210,3 +1210,35 @@ Tie up loose ends: remove dead `is_special_form` function, add smoke tests for `
 - `tests/smoke_test.sh`: Added 5 tests for close!, channel?, task?
 
 **Result:** 61 unit tests + 279 smoke tests all passing. No compiler warnings (except pre-existing mini-gmp and reader).
+
+## Session: 2026-04-15 — Distributed beer.hive Phase 2 + Fix two-node smoke tests
+
+### Goal
+Complete distributed `beer.hive` Phase 2 (node-to-node TCP messaging) and get all smoke tests passing.
+
+### Work Done
+
+**New libraries:**
+- `lib/beer/digest.beer` — HMAC-SHA256, constant-time comparison, random hex (using new crypto natives)
+- `lib/beer/hive/wire.beer` — length-prefixed EDN frame protocol (MSG-HELLO, CHALLENGE, WELCOME, SEND, BYE)
+- `lib/beer/hive/node.beer` — TCP node management: connection pool, per-connection reader tasks, handshake
+- `lib/beer/hive.beer` — Extended with `start-node!`, `stop-node!`, `connect-node!`; ask/send routing (local vs remote)
+
+**New C natives:**
+- `src/runtime/bits.c` — bitwise ops: `bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shift-left`, `bit-shift-right`; `char/char-code`
+- `src/runtime/crypto.c` — HMAC-SHA256, `random-hex`, `constant-time-eq?` (via CommonCrypto on macOS, OpenSSL on Linux)
+
+**C runtime fixes:**
+- `src/runtime/core.c` `native_close`: wakes any task blocked on the stream before closing the fd, so accept/reader tasks exit cleanly rather than hanging
+- `src/runtime/tcp.c` `native_tcp_accept`: returns nil gracefully when the listen stream is already closed (avoids EBADF error after `stop!`)
+
+**Smoke test fixes:**
+- Increased `check_two_node` sleep from 2.0s → 3.0s (timing fix under load)
+- Collapsed multiline `spawn-actor` forms to single lines (REPL pipe mode fails to parse multiline top-level forms split across lines)
+
+**Key bugs found and fixed:**
+1. `close!` vs `close`: `close!` is for channels, `close` is for streams. `stop!` was silently failing to close TCP connections.
+2. Listen stream not closed in `stop!`: accept-loop task was blocked forever. Fixed by storing listen stream in `*listen-stream*` atom and closing it on `stop!`.
+3. Multiline REPL pipe parsing: REPL fails to parse top-level forms split across lines when input is piped. Smoke test server forms with multiline `spawn-actor` silently skipped the spawn, leaving actor unreachable → `ask` blocked forever.
+
+**Result:** 445 smoke tests all passing (was 397 + 48 new). Phase 2 distributed hive complete.

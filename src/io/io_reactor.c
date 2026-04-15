@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #define COMPLETION_RING_SIZE 256
 #define MAX_POLL_EVENTS 32
@@ -43,11 +44,13 @@ static void* io_reactor_thread(void* arg) {
             if (next_tail != r->ring_head) {  /* not full */
                 r->completions[r->ring_tail] = task;
                 r->ring_tail = next_tail;
+            } else {
+                fprintf(stderr, "[io_reactor] WARNING: completion ring full, task=%p lost!\n", (void*)task);
             }
-            /* If ring is full, the task is lost — shouldn't happen in practice */
         }
         pthread_mutex_unlock(&r->mutex);
     }
+
     return NULL;
 }
 

@@ -321,6 +321,9 @@ static bool vm_invoke_value(VM* vm, Value head, int n_args, Value* args, Value* 
             return true;
         }
         Value def = (n_args == 2) ? args[1] : VALUE_NIL;
+        /* Clojure: keyword lookup on nil returns nil (the default) */
+        if (is_nil(args[0])) { *result = def; return true; }
+        if (!is_hashmap(args[0])) { *result = def; return true; }
         *result = hashmap_get_default(args[0], head, def);
         if (is_pointer(*result)) object_retain(*result);
         return true;

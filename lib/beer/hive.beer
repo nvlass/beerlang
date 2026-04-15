@@ -1,30 +1,29 @@
-(ns beer.hive)
+(ns beer.hive
+  "Actor system for beerlang — local (Phase 1) and distributed (Phase 2).
 
-;; ============================================================
-;; beer.hive — Local actor system (Erlang-inspired)
-;;
-;; Actors are lightweight tasks with a mailbox (channel) and
-;; a handler function that threads state through messages.
-;;
-;; API:
-;;   (spawn-actor handler initial-state)
-;;   (spawn-actor handler initial-state {:name :foo})
-;;   (send pid msg)
-;;   (ask pid msg)          — request-reply (blocks caller)
-;;   (stop pid)
-;;   (whereis :name)
-;;
-;; Handler returns:
-;;   plain-value        → new state
-;;   {:reply v}         → reply v, state unchanged
-;;   {:reply v :state s}→ reply v, state = s
-;;   {:stop v}          → terminate with v
-;;   {:stop v :reply r} → reply r, then terminate
-;; ============================================================
+  Local actors:
+    (spawn-actor handler initial-state)
+    (spawn-actor handler initial-state {:name :foo})
+    (send pid msg)
+    (ask pid msg)
+    (stop pid)
+    (whereis :name)
 
-;; --- PID counter & name registry ---
+  Distributed actors (Phase 2):
+    (start-node! {:host str :port int :secret str})          ;=> node-id
+    (start-node! {:host str :port int :secret str} node-id)
+    (connect-node! node-id host port)
+    (stop-node!)
 
-(def beer.hive/*next-id* (atom 0))
+  Remote PIDs: {:node node-id-str :actor actor-name-str}
+  send/ask detect remote PIDs automatically."
+  (:require [beer.hive.node :as node]))
+
+;; ================================================================
+;; Local actor system (Phase 1)
+;; ================================================================
+
+(def beer.hive/*next-id*  (atom 0))
 (def beer.hive/*registry* (atom {}))
 
 (defn -next-id! []
@@ -32,64 +31,106 @@
     (swap! beer.hive/*next-id* inc)
     id))
 
-;; --- spawn-actor ---
-
 (defn spawn-actor
+  "Spawn a local actor with handler fn and initial state.
+  opts: {:name keyword} — register actor under a name for whereis."
   ([handler initial-state] (spawn-actor handler initial-state {}))
   ([handler initial-state opts]
-   (let* [mailbox (chan 1000)
-          id (-next-id!)
+   (let* [mailbox  (chan 1000)
+          id       (-next-id!)
           name-key (get opts :name)
-          task (spawn (fn []
-                 (loop [state initial-state]
-                   (let* [envelope (<! mailbox)]
-                     (if (nil? envelope)
-                       state
-                       (let* [kind      (first envelope)
-                              msg       (nth envelope 1)
-                              result    (handler state msg)
-                              is-map    (map? result)
-                              has-reply (and is-map (contains? result :reply))
-                              has-stop  (and is-map (contains? result :stop))]
-                         (when (= kind :call)
-                           (>! (nth envelope 2)
-                               (if has-reply (get result :reply) nil)))
-                         (if has-stop
-                           (get result :stop)
-                           (recur (cond
-                                    (and has-reply (contains? result :state))
-                                      (get result :state)
-                                    has-reply state
-                                    :else result)))))))))
+          task     (spawn (fn []
+                    (loop [state initial-state]
+                      (let* [envelope (<! mailbox)]
+                        (if (nil? envelope)
+                          state
+                          (let* [kind      (first envelope)
+                                 msg       (nth envelope 1)
+                                 result    (handler state msg)
+                                 is-map    (map? result)
+                                 has-reply (and is-map (contains? result :reply))
+                                 has-stop  (and is-map (contains? result :stop))]
+                            (when (= kind :call)
+                              (>! (nth envelope 2)
+                                  (if has-reply (get result :reply) nil)))
+                            (if has-stop
+                              (get result :stop)
+                              (recur (cond
+                                       (and has-reply (contains? result :state))
+                                         (get result :state)
+                                       has-reply state
+                                       :else result)))))))))
           pid {:mailbox mailbox :task task :id id :name name-key}]
      (when name-key
        (swap! beer.hive/*registry* assoc name-key pid))
      pid)))
 
-;; --- send ---
+;; ================================================================
+;; Local registry
+;; ================================================================
 
-(defn send [pid msg]
-  (>! (get pid :mailbox) [:cast msg])
-  true)
-
-;; --- ask (request-reply) ---
-
-(defn ask [pid msg]
-  (let* [reply-ch (chan 1)]
-    (>! (get pid :mailbox) [:call msg reply-ch])
-    (<! reply-ch)))
-
-;; --- stop (graceful) ---
-
-(defn stop [pid]
-  (close! (get pid :mailbox)))
-
-;; --- whereis ---
-
-(defn whereis [name]
+(defn whereis
+  "Look up a named local actor by keyword. Returns pid or nil."
+  [name]
   (get @beer.hive/*registry* name))
 
-;; --- supervisor (basic: monitor + log) ---
+;; ================================================================
+;; Local dispatch (called by node layer for inbound messages)
+;; ================================================================
+
+(defn -local-dispatch!
+  "Deliver an inbound remote message to a local actor.
+  Called by node/*dispatch-fn* — do not call directly."
+  [actor-name msg reply-to]
+  (let [pid (whereis (keyword actor-name))]
+    (when pid
+      (if reply-to
+        ;; ask: enqueue as :call, forward reply back over the wire
+        (let [reply-ch (chan 1)]
+          (>! (:mailbox pid) [:call msg reply-ch])
+          (spawn (fn []
+                   (let [result (<! reply-ch)]
+                     (node/remote-send! reply-to result)))))
+        ;; send: enqueue as :cast
+        (>! (:mailbox pid) [:cast msg])))))
+
+;; Wire up the dispatch fn so node.beer can deliver inbound messages
+;; without a circular require. This runs at namespace load time.
+(reset! node/*dispatch-fn* -local-dispatch!)
+
+;; ================================================================
+;; send / ask / stop
+;; ================================================================
+
+(defn -remote-pid? [pid]
+  (and (map? pid) (contains? pid :node)))
+
+(defn send
+  "Send a message to a local or remote actor."
+  [pid msg]
+  (if (-remote-pid? pid)
+    (node/remote-send! pid msg)
+    (do
+      (>! (get pid :mailbox) [:cast msg])
+      true)))
+
+(defn ask
+  "Send a message and wait for reply. Works for local and remote PIDs."
+  [pid msg]
+  (if (-remote-pid? pid)
+    (node/remote-ask! pid msg)
+    (let* [reply-ch (chan 1)]
+      (>! (get pid :mailbox) [:call msg reply-ch])
+      (<! reply-ch))))
+
+(defn stop
+  "Gracefully stop a local actor."
+  [pid]
+  (close! (get pid :mailbox)))
+
+;; ================================================================
+;; Supervisor (Phase 1 — unchanged)
+;; ================================================================
 
 (defn supervisor [strategy child-specs]
   (let* [children (map (fn [spec] (spec)) child-specs)]
@@ -99,3 +140,29 @@
           (when (= (get result :status) :error)
             (println "supervisor: child failed:" (get result :message))))))
     {:strategy strategy :children children}))
+
+;; ================================================================
+;; Distributed node API (Phase 2)
+;; ================================================================
+
+(defn start-node!
+  "Start the cluster node listener on the given port.
+  config: {:host str :port int :secret str}
+  Returns the node-id string."
+  ([config]        (node/start! config))
+  ([config node-id] (node/start! config node-id)))
+
+(defn connect-node!
+  "Connect to a peer node. Adds to membership and opens a TCP connection."
+  [node-id host port]
+  (node/connect! node-id host port))
+
+(defn stop-node!
+  "Gracefully shut down the cluster node."
+  []
+  (node/stop!))
+
+(defn node-id
+  "Return this node's ID, or nil if not started."
+  []
+  (node/node-id))

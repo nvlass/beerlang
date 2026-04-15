@@ -2853,6 +2853,14 @@ static Value native_close(VM* vm, int argc, Value* argv) {
         vm_error(vm, "close: argument must be a stream");
         return VALUE_NIL;
     }
+    Stream* st = (Stream*)untag_pointer(argv[0]);
+    /* Wake any task blocked on this stream before closing the fd,
+     * so it can retry and get a clean nil/EOF rather than hanging. */
+    if (st->blocked_task && vm->scheduler) {
+        Task* blocked = st->blocked_task;
+        st->blocked_task = NULL;
+        scheduler_wake_io(vm->scheduler, blocked);
+    }
     stream_close(argv[0]);
     return VALUE_NIL;
 }

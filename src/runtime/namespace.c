@@ -352,6 +352,8 @@ void namespace_init(void) {
     core_register_tar();
     core_register_shell();
     core_register_tcp();
+    core_register_bits();
+    core_register_crypto();
 
     /* Initialize global scheduler */
     global_scheduler = scheduler_new(DEFAULT_TASK_QUOTA);

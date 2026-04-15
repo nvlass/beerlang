@@ -1,0 +1,271 @@
+(ns beer.hive.node
+  "Distributed node management for beer.hive.
+
+  Responsibilities:
+    - Listen for inbound connections on a TCP port
+    - Authenticate with HMAC-SHA256 challenge-response
+    - Maintain a connection pool (one TCP stream per remote node)
+    - Dispatch remote sends and spawns
+    - Maintain a static membership table (peers configured at start)
+
+  Remote PID format:
+    {:node \"node-uuid\" :actor \"actor-name\"}
+
+  Usage:
+    (node/start! {:host \"0.0.0.0\" :port 7723 :secret \"my-secret\"})
+    (node/connect! \"peer-uuid\" \"10.0.0.2\" 7723)
+    (node/remote-send! {:node \"peer-uuid\" :actor \"worker\"} msg)
+    (node/stop!)"
+  (:require [beer.tcp        :as tcp]
+            [beer.hive.wire  :as wire]
+            [beer.digest     :as digest]))
+
+;; ============================================================
+;; Node state
+;; ============================================================
+
+(def *config*          (atom nil))  ; {:node-id :host :port :secret}
+(def *connections*     (atom {}))   ; {node-id → stream}
+(def *members*         (atom {}))   ; {node-id → {:host :port :status}}
+(def *running*         (atom false))
+(def *listen-stream*   (atom nil))  ; listening TCP socket
+;; Set by beer.hive after loading to dispatch incoming actor messages
+(def *dispatch-fn*     (atom nil))  ; (fn [actor-name msg reply-to] ...)
+;; Pending ask replies: {reply-id → channel}
+(def *reply-channels*  (atom {}))
+
+;; ============================================================
+;; Helpers
+;; ============================================================
+
+(defn -node-id [] (:node-id @*config*))
+(defn -secret  [] (:secret  @*config*))
+
+;; ============================================================
+;; Handshake — outbound (we connect to a peer)
+;; ============================================================
+
+(defn -handshake-client!
+  "HMAC challenge-response as the connecting side.
+  Returns the remote node-id on success, nil on failure."
+  [stream]
+  (let [cfg @*config*]
+    ;; Send HELLO
+    (wire/write-frame stream wire/MSG-HELLO
+                      {:node-id (:node-id cfg)
+                       :host    (:host cfg)
+                       :port    (:port cfg)
+                       :version "0.1"
+                       :caps    [:edn]})
+    ;; Receive CHALLENGE
+    (let [frame (wire/read-frame stream)]
+      (when (and frame (= (:msg-type frame) wire/MSG-CHALLENGE))
+        (let [nonce (:nonce (:payload frame))
+              mac   (digest/hmac-sha256 (-secret) nonce)]
+          ;; Send CHALLENGE-REPLY
+          (wire/write-frame stream wire/MSG-CHALLENGE-REPLY
+                            {:node-id (:node-id cfg) :hmac mac})
+          ;; Receive WELCOME or REJECT
+          (let [resp (wire/read-frame stream)]
+            (when (and resp (= (:msg-type resp) wire/MSG-WELCOME))
+              (:node-id (:payload resp)))))))))
+
+;; ============================================================
+;; Handshake — inbound (we accepted a connection)
+;; ============================================================
+
+(defn -handshake-server!
+  "HMAC challenge-response as the accepting side.
+  Returns the remote node-id on success, nil on failure."
+  [stream]
+  ;; Receive HELLO
+  (let [frame (wire/read-frame stream)]
+    (when (and frame (= (:msg-type frame) wire/MSG-HELLO))
+      (let [nonce (digest/random-hex 32)]
+        ;; Send CHALLENGE
+        (wire/write-frame stream wire/MSG-CHALLENGE {:nonce nonce})
+        ;; Receive CHALLENGE-REPLY
+        (let [reply-frame (wire/read-frame stream)]
+          (when (and reply-frame
+                     (= (:msg-type reply-frame) wire/MSG-CHALLENGE-REPLY))
+            (let [reply     (:payload reply-frame)
+                  remote-id (:node-id reply)
+                  their-mac (:hmac reply)
+                  our-mac   (digest/hmac-sha256 (-secret) nonce)]
+              (if (digest/constant-time-eq? their-mac our-mac)
+                (do
+                  ;; WELCOME with current membership snapshot
+                  (wire/write-frame stream wire/MSG-WELCOME
+                                    {:node-id    (-node-id)
+                                     :serializer :edn
+                                     :members    (vec (vals @*members*))})
+                  remote-id)
+                (do
+                  (wire/write-frame stream wire/MSG-REJECT {:reason :bad-hmac})
+                  nil)))))))))
+
+;; ============================================================
+;; Per-connection reader loop
+;; ============================================================
+
+(defn -handle-frame!
+  "Dispatch a single decoded frame."
+  [msg-type payload remote-node-id]
+  (cond
+    ;; Incoming actor message or reply
+    (= msg-type wire/MSG-SEND)
+    (let [actor    (:to payload)
+          msg      (:msg payload)
+          reply-to (:reply-to payload)]
+      (cond
+        ;; This is a reply to a pending remote-ask!
+        (get @*reply-channels* actor)
+        (let [ch (get @*reply-channels* actor)]
+          (swap! *reply-channels* dissoc actor)
+          (>! ch msg))
+
+        ;; Regular delivery via dispatch-fn set by hive.beer
+        @*dispatch-fn*
+        (@*dispatch-fn* actor msg reply-to)
+
+        :else nil))
+
+    ;; Remote node closing gracefully
+    (= msg-type wire/MSG-BYE)
+    (swap! *connections* dissoc remote-node-id)
+
+    :else nil))
+
+(defn -connection-reader!
+  "Read frames from stream and dispatch them. Runs as a spawned task."
+  [stream remote-node-id]
+  (loop []
+    (when @*running*
+      (let [frame (wire/read-frame stream)]
+        (when frame
+          (-handle-frame! (:msg-type frame) (:payload frame) remote-node-id)
+          (recur))))))
+
+;; ============================================================
+;; Connection management
+;; ============================================================
+
+(defn -open-connection!
+  "Open and authenticate a connection to node-id. Returns stream or nil."
+  [node-id]
+  (let [member (get @*members* node-id)]
+    (when member
+      (let [stream    (tcp/connect (:host member) (:port member))
+            remote-id (-handshake-client! stream)]
+        (when remote-id
+          (swap! *connections* assoc node-id stream)
+          (spawn (fn [] (-connection-reader! stream node-id)))
+          stream)))))
+
+(defn -get-or-connect!
+  "Return an open stream to node-id, opening one if not already connected."
+  [node-id]
+  (or (get @*connections* node-id)
+      (-open-connection! node-id)))
+
+;; ============================================================
+;; Inbound listener
+;; ============================================================
+
+(defn -accept-loop!
+  "Accept incoming connections and spawn a reader task for each."
+  [listen-stream]
+  (loop []
+    (when @*running*
+      (let [client (tcp/accept listen-stream)]
+        (when client
+          (spawn (fn []
+                   (let [remote-id (-handshake-server! client)]
+                     (when remote-id
+                       (swap! *connections* assoc remote-id client)
+                       (-connection-reader! client remote-id)))))
+          (recur))))))
+
+;; ============================================================
+;; Public API
+;; ============================================================
+
+(defn start!
+  "Start this cluster node.
+  config: {:host str :port int :secret str}
+  Returns the node-id."
+  ([config] (start! config (digest/random-hex 16)))
+  ([config node-id]
+   (reset! *config*  (assoc config :node-id node-id))
+   (reset! *running* true)
+   (let [listen-stream (tcp/listen (:port config))]
+     (reset! *listen-stream* listen-stream)
+     (spawn (fn [] (-accept-loop! listen-stream))))
+   node-id))
+
+(defn connect!
+  "Register a peer and open a connection to it.
+  Returns nil (connection is established synchronously)."
+  [node-id host port]
+  (swap! *members* assoc node-id {:node-id node-id
+                                   :host    host
+                                   :port    port
+                                   :status  :alive})
+  (-open-connection! node-id)
+  nil)
+
+(defn stop!
+  "Gracefully shut down this node."
+  []
+  (reset! *running* false)
+  ;; Close the listen socket — wakes the accept-loop task so it can exit
+  (when @*listen-stream*
+    (try (close @*listen-stream*) (catch e nil))
+    (reset! *listen-stream* nil))
+  ;; Send BYE and close each connection — wakes any blocked reader tasks
+  (doseq [conn-id (keys @*connections*)]
+    (let [stream (get @*connections* conn-id)]
+      (try
+        (wire/write-frame stream wire/MSG-BYE {})
+        (close stream)
+        (catch e nil))))
+  (reset! *connections* {})
+  (reset! *members*     {})
+  nil)
+
+(defn node-id [] (-node-id))
+(defn members  [] @*members*)
+
+;; ============================================================
+;; Remote dispatch (called by beer.hive)
+;; ============================================================
+
+(defn remote-send!
+  "Send a message to a remote actor (fire-and-forget).
+  remote-pid: {:node node-id :actor actor-name-string}"
+  [remote-pid msg]
+  (let [stream (-get-or-connect! (:node remote-pid))]
+    (when stream
+      (wire/write-frame stream wire/MSG-SEND
+                        {:to      (:actor remote-pid)
+                         :msg     msg
+                         :reply-to nil})))
+  nil)
+
+(defn remote-ask!
+  "Send a message to a remote actor and block for reply.
+  remote-pid: {:node node-id :actor actor-name-string}"
+  [remote-pid msg]
+  (let [stream   (-get-or-connect! (:node remote-pid))
+        reply-id (digest/random-hex 8)
+        reply-ch (chan 1)]
+    (when stream
+      ;; Register pending reply channel
+      (swap! *reply-channels* assoc reply-id reply-ch)
+      (wire/write-frame stream wire/MSG-SEND
+                        {:to       (:actor remote-pid)
+                         :msg      msg
+                         :reply-to {:node  (-node-id)
+                                    :actor reply-id}})
+      ;; Block until reply arrives (delivered by -handle-frame!)
+      (<! reply-ch))))

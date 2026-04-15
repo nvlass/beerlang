@@ -6,8 +6,8 @@
 
 **All tests passing, 100% pass rate**
 - Unit tests: 61
-- REPL smoke tests: 397
-- **Last Updated:** 2026-04-03
+- REPL smoke tests: 445
+- **Last Updated:** 2026-04-15
 
 ## Completed Phases
 
@@ -313,7 +313,7 @@ Ahead-of-time compilation to bytecode — skip the reader+compiler at runtime.
 - [x] Callback is spawned as a new task (runs in scheduler, can do channel ops, spawn, etc.)
 - [x] Implementation: watcher list on Task struct, scheduler checks on TASK_DONE transition
 
-### 10. `beer.hive` — Distributed Actor Library — Phase 1 COMPLETE
+### 10. `beer.hive` — Distributed Actor Library — Phase 2 COMPLETE
 
 Erlang-inspired distributed computing for beerlang. Design goal: pure beerlang library with minimal VM changes.
 
@@ -324,10 +324,19 @@ Erlang-inspired distributed computing for beerlang. Design goal: pure beerlang l
 - [x] `hive/supervisor` — supervisor trees with `:one-for-one` strategy
 - [x] Refactored to use atoms instead of re-def for mutable state
 
+**Phase 2 — Distribution: COMPLETE**
+- [x] `beer.hive.wire` — length-prefixed EDN frame protocol
+- [x] `beer.hive.node` — TCP node management, connection pool, per-connection reader tasks
+- [x] HMAC-SHA256 challenge-response authentication (`beer.digest`)
+- [x] `hive/start-node!` / `hive/stop-node!` / `hive/connect-node!` public API
+- [x] `hive/ask` routing: local → mailbox, remote → TCP wire → reply channel
+- [x] Graceful shutdown: BYE frame, listen-stream close wakes blocked accept task
+- [x] C runtime fix: `native_close` wakes blocked I/O tasks; `tcp/accept` handles closed fd
+- [x] Smoke tests: 9 two-node loopback tests (all passing, 445 total)
+
 **Remaining phases:**
-- **Phase 2 — Distribution:** node-to-node TCP, remote send, remote spawn
 - **Phase 3 — Resilience:** monitoring, heartbeats, reconnection, cross-node supervisors
-- **Phase 4 — Security:** authentication, eval sandboxing, resource quotas
+- **Phase 4 — Security:** eval sandboxing, resource quotas
 
 **Security concerns:**
 - Remote `eval` is powerful but dangerous — needs auth + allowlist/sandbox

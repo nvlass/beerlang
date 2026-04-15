@@ -1,7 +1,9 @@
 (ns beer.tcp)
 ;; TCP socket operations — wrappers around C natives
 
-(def listen tcp-listen)
-(def accept tcp-accept)
-(def connect tcp-connect)
+(def listen     tcp-listen)
+(def accept     tcp-accept)
+(def connect    tcp-connect)
 (def local-port tcp-local-port)
+;; Stream I/O (read-bytes, write, flush, close) is in beer.core and available
+;; globally without qualification — no need to re-export here.

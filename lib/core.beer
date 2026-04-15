@@ -276,6 +276,9 @@
 (defn into [to from]
   (reduce conj to from))
 
+(defn vec [coll]
+  (into [] coll))
+
 (defn some [pred coll]
   (loop [s coll]
     (if (empty? s)
@@ -439,11 +442,12 @@
 
 (defmacro ns [name & clauses]
   (let* [in-ns-form (list 'in-ns (list 'quote name))
+         list-clauses (filter list? clauses)
          require-forms
-           (if (empty? clauses)
+           (if (empty? list-clauses)
              '()
-             (let* [clause (first clauses)]
-               (if (and (list? clause) (= (first clause) :require))
+             (let* [clause (first list-clauses)]
+               (if (= (first clause) :require)
                  (map __ns-require-clause (rest clause))
                  '())))]
     (cons 'do (cons in-ns-form require-forms))))
