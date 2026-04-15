@@ -1953,6 +1953,35 @@ void vm_run(VM* vm) {
     while (vm->running && !vm->error && !vm->yielded) {
         vm_step(vm);
 
+        /* If an error occurred but a try/catch handler is active, convert
+         * the fatal error into a catchable exception and resume execution. */
+        if (vm->error && vm->handler_count > 0) {
+            const char* emsg = vm->error_msg ? vm->error_msg : "runtime error";
+            Value exc = hashmap_create_default();
+            Value k   = keyword_intern("message");
+            Value s   = string_from_cstr(emsg);
+            Value exc2 = hashmap_assoc(exc, k, s);
+            object_release(exc);
+            object_release(s);
+
+            ExceptionHandler* h = &vm->handlers[--vm->handler_count];
+            while (vm->frame_count > h->frame_count) {
+                CallFrame* frame = pop_frame(vm);
+                if (!frame) break;
+                while (vm->stack_pointer > frame->base_pointer) vm_pop(vm);
+                vm->code = frame->caller_code;
+                vm->code_size = frame->caller_code_size;
+                vm->constants = frame->caller_constants;
+                vm->num_constants = frame->caller_num_constants;
+            }
+            while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
+            if (is_pointer(vm->exception)) object_release(vm->exception);
+            vm->exception = exc2;
+            vm->pc  = h->catch_pc;
+            vm->error   = false;
+            vm->running = true;
+        }
+
         /* Auto-yield countdown */
         if (vm->yield_countdown > 0) {
             vm->yield_countdown--;
