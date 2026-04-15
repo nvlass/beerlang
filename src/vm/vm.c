@@ -12,6 +12,7 @@
 #include "native.h"
 #include "namespace.h"
 #include "symbol.h"
+#include "bstring.h"
 #include "cons.h"
 #include "hashmap.h"
 #include "vector.h"
@@ -84,6 +85,7 @@ VM* vm_new(int stack_size) {
     vm->yield_countdown = 0;  /* Disabled by default for standalone VMs */
     vm->yielded = false;
     vm->native_blocked = false;
+    vm->native_throw = false;
     vm->scheduler = NULL;
 
     vm->running = false;
@@ -148,6 +150,25 @@ void vm_error(VM* vm, const char* msg) {
     vm->running = false;
     snprintf(vm->error_buf, sizeof(vm->error_buf), "%s", msg);
     vm->error_msg = vm->error_buf;
+}
+
+void vm_throw_error(VM* vm, const char* msg) {
+    /* If no handler is active, fall back to fatal vm_error */
+    if (vm->handler_count <= 0) {
+        vm_error(vm, msg);
+        return;
+    }
+    /* Build {:message msg} exception map */
+    Value exc = hashmap_create_default();
+    Value k   = keyword_intern("message");
+    Value s   = string_from_cstr(msg);
+    Value exc2 = hashmap_assoc(exc, k, s);
+    object_release(exc);
+    object_release(s);
+    /* Store exception and signal OP_CALL to unwind */
+    if (is_pointer(vm->exception)) object_release(vm->exception);
+    vm->exception    = exc2;
+    vm->native_throw = true;
 }
 
 /* Read next byte from bytecode */
@@ -886,6 +907,29 @@ void vm_step(VM* vm) {
                     break;
                 }
 
+                /* Native requested a catchable throw */
+                if (vm->native_throw) {
+                    vm->native_throw = false;
+                    if (is_pointer(result)) object_release(result);
+                    if (vm->handler_count <= 0) {
+                        vm_error(vm, "Unhandled exception");
+                        return;
+                    }
+                    ExceptionHandler* h = &vm->handlers[--vm->handler_count];
+                    while (vm->frame_count > h->frame_count) {
+                        CallFrame* fr = pop_frame(vm);
+                        if (!fr) break;
+                        while (vm->stack_pointer > fr->base_pointer) vm_pop(vm);
+                        vm->code = fr->caller_code;
+                        vm->code_size = fr->caller_code_size;
+                        vm->constants = fr->caller_constants;
+                        vm->num_constants = fr->caller_num_constants;
+                    }
+                    while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
+                    vm->pc = h->catch_pc;
+                    break;
+                }
+
                 /* Pop args and function from stack */
                 for (int i = 0; i < (int)n_args + 1; i++) {
                     vm_pop(vm);
@@ -1051,6 +1095,29 @@ void vm_step(VM* vm) {
                 if (vm->yielded) {
                     vm->native_blocked = false;
                     vm->pc = pc_at_opcode;
+                    break;
+                }
+
+                /* Native requested a catchable throw */
+                if (vm->native_throw) {
+                    vm->native_throw = false;
+                    if (is_pointer(result)) object_release(result);
+                    if (vm->handler_count <= 0) {
+                        vm_error(vm, "Unhandled exception");
+                        return;
+                    }
+                    ExceptionHandler* h = &vm->handlers[--vm->handler_count];
+                    while (vm->frame_count > h->frame_count) {
+                        CallFrame* fr = pop_frame(vm);
+                        if (!fr) break;
+                        while (vm->stack_pointer > fr->base_pointer) vm_pop(vm);
+                        vm->code = fr->caller_code;
+                        vm->code_size = fr->caller_code_size;
+                        vm->constants = fr->caller_constants;
+                        vm->num_constants = fr->caller_num_constants;
+                    }
+                    while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
+                    vm->pc = h->catch_pc;
                     break;
                 }
 

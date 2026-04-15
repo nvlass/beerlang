@@ -130,6 +130,7 @@ typedef struct VM {
     bool error;
     const char* error_msg;
     char error_buf[256];  /* Buffer for dynamic error messages */
+    bool native_throw;   /* Native requested a catchable throw; exception in vm->exception */
 } VM;
 
 /* VM API */
@@ -152,5 +153,8 @@ bool vm_stack_full(VM* vm);
 
 /* Error handling */
 void vm_error(VM* vm, const char* msg);
+/* Throw a catchable {:message msg} exception from a native function.
+ * If no handler is active, falls back to vm_error (fatal). */
+void vm_throw_error(VM* vm, const char* msg);
 
 #endif /* BEERLANG_VM_H */

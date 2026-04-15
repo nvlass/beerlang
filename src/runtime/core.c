@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <inttypes.h>
+#include <errno.h>
 #include "native.h"
 #include "vm.h"
 #include "value.h"
@@ -2837,7 +2838,9 @@ static Value native_open(VM* vm, int argc, Value* argv) {
     }
     Value result = stream_open(path, mode);
     if (is_nil(result)) {
-        vm_error(vm, "open: failed to open file");
+        char buf[512];
+        snprintf(buf, sizeof(buf), "open: failed to open '%s': %s", path, strerror(errno));
+        vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
     return result;
@@ -3007,9 +3010,12 @@ static Value native_slurp(VM* vm, int argc, Value* argv) {
         vm_error(vm, "slurp: argument must be a string");
         return VALUE_NIL;
     }
-    Value result = stream_slurp(string_cstr(argv[0]));
+    const char* slurp_path = string_cstr(argv[0]);
+    Value result = stream_slurp(slurp_path);
     if (is_nil(result)) {
-        vm_error(vm, "slurp: failed to read file");
+        char buf[512];
+        snprintf(buf, sizeof(buf), "slurp: failed to read '%s': %s", slurp_path, strerror(errno));
+        vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
     return result;
@@ -3039,7 +3045,9 @@ static Value native_spit(VM* vm, int argc, Value* argv) {
                           string_byte_length(argv[1]),
                           append);
     if (ret != 0) {
-        vm_error(vm, "spit: failed to write file");
+        char buf[512];
+        snprintf(buf, sizeof(buf), "spit: failed to write '%s': %s", string_cstr(argv[0]), strerror(errno));
+        vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
     return VALUE_NIL;

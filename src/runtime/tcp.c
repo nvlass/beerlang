@@ -50,8 +50,8 @@ static Value native_tcp_listen(VM* vm, int argc, Value* argv) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         char buf[128];
-        snprintf(buf, sizeof(buf), "tcp/listen: socket() failed [Error: %s]", strerror(errno));
-        vm_error(vm, buf);
+        snprintf(buf, sizeof(buf), "tcp/listen: socket() failed: %s", strerror(errno));
+        vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
 
@@ -66,17 +66,17 @@ static Value native_tcp_listen(VM* vm, int argc, Value* argv) {
 
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         char buf[128];
-        snprintf(buf, sizeof(buf), "tcp/listen: bind() failed on port %d [Error: %s]", port, strerror(errno));
+        snprintf(buf, sizeof(buf), "tcp/listen: bind() failed on port %d: %s", port, strerror(errno));
         close(fd);
-        vm_error(vm, buf);
+        vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
 
     if (listen(fd, backlog) < 0) {
         char buf[128];
-        snprintf(buf, sizeof(buf), "tcp/listen: listen() failed [Error: %s]", strerror(errno));
+        snprintf(buf, sizeof(buf), "tcp/listen: listen() failed: %s", strerror(errno));
         close(fd);
-        vm_error(vm, buf);
+        vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
 
@@ -126,7 +126,9 @@ static Value native_tcp_accept(VM* vm, int argc, Value* argv) {
             vm->yielded = true;
             return VALUE_NIL;
         }
-        vm_error(vm, "tcp/accept: accept() failed");
+        char buf[128];
+        snprintf(buf, sizeof(buf), "tcp/accept: accept() failed: %s", strerror(errno));
+        vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
 
@@ -170,7 +172,9 @@ static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
         /* Try DNS resolution */
         struct hostent* he = gethostbyname(host);
         if (!he) {
-            vm_error(vm, "tcp/connect: cannot resolve host");
+            char buf[256];
+            snprintf(buf, sizeof(buf), "tcp/connect: cannot resolve host '%s'", host);
+            vm_throw_error(vm, buf);
             return VALUE_NIL;
         }
         memcpy(&addr.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
@@ -178,7 +182,9 @@ static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        vm_error(vm, "tcp/connect: socket() failed");
+        char buf[128];
+        snprintf(buf, sizeof(buf), "tcp/connect: socket() failed: %s", strerror(errno));
+        vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
 
@@ -192,8 +198,10 @@ static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
     fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);  /* temporarily blocking */
     int rc = connect(fd, (struct sockaddr*)&addr, sizeof(addr));
     if (rc < 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "tcp/connect: connect() failed: %s", strerror(errno));
         close(fd);
-        vm_error(vm, "tcp/connect: connect() failed");
+        vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
     fcntl(fd, F_SETFL, fl | O_NONBLOCK);  /* restore non-blocking */
