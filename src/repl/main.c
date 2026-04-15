@@ -122,6 +122,83 @@ static int eval_form(const char* source, const char* filename) {
 }
 
 /* ================================================================
+ * -e expression evaluation
+ * ================================================================ */
+
+/* Evaluate and print each expression from -e arguments, in order.
+ * Uses the same pattern as the REPL: scheduler_run_task_to_completion
+ * per form, then scheduler_run_until_done at the end. */
+static int cmd_eval_exprs(const char** exprs, int n) {
+    int result = 0;
+    for (int ei = 0; ei < n; ei++) {
+        Reader* reader = reader_new(exprs[ei], "-e");
+        Value all_forms = reader_read_all(reader);
+        if (reader_has_error(reader)) {
+            fprintf(stderr, "beer -e: read error: %s\n", reader_error_msg(reader));
+            reader_free(reader);
+            object_release(all_forms);
+            result = 1;
+            break;
+        }
+        reader_free(reader);
+
+        size_t n_forms = vector_length(all_forms);
+        for (size_t fi = 0; fi < n_forms; fi++) {
+            Value form = vector_get(all_forms, fi);
+            Compiler* compiler = compiler_new("-e");
+            CompiledCode* code = compile(compiler, form);
+            if (compiler_has_error(compiler)) {
+                fprintf(stderr, "beer -e: compile error: %s\n", compiler_error_msg(compiler));
+                compiled_code_free(code);
+                compiler_free(compiler);
+                result = 1;
+                break;
+            }
+            int n_constants = (int)vector_length(code->constants);
+            Value* constants = malloc(n_constants * sizeof(Value));
+            for (int i = 0; i < n_constants; i++) constants[i] = vector_get(code->constants, i);
+            for (int i = 0; i < n_constants; i++) {
+                if (is_function(constants[i])) {
+                    function_set_code(constants[i], code->bytecode, (int)code->code_size,
+                                      constants, n_constants);
+                    object_make_immortal(constants[i]);
+                }
+            }
+            Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
+                                                constants, n_constants, global_scheduler);
+            Task* task = task_get(task_val);
+            scheduler_run_task_to_completion(global_scheduler, task);
+            if (task->vm->error) {
+                fprintf(stderr, "beer -e: %s\n", task->vm->error_msg);
+                result = 1;
+            } else if (!vm_stack_empty(task->vm)) {
+                Value res = task->vm->stack[task->vm->stack_pointer - 1];
+                if (is_pointer(res)) object_retain(res);
+                vm_pop(task->vm);
+                value_print_readable(res);
+                printf("\n");
+                if (is_pointer(res)) object_release(res);
+            }
+            object_release(task_val);
+            if (n_compiled_units < MAX_COMPILED_UNITS) {
+                compiled_units[n_compiled_units] = code;
+                constant_arrays[n_compiled_units] = constants;
+                n_compiled_units++;
+            } else {
+                compiled_code_free(code);
+                free(constants);
+            }
+            compiler_free(compiler);
+            if (result) break;
+        }
+        object_release(all_forms);
+        if (result) break;
+    }
+    if (global_scheduler) scheduler_run_until_done(global_scheduler);
+    return result;
+}
+
+/* ================================================================
  * beer.edn reading
  * ================================================================ */
 
@@ -501,6 +578,7 @@ static void print_usage(void) {
     printf("  repl           Start a REPL (default)\n");
     printf("  <file.beer>    Run a script file\n");
     printf("\nOptions:\n");
+    printf("  -e <expr>      Evaluate expression and print result (repeatable)\n");
     printf("  --trace        Enable opcode tracing\n");
     printf("  --help, -h     Show this help\n");
 }
@@ -510,6 +588,9 @@ int main(int argc, char** argv) {
     const char* subcommand = NULL;
     const char* subcmd_arg = NULL;
     const char* script_file = NULL;
+    /* -e expressions: up to 64 */
+    const char* eval_exprs[64];
+    int n_eval_exprs = 0;
 
 #ifdef BEER_TRACK_ALLOCS
     dump_leaks_flag = false;
@@ -526,6 +607,14 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage();
             return 0;
+        } else if (strcmp(argv[i], "-e") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "beer: -e requires an expression argument\n");
+                return 1;
+            }
+            if (n_eval_exprs < 64) {
+                eval_exprs[n_eval_exprs++] = argv[++i];
+            }
         } else if (argv[i][0] != '-' && !subcommand) {
             subcommand = argv[i];
             /* Grab next arg if available (for 'new <name>') */
@@ -564,7 +653,9 @@ int main(int argc, char** argv) {
 
     int result = 0;
 
-    if (script_file) {
+    if (n_eval_exprs > 0) {
+        result = cmd_eval_exprs(eval_exprs, n_eval_exprs);
+    } else if (script_file) {
         /* Script mode */
         Value path_str = string_from_cstr(script_file);
         Value load_argv[1] = { path_str };
@@ -620,7 +711,7 @@ int main(int argc, char** argv) {
 #endif
     shutdown_systems();
 
-    if (!script_file && !subcommand) {
+    if (n_eval_exprs == 0 && !script_file && !subcommand) {
         printf("Goodbye!\n");
     } else if (subcommand && strcmp(subcommand, "repl") == 0) {
         printf("Goodbye!\n");
