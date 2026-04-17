@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -145,10 +146,11 @@ static Value native_tcp_accept(VM* vm, int argc, Value* argv) {
     return v;
 }
 
-/* (tcp-connect host port) — connect to remote host, returns stream */
+/* (tcp-connect host port) or (tcp-connect host port timeout-ms) — connect to remote host.
+ * timeout-ms defaults to 10000 (10 s). Throws a catchable error on failure or timeout. */
 static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
-    if (argc != 2) {
-        vm_error(vm, "tcp/connect: requires 2 arguments (host port)");
+    if (argc < 2 || argc > 3) {
+        vm_error(vm, "tcp/connect: requires 2 or 3 arguments (host port [timeout-ms])");
         return VALUE_NIL;
     }
     if (!is_string(argv[0])) {
@@ -158,6 +160,18 @@ static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
     if (!is_fixnum(argv[1])) {
         vm_error(vm, "tcp/connect: port must be an integer");
         return VALUE_NIL;
+    }
+    int timeout_ms = 10000;
+    if (argc == 3) {
+        if (!is_fixnum(argv[2])) {
+            vm_error(vm, "tcp/connect: timeout-ms must be an integer");
+            return VALUE_NIL;
+        }
+        timeout_ms = (int)untag_fixnum(argv[2]);
+        if (timeout_ms <= 0) {
+            vm_error(vm, "tcp/connect: timeout-ms must be positive");
+            return VALUE_NIL;
+        }
     }
 
     const char* host = string_cstr(argv[0]);
@@ -188,24 +202,60 @@ static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
         return VALUE_NIL;
     }
 
-    /* Set non-blocking before connect */
+    /* Non-blocking connect + select() with user-specified timeout */
     int fl = fcntl(fd, F_GETFL);
-    if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    if (fl < 0) fl = 0;
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 
-    /* Connect with blocking fallback — connect() is fast for localhost
-     * and the native_blocked rewind pattern doesn't work well here since
-     * we can't re-enter without creating a duplicate socket. */
-    fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);  /* temporarily blocking */
     int rc = connect(fd, (struct sockaddr*)&addr, sizeof(addr));
-    if (rc < 0) {
-        char buf[128];
+    if (rc < 0 && errno != EINPROGRESS) {
+        char buf[256];
         snprintf(buf, sizeof(buf), "tcp/connect: connect() failed: %s", strerror(errno));
         close(fd);
         vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
-    fcntl(fd, F_SETFL, fl | O_NONBLOCK);  /* restore non-blocking */
 
+    if (rc != 0) {
+        /* EINPROGRESS — wait for socket to become writable (connected or failed) */
+        fd_set wfds, efds;
+        FD_ZERO(&wfds);
+        FD_ZERO(&efds);
+        FD_SET(fd, &wfds);
+        FD_SET(fd, &efds);
+        struct timeval tv;
+        tv.tv_sec  = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+        int nready = select(fd + 1, NULL, &wfds, &efds, &tv);
+        if (nready == 0) {
+            close(fd);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "tcp/connect: connection timed out after %d ms", timeout_ms);
+            vm_throw_error(vm, buf);
+            return VALUE_NIL;
+        }
+        if (nready < 0) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "tcp/connect: select() failed: %s", strerror(errno));
+            close(fd);
+            vm_throw_error(vm, buf);
+            return VALUE_NIL;
+        }
+        /* Check for async connect error via SO_ERROR */
+        int sockerr = 0;
+        socklen_t len = sizeof(sockerr);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockerr, &len);
+        if (sockerr != 0) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "tcp/connect: connect() failed: %s", strerror(sockerr));
+            close(fd);
+            vm_throw_error(vm, buf);
+            return VALUE_NIL;
+        }
+    }
+
+    /* Socket is connected; keep non-blocking */
     Value v = stream_from_fd(fd, true, true, true, STREAM_SOCKET);
     Stream* s = (Stream*)untag_pointer(v);
     s->nonblocking = true;
