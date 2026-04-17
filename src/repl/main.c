@@ -6,6 +6,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <sys/stat.h>
+#include <sys/select.h>
+#include <unistd.h>
 #include <errno.h>
 #include "beerlang.h"
 #include "memory.h"
@@ -467,9 +469,31 @@ static int run_repl(void) {
         printf("%s:%d> ", cur_ns ? cur_ns->name : "beerlang", line_number);
         fflush(stdout);
 
-        if (!fgets(input, INPUT_BUFFER_SIZE, stdin)) {
-            printf("\n");
-            break;
+        /* Poll stdin with a short timeout so background tasks (accept-loop,
+         * connection readers, actors) get CPU time while we wait for input.
+         * Without this, spawned tasks are frozen between REPL prompts. */
+        {
+            bool got_input = false;
+            while (!got_input) {
+                fd_set rfds;
+                FD_ZERO(&rfds);
+                FD_SET(STDIN_FILENO, &rfds);
+                struct timeval tv = {0, 10000};  /* 10 ms */
+                int r = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+                if (r > 0) {
+                    if (!fgets(input, INPUT_BUFFER_SIZE, stdin)) {
+                        printf("\n");
+                        goto repl_exit;
+                    }
+                    got_input = true;
+                } else if (r == 0) {
+                    /* Timeout — run one scheduler tick so background tasks make progress */
+                    if (global_scheduler) {
+                        scheduler_run_one_tick(global_scheduler);
+                    }
+                }
+                /* r < 0: EINTR or other error — just retry */
+            }
         }
 
         size_t len = strlen(input);
@@ -560,7 +584,7 @@ static int run_repl(void) {
         object_release(all_forms);
         line_number++;
     }
-
+    repl_exit:;
     return 0;
 }
 

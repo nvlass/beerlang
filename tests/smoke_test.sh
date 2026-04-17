@@ -1441,6 +1441,56 @@ fi
 
 rm -rf "$CLI_TMPDIR"
 
+# ============================================================
+# hive node start / stop / restart
+# ============================================================
+# Uses a free port to avoid clashing with the two-node tests above.
+HIVE_RST_PORT=17702
+
+HIVE_RST_TEST=$(mktemp /tmp/beer_hive_rst_XXXXXX.beer)
+cat > "$HIVE_RST_TEST" << 'HIVEEOF'
+(require 'beer.hive :as 'hive)
+
+;; Start, register an actor, ask it, stop, restart, verify new actor works.
+(def port HIVE_RST_PORT_PLACEHOLDER)
+
+(hive/start-node! {:host "127.0.0.1" :port port :secret "rst-secret"} "rst-node-1")
+(def pid1 (hive/spawn-actor (fn [s m] {:reply (+ m 1) :state s}) 0 {:name :inc}))
+(def r1 (hive/ask pid1 10))
+
+(hive/stop-node!)
+
+;; Restart on the same port (SO_REUSEADDR makes this immediate)
+(hive/start-node! {:host "127.0.0.1" :port port :secret "rst-secret"} "rst-node-2")
+(def pid2 (hive/spawn-actor (fn [s m] {:reply (* m 2) :state s}) 0 {:name :double}))
+(def r2 (hive/ask pid2 7))
+
+(hive/stop-node!)
+
+;; Restart a third time to confirm idempotency
+(hive/start-node! {:host "127.0.0.1" :port port :secret "rst-secret"} "rst-node-3")
+(def pid3 (hive/spawn-actor (fn [s m] {:reply (- m 1) :state s}) 0 {:name :dec}))
+(def r3 (hive/ask pid3 5))
+
+(hive/stop-node!)
+
+(println (str r1 "," r2 "," r3))
+HIVEEOF
+
+# Replace the port placeholder
+sed -i.bak "s/HIVE_RST_PORT_PLACEHOLDER/$HIVE_RST_PORT/" "$HIVE_RST_TEST"
+rm -f "${HIVE_RST_TEST}.bak"
+
+hive_rst_out=$(BEERPATH=lib "$BEER" "$HIVE_RST_TEST" 2>/dev/null | tail -1)
+rm -f "$HIVE_RST_TEST"
+
+if [ "$hive_rst_out" = "11,14,4" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: hive start/stop/restart => '$hive_rst_out' (expected '11,14,4')"
+    FAIL=$((FAIL + 1))
+fi
+
 # reduce-kv
 check '(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2 :c 3})' '6'
 check '(reduce-kv (fn [acc k v] (+ acc 1)) 0 {})' '0'

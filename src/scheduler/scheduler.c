@@ -106,9 +106,10 @@ void scheduler_block_io(Scheduler* sched, Task* task) {
 /* Wake an I/O-blocked task */
 void scheduler_wake_io(Scheduler* sched, Task* task) {
     if (task->state != TASK_BLOCKED) {
-        /* Unexpected state — release the retain from scheduler_block_io to avoid leak */
-        Value task_val = tag_pointer(task);
-        object_release(task_val);
+        /* Stale reactor event: native_close already woke this task, and then kqueue
+         * fired an EV_EOF/EV_ERROR for the just-closed fd. The successful wake already
+         * decremented blocked_count and released the retain from scheduler_block_io.
+         * Do NOT release again — that would be a double-release / use-after-free. */
         return;
     }
     sched->blocked_count--;
