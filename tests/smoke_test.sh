@@ -1491,6 +1491,65 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# ============================================================
+# hive double-start protection
+# Calling start-node! twice without stop! must throw :already-running,
+# leave the node intact, and not crash on the third attempt.
+# ============================================================
+HIVE_DS_PORT=17703
+HIVE_DS_TEST=$(mktemp /tmp/beer_hive_ds_XXXXXX.beer)
+cat > "$HIVE_DS_TEST" << 'DSEOF'
+(require 'beer.hive :as 'hive)
+
+(def port HIVE_DS_PORT_PLACEHOLDER)
+
+;; 1. First start succeeds
+(hive/start-node! {:host "127.0.0.1" :port port :secret "ds-secret"} "ds-node-1")
+(def pid (hive/spawn-actor (fn [s m] {:reply (+ m 1) :state s}) 0 {:name :counter}))
+(def r1 (hive/ask pid 10))         ; should be 11
+
+;; 2. Second start (node already running) must throw, not crash
+(def err2
+  (try
+    (hive/start-node! {:host "127.0.0.1" :port port :secret "ds-secret"} "ds-node-2")
+    nil
+    (catch e (:type e))))          ; should be :already-running
+
+;; 3. Third start also must throw, not crash
+(def err3
+  (try
+    (hive/start-node! {:host "127.0.0.1" :port port :secret "ds-secret"} "ds-node-3")
+    nil
+    (catch e (:type e))))          ; should be :already-running
+
+;; 4. Node is still functional after the failed attempts
+(def r2 (hive/ask pid 20))         ; should be 21
+
+(hive/stop-node!)
+
+;; 5. Can restart cleanly after stop
+(hive/start-node! {:host "127.0.0.1" :port port :secret "ds-secret"} "ds-node-4")
+(def pid2 (hive/spawn-actor (fn [s m] {:reply (* m 3) :state s}) 0 {:name :triple}))
+(def r3 (hive/ask pid2 4))         ; should be 12
+
+(hive/stop-node!)
+
+(println (str r1 "," err2 "," err3 "," r2 "," r3))
+DSEOF
+
+sed -i.bak "s/HIVE_DS_PORT_PLACEHOLDER/$HIVE_DS_PORT/" "$HIVE_DS_TEST"
+rm -f "${HIVE_DS_TEST}.bak"
+
+hive_ds_out=$(BEERPATH=lib "$BEER" "$HIVE_DS_TEST" 2>/dev/null | tail -1)
+rm -f "$HIVE_DS_TEST"
+
+if [ "$hive_ds_out" = "11,:already-running,:already-running,21,12" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: hive double-start => '$hive_ds_out' (expected '11,:already-running,:already-running,21,12')"
+    FAIL=$((FAIL + 1))
+fi
+
 # reduce-kv
 check '(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2 :c 3})' '6'
 check '(reduce-kv (fn [acc k v] (+ acc 1)) 0 {})' '0'

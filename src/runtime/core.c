@@ -1752,9 +1752,18 @@ static Value native_apply(VM* vm, int argc, Value* argv) {
         vm_run(temp_vm);
 
         if (temp_vm->error) {
-            char errbuf[256];
-            snprintf(errbuf, sizeof(errbuf), "apply: %s", temp_vm->error_msg);
-            vm_error(vm, errbuf);
+            /* If OP_THROW saved the original exception value, re-throw it
+             * in the calling VM so try/catch sees the original map, not a
+             * wrapped "apply: Unhandled exception" string. */
+            if (is_pointer(temp_vm->thrown_exception)) {
+                Value exc = temp_vm->thrown_exception;
+                temp_vm->thrown_exception = VALUE_NIL;  /* take ownership before free */
+                vm_rethrow(vm, exc);
+            } else {
+                char errbuf[256];
+                snprintf(errbuf, sizeof(errbuf), "apply: %s", temp_vm->error_msg);
+                vm_error(vm, errbuf);
+            }
             result = VALUE_NIL;
         } else if (temp_vm->stack_pointer > 0) {
             result = temp_vm->stack[temp_vm->stack_pointer - 1];

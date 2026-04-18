@@ -131,6 +131,7 @@ typedef struct VM {
     const char* error_msg;
     char error_buf[256];  /* Buffer for dynamic error messages */
     bool native_throw;   /* Native requested a catchable throw; exception in vm->exception */
+    Value thrown_exception; /* Exception value saved when OP_THROW finds no handler (for temp-VM re-throw) */
 } VM;
 
 /* VM API */
@@ -156,5 +157,6 @@ void vm_error(VM* vm, const char* msg);
 /* Throw a catchable {:message msg} exception from a native function.
  * If no handler is active, falls back to vm_error (fatal). */
 void vm_throw_error(VM* vm, const char* msg);
+void vm_rethrow(VM* vm, Value exc); /* Re-throw an already-owned exception Value */
 
 #endif /* BEERLANG_VM_H */

@@ -86,6 +86,7 @@ VM* vm_new(int stack_size) {
     vm->yielded = false;
     vm->native_blocked = false;
     vm->native_throw = false;
+    vm->thrown_exception = VALUE_NIL;
     vm->scheduler = NULL;
 
     vm->running = false;
@@ -118,6 +119,11 @@ void vm_free(VM* vm) {
     /* Release exception value */
     if (is_pointer(vm->exception)) {
         object_release(vm->exception);
+    }
+
+    /* Release saved thrown exception (from OP_THROW with no handler) */
+    if (is_pointer(vm->thrown_exception)) {
+        object_release(vm->thrown_exception);
     }
 
     free(vm->handlers);
@@ -168,6 +174,23 @@ void vm_throw_error(VM* vm, const char* msg) {
     /* Store exception and signal OP_CALL to unwind */
     if (is_pointer(vm->exception)) object_release(vm->exception);
     vm->exception    = exc2;
+    vm->native_throw = true;
+}
+
+/* Re-throw an already-owned exception Value in this VM.
+ * Used by native_apply (and other temp-VM callers) to propagate exceptions
+ * that crossed a temp-VM boundary without losing the original value. */
+void vm_rethrow(VM* vm, Value exc) {
+    if (vm->handler_count <= 0) {
+        /* No handler here — save exc so a parent VM can re-throw it.
+         * This handles nested temp-VMs (e.g. multi-arity inside multi-arity). */
+        if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
+        vm->thrown_exception = exc;  /* transfer ownership — do NOT release */
+        vm_error(vm, "Unhandled exception");
+        return;
+    }
+    if (is_pointer(vm->exception)) object_release(vm->exception);
+    vm->exception    = exc;  /* transfer ownership */
     vm->native_throw = true;
 }
 
@@ -1743,9 +1766,10 @@ void vm_step(VM* vm) {
             vm_pop(vm);
 
             if (vm->handler_count <= 0) {
-                /* No handler — set error state */
-                /* Release the extra retain */
-                if (is_pointer(exc)) object_release(exc);
+                /* No handler — save the exception value so a parent VM (e.g. apply's
+                 * temp VM) can re-throw it rather than losing it behind "apply: ..." */
+                if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
+                vm->thrown_exception = exc;  /* transfer ownership — do NOT release */
                 vm_error(vm, "Unhandled exception");
                 return;
             }

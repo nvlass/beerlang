@@ -193,9 +193,13 @@
 (defn start!
   "Start this cluster node.
   config: {:host str :port int :secret str}
-  Returns the node-id."
+  Returns the node-id.
+  Throws if the node is already running — call stop! first."
   ([config] (start! config (digest/random-hex 16)))
   ([config node-id]
+   (when @*running*
+     (throw {:type :already-running
+             :message "hive node is already running; call stop! first"}))
    (reset! *config*  (assoc config :node-id node-id))
    (reset! *running* true)
    (let [listen-stream (tcp/listen (:port config))]
