@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <sys/select.h>
 #include <unistd.h>
@@ -26,8 +27,54 @@
 #include "log.h"
 #include "task.h"
 
-#define INPUT_BUFFER_SIZE 4096
-#define MAX_COMPILED_UNITS 1024
+#define INPUT_BUFFER_SIZE   4096
+#define ACCUM_BUFFER_SIZE  65536   /* max accumulated multi-line input */
+#define MAX_COMPILED_UNITS  1024
+
+/* ----------------------------------------------------------------
+ * is_form_complete — check whether SRC contains at least one
+ * syntactically complete top-level form (balanced delimiters).
+ * Accounts for strings and ; line comments.  Returns true when
+ * depth == 0 and there is at least one non-whitespace character.
+ * ---------------------------------------------------------------- */
+static bool is_form_complete(const char* src) {
+    int depth = 0;
+    bool in_string = false;
+    bool has_content = false;
+
+    for (const char* p = src; *p; p++) {
+        if (in_string) {
+            if (*p == '\\' && *(p + 1)) {
+                p++;   /* skip escape */
+            } else if (*p == '"') {
+                in_string = false;
+            }
+        } else {
+            switch (*p) {
+            case '"':
+                in_string = true;
+                has_content = true;
+                break;
+            case ';':                      /* line comment — skip to newline */
+                while (*p && *p != '\n') p++;
+                if (*p) p--;
+                break;
+            case '(':  case '[':  case '{':
+                depth++;
+                has_content = true;
+                break;
+            case ')':  case ']':  case '}':
+                depth--;
+                break;
+            default:
+                if (!isspace((unsigned char)*p))
+                    has_content = true;
+                break;
+            }
+        }
+    }
+    return has_content && (depth <= 0);
+}
 
 /* ================================================================
  * Shutdown helper
@@ -455,6 +502,9 @@ static int cmd_ubertar(void) {
 
 static int run_repl(void) {
     char input[INPUT_BUFFER_SIZE];
+    char accum[ACCUM_BUFFER_SIZE];
+    size_t accum_len = 0;
+    accum[0] = '\0';
 
     printf("Beerlang v%d.%d.%d\n",
            BEERLANG_VERSION_MAJOR,
@@ -466,7 +516,11 @@ static int run_repl(void) {
 
     while (true) {
         Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
-        printf("%s:%d> ", cur_ns ? cur_ns->name : "beerlang", line_number);
+        if (accum_len == 0) {
+            printf("%s:%d> ", cur_ns ? cur_ns->name : "beerlang", line_number);
+        } else {
+            printf("...   ");
+        }
         fflush(stdout);
 
         /* Poll stdin with a short timeout so background tasks (accept-loop,
@@ -496,22 +550,47 @@ static int run_repl(void) {
             }
         }
 
-        size_t len = strlen(input);
-        if (len > 0 && input[len - 1] == '\n') {
-            input[len - 1] = '\0';
+        /* When not mid-form, check for exit commands and skip blank lines */
+        if (accum_len == 0) {
+            char trimmed[INPUT_BUFFER_SIZE];
+            strncpy(trimmed, input, INPUT_BUFFER_SIZE - 1);
+            trimmed[INPUT_BUFFER_SIZE - 1] = '\0';
+            size_t tlen = strlen(trimmed);
+            while (tlen > 0 && (trimmed[tlen-1] == '\n' || trimmed[tlen-1] == '\r'
+                                 || trimmed[tlen-1] == ' ' || trimmed[tlen-1] == '\t'))
+                trimmed[--tlen] = '\0';
+            if (strcmp(trimmed, "(exit)") == 0 || strcmp(trimmed, "exit") == 0) break;
+            if (tlen == 0) continue;
         }
 
-        if (strlen(input) == 0) continue;
+        /* Append this line to the accumulation buffer (keep the newline so the
+         * reader sees correct line structure and is_form_complete works). */
+        size_t input_len = strlen(input);
+        if (accum_len + input_len >= ACCUM_BUFFER_SIZE) {
+            printf("Error: input too long (max %d bytes)\n", ACCUM_BUFFER_SIZE);
+            accum_len = 0;
+            accum[0] = '\0';
+            continue;
+        }
+        memcpy(accum + accum_len, input, input_len);
+        accum_len += input_len;
+        accum[accum_len] = '\0';
 
-        if (strcmp(input, "(exit)") == 0 || strcmp(input, "exit") == 0) break;
+        /* Wait until we have a syntactically complete top-level form */
+        if (!is_form_complete(accum)) {
+            continue;
+        }
 
-        Reader* reader = reader_new(input, "<repl>");
+        /* Process the accumulated complete form(s) */
+        Reader* reader = reader_new(accum, "<repl>");
         Value all_forms = reader_read_all(reader);
 
         if (reader_has_error(reader)) {
             printf("Read error: %s\n", reader_error_msg(reader));
             reader_free(reader);
             object_release(all_forms);
+            accum_len = 0;
+            accum[0] = '\0';
             line_number++;
             continue;
         }
@@ -582,6 +661,10 @@ static int run_repl(void) {
         }
 
         object_release(all_forms);
+
+        /* Reset accumulator and advance prompt counter */
+        accum_len = 0;
+        accum[0] = '\0';
         line_number++;
     }
     repl_exit:;
