@@ -41,3 +41,4 @@ CLAUDE_ARCHIVE01.md
 IDEAS.md
 TODO_BUGS.md
 TODO_OPTIMIZATIONS.md
+editors/emacs/*.elc
