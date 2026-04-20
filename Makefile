@@ -40,8 +40,14 @@ LIB_OBJS = $(BUILD_DIR)/lib/mini-gmp.o $(BUILD_DIR)/lib/ulog.o
 TEST_SRCS = $(wildcard $(TEST_DIR)/*/*.c)
 TEST_BINS = $(patsubst $(TEST_DIR)/%.c,$(BIN_DIR)/test_%,$(TEST_SRCS))
 
+# Install paths — override with: make install PREFIX=~/.local
+PREFIX     ?= /usr/local
+BINDIR      = $(PREFIX)/bin
+LIBEXECDIR  = $(PREFIX)/lib/beerlang
+SHAREDIR    = $(PREFIX)/share/beerlang
+
 # Targets
-.PHONY: all clean test repl repl-trace debug track-leaks asan help
+.PHONY: all clean test repl repl-trace debug track-leaks asan install uninstall help
 
 all: $(BIN_DIR)/beerlang
 
@@ -102,6 +108,40 @@ $(BIN_DIR)/test_%: $(TEST_DIR)/%.c $(OBJS) $(LIB_OBJS)
 lib/tools.tar: lib/tools/beer/tools.beer
 	cd lib/tools && COPYFILE_DISABLE=1 tar cf ../tools.tar beer/tools.beer
 
+# Install
+# Installs the binary and standard library under PREFIX (default /usr/local).
+# The real binary goes to $(LIBEXECDIR)/beerlang; a generated wrapper at
+# $(BINDIR)/beerlang sets BEERPATH and exec's it — no manual env setup needed.
+#
+# Examples:
+#   make install                       # → /usr/local
+#   make install PREFIX=/opt/beerlang
+#   make install PREFIX=$$HOME/.local
+install: $(BIN_DIR)/beerlang
+	@echo "Installing beerlang to $(PREFIX)..."
+	install -d $(BINDIR) $(LIBEXECDIR) $(SHAREDIR)/lib
+	install -m 755 $(BIN_DIR)/beerlang $(LIBEXECDIR)/beerlang
+	cp -r lib/. $(SHAREDIR)/lib/
+	@{ \
+	  echo '#!/bin/sh'; \
+	  echo 'export BEERPATH="$(SHAREDIR)/lib"'; \
+	  echo 'exec "$(LIBEXECDIR)/beerlang" "$$@"'; \
+	} > $(BINDIR)/beerlang
+	chmod 755 $(BINDIR)/beerlang
+	@echo ""
+	@echo "  binary:  $(BINDIR)/beerlang"
+	@echo "  library: $(SHAREDIR)/lib"
+	@echo ""
+	@echo "Make sure $(BINDIR) is in your PATH."
+
+# Uninstall
+uninstall:
+	@echo "Removing beerlang from $(PREFIX)..."
+	rm -f  $(BINDIR)/beerlang
+	rm -rf $(LIBEXECDIR)
+	rm -rf $(SHAREDIR)
+	@echo "Done."
+
 # Clean
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
@@ -113,15 +153,28 @@ help:
 	@echo "====================="
 	@echo ""
 	@echo "Targets:"
-	@echo "  make          - Build beerlang (default)"
-	@echo "  make debug    - Build with debug symbols"
-	@echo "  make track-leaks - Build with allocation tracking (--dump-leaks)"
-	@echo "  make test     - Run all tests"
-	@echo "  make repl     - Start REPL"
-	@echo "  make repl-trace - Start REPL with opcode tracing"
-	@echo "  make clean    - Remove build artifacts"
-	@echo "  make help     - Show this help"
+	@echo "  make               Build beerlang (default)"
+	@echo "  make install       Install to PREFIX (default: /usr/local)"
+	@echo "  make uninstall     Remove installed files"
+	@echo "  make debug         Build with debug symbols"
+	@echo "  make track-leaks   Build with allocation tracking (--dump-leaks)"
+	@echo "  make asan          Build with AddressSanitizer"
+	@echo "  make test          Run all tests"
+	@echo "  make repl          Start REPL"
+	@echo "  make repl-trace    Start REPL with opcode tracing"
+	@echo "  make clean         Remove build artifacts"
+	@echo "  make help          Show this help"
 	@echo ""
-	@echo "Variables:"
+	@echo "Install variables (override on command line):"
+	@echo "  PREFIX=$(PREFIX)"
+	@echo "  BINDIR=$(BINDIR)"
+	@echo "  LIBEXECDIR=$(LIBEXECDIR)"
+	@echo "  SHAREDIR=$(SHAREDIR)"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make install PREFIX=/opt/beerlang"
+	@echo "  make install PREFIX=\$$HOME/.local"
+	@echo ""
+	@echo "Build variables:"
 	@echo "  CC=$(CC)"
 	@echo "  CFLAGS=$(CFLAGS)"
