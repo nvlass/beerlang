@@ -20,7 +20,8 @@ COMPLETIONS="${SCRIPT_DIR}/.rlwrap_completions"
 
 # Generate completions file if it doesn't exist
 if [ ! -f "$COMPLETIONS" ]; then
-    "$BEER" "${SCRIPT_DIR}/lib/gen-completions.beer" > "$COMPLETIONS" 2>/dev/null || rm -f "$COMPLETIONS"
+    "$BEER" -e "(doseq [sym (ns-publics 'beer.core)] (println sym))" \
+        > "$COMPLETIONS" 2>/dev/null || rm -f "$COMPLETIONS"
 fi
 
 if command -v rlwrap >/dev/null 2>&1; then
