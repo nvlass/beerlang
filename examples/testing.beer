@@ -1,0 +1,103 @@
+;; Testing with beer.test
+;;
+;; Run: BEERPATH=lib ./bin/beerlang examples/testing.beer
+;;
+;; Demonstrates:
+;;   - deftest / is / testing
+;;   - testing pure functions
+;;   - testing stateful atoms
+;;   - testing exceptions
+
+(ns testing-example
+  (:require [beer.test :as t]))
+
+;; ----------------------------------------------------------------
+;; Code under test
+;; ----------------------------------------------------------------
+
+(defn fizzbuzz [n]
+  (cond
+    (zero? (mod n 15)) "FizzBuzz"
+    (zero? (mod n 3))  "Fizz"
+    (zero? (mod n 5))  "Buzz"
+    :else              (str n)))
+
+(defn factorial [n]
+  (loop [i n acc 1]
+    (if (<= i 1) acc
+      (recur (- i 1) (* acc i)))))
+
+(defn running-average []
+  (let [sum   (atom 0)
+        count (atom 0)]
+    {:add   (fn [x] (swap! sum + x) (swap! count inc))
+     :value (fn [] (if (zero? @count) 0 (/ @sum @count)))}))
+
+(defn safe-divide [a b]
+  (if (zero? b)
+    (throw {:type :divide-by-zero :message "cannot divide by zero"})
+    (/ a b)))
+
+;; ----------------------------------------------------------------
+;; Tests
+;; ----------------------------------------------------------------
+
+(t/deftest fizzbuzz-test
+  (t/testing "multiples of 3"
+    (t/is (= "Fizz" (fizzbuzz 3)))
+    (t/is (= "Fizz" (fizzbuzz 9)))
+    (t/is (= "Fizz" (fizzbuzz 99))))
+
+  (t/testing "multiples of 5"
+    (t/is (= "Buzz" (fizzbuzz 5)))
+    (t/is (= "Buzz" (fizzbuzz 25))))
+
+  (t/testing "multiples of 15"
+    (t/is (= "FizzBuzz" (fizzbuzz 15)))
+    (t/is (= "FizzBuzz" (fizzbuzz 45))))
+
+  (t/testing "other numbers"
+    (t/is (= "1"  (fizzbuzz 1)))
+    (t/is (= "7"  (fizzbuzz 7)))
+    (t/is (= "11" (fizzbuzz 11)))))
+
+(t/deftest factorial-test
+  (t/is (= 1   (factorial 0)))
+  (t/is (= 1   (factorial 1)))
+  (t/is (= 6   (factorial 3)))
+  (t/is (= 120 (factorial 5)))
+  (t/is (= 2432902008176640000 (factorial 20))))
+
+(t/deftest running-average-test
+  (t/testing "empty average"
+    (let [avg (running-average)]
+      (t/is (= 0 ((:value avg))))))
+
+  (t/testing "single value"
+    (let [avg (running-average)]
+      ((:add avg) 10)
+      (t/is (= 10 ((:value avg))))))
+
+  (t/testing "multiple values"
+    (let [avg (running-average)]
+      ((:add avg) 10)
+      ((:add avg) 20)
+      ((:add avg) 30)
+      (t/is (= 20 ((:value avg)))))))
+
+(t/deftest exception-test
+  (t/testing "safe-divide normal case"
+    (t/is (= 2 (safe-divide 10 5))))
+
+  (t/testing "safe-divide by zero throws"
+    (let [threw (try
+                  (safe-divide 1 0)
+                  false
+                  (catch e (= (:type e) :divide-by-zero)))]
+      (t/is threw))))
+
+;; ----------------------------------------------------------------
+;; Run
+;; ----------------------------------------------------------------
+
+(System/exit (t/run-tests))

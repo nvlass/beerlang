@@ -1,0 +1,73 @@
+;; Atoms — shared mutable state across concurrent tasks
+;;
+;; Run: BEERPATH=lib ./bin/beerlang examples/atoms.beer
+;;
+;; Demonstrates:
+;;   - atom / swap! / reset! / deref (@)
+;;   - compare-and-set! for lock-free updates
+;;   - safe concurrent counter with many tasks racing
+
+(ns atoms-example)
+
+;; ----------------------------------------------------------------
+;; 1. Basic atom usage
+;; ----------------------------------------------------------------
+
+(def x (atom 0))
+
+(println "initial:" @x)
+
+(swap! x inc)
+(swap! x inc)
+(swap! x + 10)
+(println "after inc inc +10:" @x)   ;=> 12
+
+(reset! x 0)
+(println "after reset:" @x)         ;=> 0
+
+;; ----------------------------------------------------------------
+;; 2. Atoms hold any value
+;; ----------------------------------------------------------------
+
+(def config (atom {:host "localhost" :port 8080 :debug false}))
+
+(swap! config assoc :debug true)
+(swap! config update :port inc)
+
+(print "config: ") (prn @config)
+;=> {:host "localhost" :port 8081 :debug true}
+
+;; ----------------------------------------------------------------
+;; 3. Concurrent counter — many tasks incrementing one atom
+;; ----------------------------------------------------------------
+
+(def counter (atom 0))
+(def n-tasks 100)
+(def n-incs  100)   ; each task increments this many times
+
+(let [tasks (map (fn [_]
+                   (spawn (fn []
+                            (loop [i n-incs]
+                              (when (pos? i)
+                                (swap! counter inc)
+                                (recur (dec i)))))))
+                 (range n-tasks))]
+  ;; wait for all tasks to finish
+  (doseq [t tasks] (await t)))
+
+(println "concurrent counter:" @counter)
+(println "expected:          " (* n-tasks n-incs))
+(println "match?             " (= @counter (* n-tasks n-incs)))
+
+;; ----------------------------------------------------------------
+;; 4. compare-and-set! — optimistic lock-free swap
+;; ----------------------------------------------------------------
+
+(def flag (atom :idle))
+
+(let [won (compare-and-set! flag :idle :running)]
+  (println "CAS :idle → :running:" won)   ;=> true
+  (println "flag is now:" @flag))          ;=> :running
+
+(let [won (compare-and-set! flag :idle :running)]
+  (println "CAS :idle → :running again:" won))  ;=> false (already :running)

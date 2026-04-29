@@ -1,0 +1,114 @@
+;; JSON REST API — beer.http + beer.json
+;;
+;; Run: BEERPATH=lib ./bin/beerlang examples/json_api.beer
+;; Test:
+;;   curl http://localhost:8080/items
+;;   curl -X POST http://localhost:8080/items \
+;;        -H 'Content-Type: application/json' \
+;;        -d '{"name":"widget","price":9.99}'
+;;   curl http://localhost:8080/items/1
+;;   curl -X DELETE http://localhost:8080/items/1
+
+(ns json-api
+  (:require [beer.http :as http]
+            [beer.json :as json]))
+
+;; ----------------------------------------------------------------
+;; In-memory item store (atom — safe under concurrent requests)
+;; ----------------------------------------------------------------
+
+(def *store*   (atom {}))
+(def *next-id* (atom 1))
+
+(defn next-id! []
+  (let [id @*next-id*]
+    (swap! *next-id* inc)
+    id))
+
+(defn store-put! [item]
+  (let [id (next-id!)
+        item-with-id (assoc item :id id)]
+    (swap! *store* assoc id item-with-id)
+    item-with-id))
+
+(defn store-get [id]
+  (get @*store* id))
+
+(defn store-delete! [id]
+  (let [existed? (contains? @*store* id)]
+    (swap! *store* dissoc id)
+    existed?))
+
+;; ----------------------------------------------------------------
+;; Response helpers
+;; ----------------------------------------------------------------
+
+(defn json-response [status body]
+  {:status  status
+   :headers {"content-type" "application/json"}
+   :body    (json/emit body)})
+
+(defn ok       [body] (json-response 200 body))
+(defn created  [body] (json-response 201 body))
+(defn not-found [msg] (json-response 404 {:error msg}))
+(defn bad-req  [msg]  (json-response 400 {:error msg}))
+
+;; ----------------------------------------------------------------
+;; Parse integer from string, return nil on failure
+;; ----------------------------------------------------------------
+
+(defn parse-int [s]
+  (try (int (read-string s))
+       (catch _ nil)))
+
+;; ----------------------------------------------------------------
+;; Router
+;; ----------------------------------------------------------------
+
+(defn handler [req]
+  (let [method (:method req)
+        uri    (:uri req)]
+    (cond
+      ;; GET /items — list all
+      (and (= method "GET") (= uri "/items"))
+      (ok (vec (vals @*store*)))
+
+      ;; POST /items — create
+      (and (= method "POST") (= uri "/items"))
+      (let [body (try (json/parse (:body req))
+                      (catch _ nil))]
+        (if (map? body)
+          (created (store-put! body))
+          (bad-req "body must be a JSON object")))
+
+      ;; GET /items/:id
+      (and (= method "GET") (str/starts-with? uri "/items/"))
+      (let [id-str (subs uri 7)
+            id     (parse-int id-str)]
+        (if-let [item (and id (store-get id))]
+          (ok item)
+          (not-found (str "item " id-str " not found"))))
+
+      ;; DELETE /items/:id
+      (and (= method "DELETE") (str/starts-with? uri "/items/"))
+      (let [id-str (subs uri 7)
+            id     (parse-int id-str)]
+        (if (and id (store-delete! id))
+          (ok {:deleted id})
+          (not-found (str "item " id-str " not found"))))
+
+      ;; 404 catch-all
+      :else
+      (not-found (str "no route for " method " " uri)))))
+
+;; ----------------------------------------------------------------
+;; Start server
+;; ----------------------------------------------------------------
+
+(println "JSON API listening on http://localhost:8080")
+(println "  GET    /items")
+(println "  POST   /items   {\"name\":\"...\",\"price\":0.0}")
+(println "  GET    /items/:id")
+(println "  DELETE /items/:id")
+
+(http/run-server handler {:port 8080})

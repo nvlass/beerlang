@@ -1,0 +1,86 @@
+;; Channels — CSP-style communication between tasks
+;;
+;; Run: BEERPATH=lib ./bin/beerlang examples/channels.beer
+;;
+;; Demonstrates:
+;;   - buffered and unbuffered channels
+;;   - fan-out (one producer, many workers)
+;;   - pipeline (stages connected by channels)
+;;
+;; Note: channel ops (>!, <!) must run inside a spawned task, not in
+;; the top-level script context. Use (await (spawn (fn [] ...))) for scripts.
+
+(ns channels-example)
+
+;; ----------------------------------------------------------------
+;; Helpers — defined at namespace level
+;; ----------------------------------------------------------------
+
+(defn make-worker [id jobs results]
+  "Spawn a worker that reads from jobs, writes squared result to results."
+  (spawn (fn []
+           (loop []
+             (let [job (<! jobs)]
+               (when job
+                 (>! results {:worker id :job job :result (* job job)})
+                 (recur)))))))
+
+(defn pipeline-stage [in xf out]
+  "Spawn a stage that applies xf to each value, forwarding to out. Closes out on EOF."
+  (spawn (fn []
+           (loop []
+             (let [v (<! in)]
+               (when v
+                 (>! out (xf v))
+                 (recur))))
+           (close! out))))
+
+;; ----------------------------------------------------------------
+;; Main — all channel ops inside a task
+;; ----------------------------------------------------------------
+
+(await (spawn (fn []
+
+  ;; 1. Basic send / receive
+  (let [c (chan)]
+    (spawn (fn [] (>! c "hello from a task")))
+    (println "received:" (<! c)))
+
+  ;; 2. Buffered channel — sender doesn't block until buffer full
+  (let [c (chan 3)]
+    (>! c 1)
+    (>! c 2)
+    (>! c 3)
+    (println "buffered:" (<! c) (<! c) (<! c)))
+
+  ;; 3. Fan-out: distribute 16 jobs across 4 workers
+  (let [jobs     (chan 20)
+        results  (chan 20)
+        n-workers 4
+        n-jobs    16]
+    (doseq [i (range n-workers)]
+      (make-worker i jobs results))
+    (doseq [j (range n-jobs)]
+      (>! jobs j))
+    (close! jobs)
+    ;; collect all results, sum the squares
+    (let [total (loop [i n-jobs acc 0]
+                  (if (zero? i) acc
+                    (recur (dec i) (+ acc (:result (<! results))))))]
+      (println "fan-out: sum of squares 0..15 =" total)))
+  ;=> 0²+1²+...+15² = 1240
+
+  ;; 4. Pipeline: source → double → stringify
+  (let [source  (chan 10)
+        doubled (chan 10)
+        stringed (chan 10)]
+    (pipeline-stage source  (fn [x] (* x 2))       doubled)
+    (pipeline-stage doubled (fn [x] (str "v=" x)) stringed)
+    (doseq [i (range 5)] (>! source i))
+    (close! source)
+    (println "pipeline:")
+    (loop []
+      (let [v (<! stringed)]
+        (when v
+          (println " " v)
+          (recur))))))))
