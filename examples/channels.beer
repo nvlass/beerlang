@@ -7,8 +7,7 @@
 ;;   - fan-out (one producer, many workers)
 ;;   - pipeline (stages connected by channels)
 ;;
-;; Note: #(...) anonymous fn shorthand is not yet implemented.
-;; Use (fn [x] ...) instead.
+;; Tip: #(...) anonymous fn shorthand works — #(* % %) is (fn [x] (* x x)).
 
 (ns channels-example)
 
@@ -77,8 +76,8 @@
 (let [source   (chan 10)
       doubled  (chan 10)
       stringed (chan 10)]
-  (pipeline-stage source  (fn [x] (* x 2))       doubled)
-  (pipeline-stage doubled (fn [x] (str "v=" x)) stringed)
+  (pipeline-stage source  #(* % 2)       doubled)
+  (pipeline-stage doubled #(str "v=" %) stringed)
   (doseq [i (range 5)] (>! source i))
   (close! source)
   (println "pipeline:")

@@ -566,6 +566,145 @@ static Value read_unquote(Reader* r) {
 }
 
 /* ================================================================
+ * #(...) anonymous function shorthand
+ * ================================================================ */
+
+/* Walk a form tree and collect anonymous fn parameter info:
+ *   max_n      — highest positional argument index seen (%  = 1, %2 = 2, …)
+ *   has_rest   — true if %& was found
+ *   bare_pct   — true if bare % (as opposed to %1) was found
+ */
+static void find_anon_params(Value form, int* max_n, bool* has_rest, bool* bare_pct) {
+    if (!is_pointer(form)) return;
+
+    int t = object_type(form);
+
+    if (t == TYPE_SYMBOL) {
+        const char* s = symbol_str(form);
+        if (s[0] == '%') {
+            if (s[1] == '\0') {
+                /* bare % → position 1 */
+                *bare_pct = true;
+                if (*max_n < 1) *max_n = 1;
+            } else if (s[1] == '&' && s[2] == '\0') {
+                *has_rest = true;
+            } else {
+                /* %N */
+                int n = atoi(s + 1);
+                if (n > 0 && n > *max_n) *max_n = n;
+            }
+        }
+        return;
+    }
+
+    if (is_cons(form)) {
+        find_anon_params(car(form),  max_n, has_rest, bare_pct);
+        find_anon_params(cdr(form),  max_n, has_rest, bare_pct);
+        return;
+    }
+
+    if (is_vector(form)) {
+        size_t n = vector_length(form);
+        for (size_t i = 0; i < n; i++)
+            find_anon_params(vector_get(form, i), max_n, has_rest, bare_pct);
+        return;
+    }
+}
+
+/* Read #(body...) → (fn [params...] (body...))
+ * '#' has already been consumed; next char must be '('. */
+static Value read_anon_fn(Reader* r) {
+    if (peek(r) != '(') {
+        reader_error(r, "#( : expected '('");
+        return VALUE_NIL;
+    }
+
+    Value body = read_list(r);
+    if (r->error) return VALUE_NIL;
+
+    /* Analyse which %-params appear in the body */
+    int  max_n    = 0;
+    bool has_rest = false;
+    bool bare_pct = false;
+    find_anon_params(body, &max_n, &has_rest, &bare_pct);
+
+    /* Build the parameter vector [% or %1, %2, …, %N, (& %&)?] */
+    Value params = vector_create((size_t)(max_n + (has_rest ? 2 : 0)));
+
+    for (int i = 1; i <= max_n; i++) {
+        char pname[16];
+        /* Use bare % for position 1 when the body used it, %N otherwise */
+        if (i == 1 && bare_pct)
+            snprintf(pname, sizeof(pname), "%%");
+        else
+            snprintf(pname, sizeof(pname), "%%%d", i);
+        vector_push(params, symbol_intern(pname));
+    }
+    if (has_rest) {
+        vector_push(params, symbol_intern("&"));
+        vector_push(params, symbol_intern("%&"));
+    }
+
+    /* (fn [params...] body) */
+    Value fn_sym = symbol_intern("fn");
+    return cons(fn_sym, cons(params, cons(body, VALUE_NIL)));
+}
+
+/* ================================================================
+ * # dispatch — #( #{ #' #_ #"
+ * ================================================================ */
+
+static Value read_hash_dispatch(Reader* r) {
+    advance(r);  /* consume '#' */
+
+    char ch = peek(r);
+
+    /* #( … ) — anonymous function */
+    if (ch == '(') return read_anon_fn(r);
+
+    /* #{ … } — set literal → (hash-set elem …) */
+    if (ch == '{') {
+        advance(r);  /* consume '{' */
+        Value set_sym = symbol_intern("hash-set");
+        Value args    = cons(set_sym, VALUE_NIL);
+        Value tail    = args;
+        while (true) {
+            skip_whitespace_and_comments(r);
+            char c = peek(r);
+            if (c == '\0') { reader_error(r, "Unexpected EOF in set literal"); return VALUE_NIL; }
+            if (c == '}')  { advance(r); break; }
+            Value elem = read_form(r);
+            if (r->error) return VALUE_NIL;
+            Value new_cell = cons(elem, VALUE_NIL);
+            set_cdr(tail, new_cell);
+            tail = new_cell;
+        }
+        return args;
+    }
+
+    /* #' sym — var quote → (var sym) */
+    if (ch == '\'') {
+        advance(r);  /* consume '\'' */
+        Value sym = read_form(r);
+        if (r->error) return VALUE_NIL;
+        Value var_sym = symbol_intern("var");
+        return cons(var_sym, cons(sym, VALUE_NIL));
+    }
+
+    /* #_ form — discard: read and ignore next form, then read the one after */
+    if (ch == '_') {
+        advance(r);  /* consume '_' */
+        Value ignored = read_form(r);
+        (void)ignored;
+        if (r->error) return VALUE_NIL;
+        return read_form(r);
+    }
+
+    reader_error(r, "Unknown # dispatch character: '%c'", ch);
+    return VALUE_NIL;
+}
+
+/* ================================================================
  * Main Reading Logic
  * ================================================================ */
 
@@ -618,6 +757,9 @@ static Value read_form(Reader* r) {
             Value deref_sym = symbol_intern("deref");
             return cons(deref_sym, cons(form, VALUE_NIL));
         }
+
+        case '#':
+            return read_hash_dispatch(r);
 
         default:
             if (ch == '/' && !is_symbol_char(peek_next(r))) {
