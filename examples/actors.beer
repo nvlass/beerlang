@@ -5,16 +5,14 @@
 ;; Demonstrates:
 ;;   - stateful actors with send / ask
 ;;   - named actors and whereis
+;;   - key-value store actor
 ;;   - supervisor with one-for-one restart
-;;
-;; Note: hive/ask uses channels internally, so actor code must run
-;; inside a spawned task. Wrap in (await (spawn (fn [] ...))) for scripts.
 
 (ns actors-example
   (:require [beer.hive :as hive]))
 
 ;; ----------------------------------------------------------------
-;; Actor handlers are defined at the top level (pure functions).
+;; Actor handlers — pure functions at the top level.
 ;; Handler receives (state, msg) and returns new state.
 ;; Return {:reply val :state new-state} to respond to ask.
 ;; Return {:stop final-value} to stop the actor.
@@ -44,48 +42,50 @@
   nil)
 
 ;; ----------------------------------------------------------------
-;; Main — runs inside a task so channel ops work
+;; 1. Counter actor
 ;; ----------------------------------------------------------------
 
-(await (spawn (fn []
+(let [pid (hive/spawn-actor counter-handler 0)]
+  (hive/send pid :inc)
+  (hive/send pid :inc)
+  (hive/send pid :inc)
+  (hive/send pid :dec)
+  (println "counter:" (hive/ask pid :get))     ;=> 2
+  (hive/send pid :reset)
+  (println "after reset:" (hive/ask pid :get)) ;=> 0
+  (hive/stop pid))
 
-  ;; 1. Counter actor
-  (let [pid (hive/spawn-actor counter-handler 0)]
-    (hive/send pid :inc)
-    (hive/send pid :inc)
-    (hive/send pid :inc)
-    (hive/send pid :dec)
-    (println "counter:" (hive/ask pid :get))     ;=> 2
-    (hive/send pid :reset)
-    (println "after reset:" (hive/ask pid :get)) ;=> 0
-    (hive/stop pid))
+;; ----------------------------------------------------------------
+;; 2. Named actor registry
+;; ----------------------------------------------------------------
 
-  ;; 2. Named actor registry
-  (hive/spawn-actor logger-handler nil {:name :logger})
-  (let [pid (hive/whereis :logger)]
-    (hive/send pid "hello from named actor")
-    (hive/send pid "another message"))
-  ;; yield to let logger print
-  (yield)
+(hive/spawn-actor logger-handler nil {:name :logger})
+(let [pid (hive/whereis :logger)]
+  (hive/send pid "hello from named actor")
+  (hive/send pid "another message"))
+(yield)  ; let logger task flush its prints
 
-  ;; 3. Key-value store actor
-  (let [kv (hive/spawn-actor kv-handler {})]
-    (hive/send kv {:op :put :key :name    :val "Beerlang"})
-    (hive/send kv {:op :put :key :version :val "0.1.0"})
-    (hive/send kv {:op :put :key :type    :val "language"})
+;; ----------------------------------------------------------------
+;; 3. Key-value store actor
+;; ----------------------------------------------------------------
 
-    (println "name:" (hive/ask kv {:op :get :key :name}))
+(let [kv (hive/spawn-actor kv-handler {})]
+  (hive/send kv {:op :put :key :name    :val "Beerlang"})
+  (hive/send kv {:op :put :key :version :val "0.1.0"})
+  (hive/send kv {:op :put :key :type    :val "language"})
 
-    (print "all: ") (prn (hive/ask kv {:op :all}))
+  (println "name:" (hive/ask kv {:op :get :key :name}))
+  (print "all: ")   (prn (hive/ask kv {:op :all}))
 
-    (hive/send kv {:op :del :key :type})
-    (print "after del: ") (prn (hive/ask kv {:op :all}))
+  (hive/send kv {:op :del :key :type})
+  (print "after del: ") (prn (hive/ask kv {:op :all}))
 
-    (hive/stop kv))
+  (hive/stop kv))
 
-  ;; 4. Supervisor
-  (let [sup (hive/supervisor :one-for-one
-              [(fn [] (hive/spawn-actor counter-handler 0 {:name :supervised-counter}))])]
-    (println "supervisor started with" (count (:children sup)) "child(ren)"))
+;; ----------------------------------------------------------------
+;; 4. Supervisor
+;; ----------------------------------------------------------------
 
-)))
+(let [sup (hive/supervisor :one-for-one
+            [(fn [] (hive/spawn-actor counter-handler 0 {:name :supervised-counter}))])]
+  (println "supervisor started with" (count (:children sup)) "child(ren)"))
