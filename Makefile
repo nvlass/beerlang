@@ -2,10 +2,10 @@
 # Simple, transparent build system
 
 CC = gcc
-CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -O2 -fno-strict-aliasing -Iinclude -Ilib -I.
-DEBUG_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ilib -I. -DDEBUG
-TRACK_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ilib -I. -DDEBUG -DBEER_TRACK_ALLOCS
-ASAN_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ilib -I. -DDEBUG -fsanitize=address,undefined -fno-omit-frame-pointer
+CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -O2 -fno-strict-aliasing -Iinclude -Ivendor -I.
+DEBUG_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ivendor -I. -DDEBUG
+TRACK_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ivendor -I. -DDEBUG -DBEER_TRACK_ALLOCS
+ASAN_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ivendor -I. -DDEBUG -fsanitize=address,undefined -fno-omit-frame-pointer
 LDFLAGS = -lm -lpthread
 
 # Directories
@@ -26,7 +26,7 @@ TASK_SRCS = $(wildcard $(SRC_DIR)/task/*.c)
 CHANNEL_SRCS = $(wildcard $(SRC_DIR)/channel/*.c)
 IO_SRCS = $(wildcard $(SRC_DIR)/io/*.c)
 REPL_SRCS = $(wildcard $(SRC_DIR)/repl/*.c)
-LIB_SRCS = lib/mini-gmp.c lib/ulog.c
+VENDOR_SRCS = vendor/mini-gmp.c vendor/ulog.c
 
 ALL_SRCS = $(VM_SRCS) $(TYPES_SRCS) $(MEMORY_SRCS) $(READER_SRCS) \
            $(COMPILER_SRCS) $(RUNTIME_SRCS) $(SCHEDULER_SRCS) \
@@ -34,7 +34,7 @@ ALL_SRCS = $(VM_SRCS) $(TYPES_SRCS) $(MEMORY_SRCS) $(READER_SRCS) \
 
 # Object files
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(ALL_SRCS))
-LIB_OBJS = $(BUILD_DIR)/lib/mini-gmp.o $(BUILD_DIR)/lib/ulog.o
+VENDOR_OBJS = $(BUILD_DIR)/vendor/mini-gmp.o $(BUILD_DIR)/vendor/ulog.o
 
 # Test files
 TEST_SRCS = $(wildcard $(TEST_DIR)/*/*.c)
@@ -52,7 +52,7 @@ SHAREDIR    = $(PREFIX)/share/beerlang
 all: $(BIN_DIR)/beerlang
 
 # Main executable
-$(BIN_DIR)/beerlang: $(OBJS) $(LIB_OBJS)
+$(BIN_DIR)/beerlang: $(OBJS) $(VENDOR_OBJS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "Built beerlang executable"
@@ -62,8 +62,8 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Library object files
-$(BUILD_DIR)/lib/%.o: lib/%.c
+# Vendor library object files
+$(BUILD_DIR)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -100,9 +100,9 @@ test: $(TEST_BINS)
 	@echo "All tests passed!"
 
 # Build individual test
-$(BIN_DIR)/test_%: $(TEST_DIR)/%.c $(OBJS) $(LIB_OBJS)
+$(BIN_DIR)/test_%: $(TEST_DIR)/%.c $(OBJS) $(VENDOR_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $< $(filter-out $(BUILD_DIR)/repl/main.o,$(OBJS)) $(LIB_OBJS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $< $(filter-out $(BUILD_DIR)/repl/main.o,$(OBJS)) $(VENDOR_OBJS) $(LDFLAGS)
 
 # Tools tar
 lib/tools.tar: lib/tools/beer/tools.beer

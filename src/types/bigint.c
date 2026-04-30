@@ -6,7 +6,7 @@
 #include <assert.h>
 #include "bigint.h"
 #include "beerlang.h"
-#include "../lib/mini-gmp.h"
+#include "mini-gmp.h"
 
 /* Bigint object layout:
  *   Object header
