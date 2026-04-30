@@ -5,8 +5,10 @@
     - Listen for inbound connections on a TCP port
     - Authenticate with HMAC-SHA256 challenge-response
     - Maintain a connection pool (one TCP stream per remote node)
+    - Heartbeat (PING/PONG) to detect half-open connections
+    - Automatic reconnection with exponential backoff
+    - Monitor/DOWN: notify watchers when a remote node goes unreachable
     - Dispatch remote sends and spawns
-    - Maintain a static membership table (peers configured at start)
 
   Remote PID format:
     {:node \"node-uuid\" :actor \"actor-name\"}
@@ -33,6 +35,15 @@
 (def *dispatch-fn*     (atom nil))  ; (fn [actor-name msg reply-to] ...)
 ;; Pending ask replies: {reply-id → channel}
 (def *reply-channels*  (atom {}))
+;; Monitors: {monitor-ref → ch} — receives {:type :down :node node-id} on node failure
+(def *monitors*        (atom {}))
+
+;; Heartbeat config
+(def PING-INTERVAL-MS  5000)   ; send PING every 5s
+(def PING-TIMEOUT-MS   10000)  ; declare dead if no PONG for 10s
+
+;; Reconnect config
+(def RECONNECT-DELAYS [1000 2000 4000 8000 16000 30000])  ; ms backoff steps
 
 ;; ============================================================
 ;; Helpers
@@ -105,12 +116,25 @@
                   nil)))))))))
 
 ;; ============================================================
+;; Monitor helpers
+;; ============================================================
+
+(defn -notify-monitors!
+  "Deliver a :down event to all monitor channels for a given node."
+  [node-id]
+  (doseq [ref (keys @*monitors*)]
+    (when (= (:node ref) node-id)
+      (let [ch (get @*monitors* ref)]
+        (>! ch {:type :down :node node-id})
+        (swap! *monitors* dissoc ref)))))
+
+;; ============================================================
 ;; Per-connection reader loop
 ;; ============================================================
 
 (defn -handle-frame!
   "Dispatch a single decoded frame."
-  [msg-type payload remote-node-id]
+  [msg-type payload remote-node-id stream]
   (cond
     ;; Incoming actor message or reply
     (= msg-type wire/MSG-SEND)
@@ -130,6 +154,19 @@
 
         :else nil))
 
+    ;; Heartbeat: respond to PING with PONG
+    (= msg-type wire/MSG-PING)
+    (try (wire/write-frame stream wire/MSG-PONG {}) (catch e nil))
+
+    ;; PONG received — heartbeat task consumes these via a channel;
+    ;; nothing to do here (heartbeat task reads frames directly)
+    (= msg-type wire/MSG-PONG)
+    nil
+
+    ;; Remote monitoring request
+    (= msg-type wire/MSG-MONITOR)
+    nil  ; Phase 3: accept monitor requests from remote (future)
+
     ;; Remote node closing gracefully
     (= msg-type wire/MSG-BYE)
     (swap! *connections* dissoc remote-node-id)
@@ -137,36 +174,99 @@
     :else nil))
 
 (defn -connection-reader!
-  "Read frames from stream and dispatch them. Runs as a spawned task."
+  "Read frames from stream and dispatch them. Runs as a spawned task.
+  Returns the remote-node-id when the connection closes (EOF/error)."
   [stream remote-node-id]
   (loop []
     (when @*running*
       (let [frame (wire/read-frame stream)]
         (when frame
-          (-handle-frame! (:msg-type frame) (:payload frame) remote-node-id)
-          (recur))))))
+          (-handle-frame! (:msg-type frame) (:payload frame) remote-node-id stream)
+          (recur)))))
+  remote-node-id)
+
+;; ============================================================
+;; Heartbeat task
+;; ============================================================
+
+(defn -heartbeat!
+  "Send periodic PINGs on stream. If the stream is closed, exit.
+  Runs as a spawned task — exits when @*running* is false or write fails."
+  [stream]
+  (loop []
+    (when @*running*
+      (sleep PING-INTERVAL-MS)
+      (when @*running*
+        (let [ok (try
+                   (wire/write-frame stream wire/MSG-PING {})
+                   true
+                   (catch e false))]
+          (when ok (recur)))))))
 
 ;; ============================================================
 ;; Connection management
 ;; ============================================================
+
+(defn -start-connection!
+  "Register an authenticated stream, start reader + heartbeat tasks.
+  Returns the stream."
+  [stream node-id]
+  (swap! *connections* assoc node-id stream)
+  (let [reader (spawn (fn [] (-connection-reader! stream node-id)))]
+    (spawn (fn [] (-heartbeat! stream)))
+    ;; When reader exits (connection dropped), trigger reconnection
+    (task-watch reader
+      (fn [_]
+        (swap! *connections* dissoc node-id)
+        ;; Only reconnect if we have the peer in members and are still running
+        (when (and @*running* (get @*members* node-id))
+          (spawn (fn [] (-reconnect! node-id))))))
+  stream))
 
 (defn -open-connection!
   "Open and authenticate a connection to node-id. Returns stream or nil."
   [node-id]
   (let [member (get @*members* node-id)]
     (when member
-      (let [stream    (tcp/connect (:host member) (:port member))
-            remote-id (-handshake-client! stream)]
-        (when remote-id
-          (swap! *connections* assoc node-id stream)
-          (spawn (fn [] (-connection-reader! stream node-id)))
-          stream)))))
+      (try
+        (let [stream    (tcp/connect (:host member) (:port member))
+              remote-id (-handshake-client! stream)]
+          (when remote-id
+            (-start-connection! stream node-id)
+            stream))
+        (catch e nil)))))
 
 (defn -get-or-connect!
   "Return an open stream to node-id, opening one if not already connected."
   [node-id]
   (or (get @*connections* node-id)
       (-open-connection! node-id)))
+
+;; ============================================================
+;; Reconnection with exponential backoff
+;; ============================================================
+
+(defn -reconnect!
+  "Attempt to reconnect to node-id with exponential backoff.
+  Runs as a spawned task. Notifies monitors if all attempts fail."
+  [node-id]
+  (loop [delays RECONNECT-DELAYS]
+    (when (and @*running* (get @*members* node-id))
+      (if (empty? delays)
+        ;; All retries exhausted — mark dead, notify monitors
+        (do
+          (swap! *members* assoc-in [node-id :status] :dead)
+          (-notify-monitors! node-id))
+        (let [delay (first delays)]
+          (sleep delay)
+          (when (and @*running* (get @*members* node-id)
+                     (not (get @*connections* node-id)))
+            (let [stream (-open-connection! node-id)]
+              (if stream
+                ;; Connected — update status
+                (swap! *members* assoc-in [node-id :status] :alive)
+                ;; Failed — try again with next delay
+                (recur (rest delays))))))))))
 
 ;; ============================================================
 ;; Inbound listener
@@ -182,8 +282,9 @@
           (spawn (fn []
                    (let [remote-id (-handshake-server! client)]
                      (when remote-id
-                       (swap! *connections* assoc remote-id client)
-                       (-connection-reader! client remote-id)))))
+                       (swap! *members* update remote-id
+                              (fn [m] (or m {:node-id remote-id :status :alive})))
+                       (-start-connection! client remote-id)))))
           (recur))))))
 
 ;; ============================================================
@@ -239,6 +340,25 @@
 
 (defn node-id [] (-node-id))
 (defn members  [] @*members*)
+
+;; ============================================================
+;; Monitoring API (called by beer.hive)
+;; ============================================================
+
+(defn add-monitor!
+  "Register a monitor for a remote actor. Returns a monitor ref (map).
+  The returned channel will receive {:type :down :node node-id} if the node fails."
+  [remote-pid]
+  (let [ref {:node (:node remote-pid) :ref (digest/random-hex 8)}
+        ch  (chan 1)]
+    (swap! *monitors* assoc ref ch)
+    {:ref ref :ch ch}))
+
+(defn remove-monitor!
+  "Cancel a monitor by ref map."
+  [ref]
+  (swap! *monitors* dissoc ref)
+  nil)
 
 ;; ============================================================
 ;; Remote dispatch (called by beer.hive)

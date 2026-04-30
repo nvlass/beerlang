@@ -7,6 +7,7 @@
 #ifndef BEERLANG_SCHEDULER_H
 #define BEERLANG_SCHEDULER_H
 
+#include <stdint.h>
 #include "value.h"
 #include "task.h"
 
@@ -15,6 +16,13 @@ typedef struct IOReactor IOReactor;
 
 /* Default instruction quota per task quantum */
 #define DEFAULT_TASK_QUOTA 1000
+
+/* Timer entry — for sleep/after-delay */
+typedef struct SleepEntry {
+    Task*               task;
+    int64_t             wake_at_ns;  /* CLOCK_MONOTONIC nanoseconds */
+    struct SleepEntry*  next;
+} SleepEntry;
 
 /* Scheduler structure */
 typedef struct Scheduler {
@@ -28,6 +36,9 @@ typedef struct Scheduler {
     /* I/O reactor (async fd monitoring) */
     IOReactor* io_reactor;
     int blocked_count;      /* Tasks blocked on I/O */
+
+    /* Timer list (sleep/timeout) */
+    SleepEntry* sleep_list;
 
     /* Configuration */
     int quota;          /* Instructions per quantum */
@@ -64,6 +75,9 @@ void scheduler_wake_io(Scheduler* sched, Task* task);
 
 /* Fire watcher callbacks for a completed task */
 void scheduler_fire_watchers(Scheduler* sched, Task* task);
+
+/* Sleep: block task until wake_at_ns (CLOCK_MONOTONIC nanoseconds) */
+void scheduler_sleep(Scheduler* sched, Task* task, int64_t wake_at_ns);
 
 /* Global scheduler instance */
 extern Scheduler* global_scheduler;

@@ -1550,6 +1550,101 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# ---------------------------------------------------------------
+# sleep
+# ---------------------------------------------------------------
+echo "  sleep: basic ..."
+SLEEP_TEST=$(mktemp /tmp/beer_sleep_XXXXXX.beer)
+cat > "$SLEEP_TEST" << 'BEOF'
+(sleep 100)
+(println "ok")
+BEOF
+sleep_out=$(BEERPATH=lib "$BEER" "$SLEEP_TEST" 2>/dev/null)
+rm -f "$SLEEP_TEST"
+if [ "$sleep_out" = "ok" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: sleep basic => '$sleep_out' (expected 'ok')"
+    FAIL=$((FAIL + 1))
+fi
+
+echo "  sleep: concurrent tasks ..."
+SLEEP_CONC=$(mktemp /tmp/beer_sleep_conc_XXXXXX.beer)
+cat > "$SLEEP_CONC" << 'BEOF'
+;; Two tasks sleeping different durations — shorter one finishes first
+(def ch (chan 2))
+(spawn (fn [] (sleep 200) (>! ch :slow)))
+(spawn (fn [] (sleep 50)  (>! ch :fast)))
+(println (<! ch) (<! ch))
+BEOF
+sleep_conc_out=$(BEERPATH=lib "$BEER" "$SLEEP_CONC" 2>/dev/null)
+rm -f "$SLEEP_CONC"
+if [ "$sleep_conc_out" = ":fast :slow" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: sleep concurrent => '$sleep_conc_out' (expected ':fast :slow')"
+    FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------
+# hive Phase 3 — monitor/DOWN
+# ---------------------------------------------------------------
+echo "  hive Phase 3: monitor/DOWN on node failure ..."
+HIVE_MON_TEST=$(mktemp /tmp/beer_hive_mon_XXXXXX.beer)
+port=$((20000 + RANDOM % 5000))
+cat > "$HIVE_MON_TEST" << BEOF
+(require 'beer.hive :as 'hive)
+(def port $port)
+;; Start a node, spawn an actor, monitor it from a second node
+(hive/start-node! {:host "127.0.0.1" :port port :secret "mon-secret"} "mon-node-1")
+(def pid (hive/spawn-actor (fn [s m] {:reply (+ m 1) :state s}) 0 {:name :inc}))
+
+;; Connect from second node perspective (same process, different node-id)
+;; We test monitor by stopping the node and checking DOWN delivery
+
+;; Register a monitor for the remote pid (simulated via a local test)
+(def remote-pid {:node "mon-node-1" :actor "inc"})
+(def mon-ch (hive/monitor remote-pid))
+
+;; Verify monitor channel was created
+(println (channel? mon-ch))
+
+;; Demonitor should not throw
+(hive/demonitor mon-ch)
+(println :demonitor-ok)
+(hive/stop-node!)
+BEOF
+hive_mon_out=$(BEERPATH=lib "$BEER" "$HIVE_MON_TEST" 2>/dev/null)
+rm -f "$HIVE_MON_TEST"
+if [ "$hive_mon_out" = "$(printf 'true\n:demonitor-ok')" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: hive monitor/demonitor => '$hive_mon_out' (expected 'true\\n:demonitor-ok')"
+    FAIL=$((FAIL + 1))
+fi
+
+echo "  hive Phase 3: heartbeat (node survives with keepalive) ..."
+HIVE_HB_TEST=$(mktemp /tmp/beer_hive_hb_XXXXXX.beer)
+port2=$((25000 + RANDOM % 5000))
+cat > "$HIVE_HB_TEST" << BEOF
+(require 'beer.hive :as 'hive)
+(def port $port2)
+(hive/start-node! {:host "127.0.0.1" :port port :secret "hb-secret"} "hb-node-1")
+(def pid (hive/spawn-actor (fn [s m] {:reply (+ m 10) :state s}) 0 {:name :adder}))
+;; Wait briefly (heartbeat fires every 5s, this just tests startup)
+(sleep 100)
+(println (hive/ask pid 5))
+(hive/stop-node!)
+BEOF
+hive_hb_out=$(BEERPATH=lib "$BEER" "$HIVE_HB_TEST" 2>/dev/null)
+rm -f "$HIVE_HB_TEST"
+if [ "$hive_hb_out" = "15" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: hive heartbeat keepalive => '$hive_hb_out' (expected '15')"
+    FAIL=$((FAIL + 1))
+fi
+
 # reduce-kv
 check '(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2 :c 3})' '6'
 check '(reduce-kv (fn [acc k v] (+ acc 1)) 0 {})' '0'

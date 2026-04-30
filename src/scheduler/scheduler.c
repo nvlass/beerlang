@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 #include <unistd.h>
 #include "scheduler.h"
 #include "io_reactor.h"
@@ -27,6 +28,7 @@ Scheduler* scheduler_new(int quota) {
     sched->current = NULL;
     sched->io_reactor = io_reactor_new();
     sched->blocked_count = 0;
+    sched->sleep_list = NULL;
     sched->quota = quota > 0 ? quota : DEFAULT_TASK_QUOTA;
 
     return sched;
@@ -36,6 +38,13 @@ Scheduler* scheduler_new(int quota) {
 void scheduler_free(Scheduler* sched) {
     if (!sched) return;
     if (sched->io_reactor) io_reactor_free(sched->io_reactor);
+    /* Free any remaining sleep entries */
+    SleepEntry* se = sched->sleep_list;
+    while (se) {
+        SleepEntry* next = se->next;
+        free(se);
+        se = next;
+    }
     free(sched);
 }
 
@@ -119,6 +128,38 @@ void scheduler_wake_io(Scheduler* sched, Task* task) {
     object_release(task_val);
 }
 
+/* Block a task until wake_at_ns (CLOCK_MONOTONIC nanoseconds) */
+void scheduler_sleep(Scheduler* sched, Task* task, int64_t wake_at_ns) {
+    SleepEntry* entry = malloc(sizeof(SleepEntry));
+    if (!entry) return;
+    entry->task      = task;
+    entry->wake_at_ns = wake_at_ns;
+    entry->next      = sched->sleep_list;
+    sched->sleep_list = entry;
+    /* Block with IO tracking so blocked_count is correct and task stays alive */
+    scheduler_block_io(sched, task);
+}
+
+/* Wake any sleep entries whose deadline has passed */
+static void scheduler_check_timers(Scheduler* sched) {
+    if (!sched->sleep_list) return;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    int64_t now_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+
+    SleepEntry** pp = &sched->sleep_list;
+    while (*pp) {
+        SleepEntry* e = *pp;
+        if (now_ns >= e->wake_at_ns) {
+            *pp = e->next;
+            scheduler_wake_io(sched, e->task);
+            free(e);
+        } else {
+            pp = &e->next;
+        }
+    }
+}
+
 /* Spawn a new task */
 Value scheduler_spawn(Scheduler* sched, Value fn, int argc, Value* argv) {
     Value task_val = task_new(fn, argc, argv, sched);
@@ -186,6 +227,7 @@ void scheduler_fire_watchers(Scheduler* sched, Task* task) {
 
 /* Run one task for one quantum */
 bool scheduler_run_one_tick(Scheduler* sched) {
+    scheduler_check_timers(sched);
     scheduler_drain_io(sched);
 
     Task* task = scheduler_dequeue(sched);

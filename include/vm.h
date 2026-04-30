@@ -123,6 +123,7 @@ typedef struct VM {
     int yield_countdown;        /* Instructions until auto-yield (0 = disabled) */
     bool yielded;               /* Set by OP_YIELD or countdown expiry */
     bool native_blocked;        /* Set by native fn that needs I/O retry */
+    int64_t sleep_wake_at;      /* CLOCK_MONOTONIC ns deadline for (sleep ms) — 0 = not sleeping */
     struct Scheduler* scheduler; /* Back-pointer (NULL for standalone VMs) */
 
     /* State */

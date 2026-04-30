@@ -166,3 +166,28 @@
   "Return this node's ID, or nil if not started."
   []
   (node/node-id))
+
+;; ================================================================
+;; Monitoring — observe remote actor/node health (Phase 3)
+;; ================================================================
+
+(defn monitor
+  "Watch a remote actor for failure. Returns a channel that receives
+  {:type :down :node node-id} if the remote node becomes unreachable.
+  Works only for remote PIDs ({:node ... :actor ...})."
+  [remote-pid]
+  (when (-remote-pid? remote-pid)
+    (let [mon (node/add-monitor! remote-pid)]
+      (:ch mon))))
+
+(defn demonitor
+  "Cancel a monitor channel returned by (monitor pid).
+  Pass the channel — no-op if already triggered or nil."
+  [mon-ch]
+  (when mon-ch
+    ;; Find and remove the monitor entry for this channel
+    (doseq [ref (keys @node/*monitors*)]
+      (let [ch (get @node/*monitors* ref)]
+        (when (= ch mon-ch)
+          (node/remove-monitor! ref))))
+    nil))

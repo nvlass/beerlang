@@ -23,7 +23,13 @@
 (def MSG-SPAWN          0x21)
 (def MSG-DOWN           0x22)
 
+;; Monitoring
+(def MSG-MONITOR        0x40)
+(def MSG-DEMONITOR      0x41)
+
 ;; Housekeeping
+(def MSG-PING           0x30)
+(def MSG-PONG           0x31)
 (def MSG-BYE            0xFF)
 
 ;; ============================================================

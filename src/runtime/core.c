@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <time.h>
 #include "native.h"
 #include "vm.h"
 #include "value.h"
@@ -3252,6 +3253,59 @@ void core_register_tar(void) {
     register_native(tar_ns, "tar-create", native_tar_create);
 }
 
+/* (sleep ms) — suspend current task for ms milliseconds */
+static Value native_sleep(VM* vm, int argc, Value* argv) {
+    /* Retry path: deadline was already set; check if it has passed */
+    if (vm->sleep_wake_at != 0) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t now_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+        if (now_ns >= vm->sleep_wake_at) {
+            vm->sleep_wake_at = 0;
+            return VALUE_NIL;  /* Done sleeping */
+        }
+        /* Not yet — re-add to sleep list and block again */
+        scheduler_sleep(vm->scheduler, vm->scheduler->current, vm->sleep_wake_at);
+        vm->native_blocked = true;
+        vm->yielded        = true;
+        return VALUE_NIL;
+    }
+
+    if (argc < 1) {
+        vm_error(vm, "sleep: requires 1 argument (milliseconds)");
+        return VALUE_NIL;
+    }
+    int64_t ms = 0;
+    if (is_fixnum(argv[0])) {
+        ms = untag_fixnum(argv[0]);
+    } else if (is_float(argv[0])) {
+        ms = (int64_t)untag_float(argv[0]);
+    } else {
+        vm_error(vm, "sleep: argument must be a number");
+        return VALUE_NIL;
+    }
+    if (ms <= 0) return VALUE_NIL;
+
+    if (vm->scheduler && vm->scheduler->current) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t wake_ns = (int64_t)now.tv_sec * 1000000000LL
+                        + (int64_t)now.tv_nsec
+                        + ms * 1000000LL;
+        vm->sleep_wake_at = wake_ns;
+        scheduler_sleep(vm->scheduler, vm->scheduler->current, wake_ns);
+        vm->native_blocked = true;
+        vm->yielded        = true;
+    } else {
+        /* No scheduler — blocking sleep */
+        struct timespec ts;
+        ts.tv_sec  = ms / 1000;
+        ts.tv_nsec = (ms % 1000) * 1000000L;
+        nanosleep(&ts, NULL);
+    }
+    return VALUE_NIL;
+}
+
 /* task-watch: register a callback for task completion */
 static Value native_task_watch(VM* vm, int argc, Value* argv) {
     if (argc != 2) {
@@ -3294,6 +3348,7 @@ void core_register_concurrency(void) {
     register_native(core_ns, "channel?", native_channel_q);
     register_native(core_ns, "task?", native_task_q);
     register_native(core_ns, "task-watch", native_task_watch);
+    register_native(core_ns, "sleep", native_sleep);
 }
 
 /* =================================================================
