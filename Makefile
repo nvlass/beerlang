@@ -26,11 +26,12 @@ TASK_SRCS = $(wildcard $(SRC_DIR)/task/*.c)
 CHANNEL_SRCS = $(wildcard $(SRC_DIR)/channel/*.c)
 IO_SRCS = $(wildcard $(SRC_DIR)/io/*.c)
 REPL_SRCS = $(wildcard $(SRC_DIR)/repl/*.c)
+LIB_SRCS = $(wildcard $(SRC_DIR)/lib/*.c)
 VENDOR_SRCS = vendor/mini-gmp.c vendor/ulog.c
 
 ALL_SRCS = $(VM_SRCS) $(TYPES_SRCS) $(MEMORY_SRCS) $(READER_SRCS) \
            $(COMPILER_SRCS) $(RUNTIME_SRCS) $(SCHEDULER_SRCS) \
-           $(TASK_SRCS) $(CHANNEL_SRCS) $(IO_SRCS) $(REPL_SRCS)
+           $(TASK_SRCS) $(CHANNEL_SRCS) $(IO_SRCS) $(REPL_SRCS) $(LIB_SRCS)
 
 # Object files
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(ALL_SRCS))
@@ -47,7 +48,7 @@ LIBEXECDIR  = $(PREFIX)/lib/beerlang
 SHAREDIR    = $(PREFIX)/share/beerlang
 
 # Targets
-.PHONY: all clean test repl repl-trace debug track-leaks asan install uninstall help
+.PHONY: all clean test repl repl-trace debug track-leaks asan install uninstall libbeerlang embed help
 
 all: $(BIN_DIR)/beerlang
 
@@ -66,6 +67,20 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 $(BUILD_DIR)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Static library for embedding
+LIB_OBJS = $(filter-out $(BUILD_DIR)/repl/main.o, $(OBJS)) $(VENDOR_OBJS)
+
+libbeerlang: $(LIB_OBJS)
+	ar rcs $(BUILD_DIR)/libbeerlang.a $^
+	@echo "Built $(BUILD_DIR)/libbeerlang.a"
+
+# Embed example (depends on libbeerlang)
+embed: libbeerlang
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $(BIN_DIR)/embed examples/embed.c \
+		-L$(BUILD_DIR) -lbeerlang $(LDFLAGS)
+	@echo "Built $(BIN_DIR)/embed"
 
 # Debug build
 debug: CFLAGS = $(DEBUG_CFLAGS)
@@ -154,6 +169,8 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  make               Build beerlang (default)"
+	@echo "  make libbeerlang   Build build/libbeerlang.a (embeddable library)"
+	@echo "  make embed         Build examples/embed.c against libbeerlang"
 	@echo "  make install       Install to PREFIX (default: /usr/local)"
 	@echo "  make uninstall     Remove installed files"
 	@echo "  make debug         Build with debug symbols"

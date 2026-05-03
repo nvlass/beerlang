@@ -3799,10 +3799,23 @@ static Value native_macroexpand(VM* vm, int argc, Value* argv) {
  * ================================================================= */
 
 /* Kept-alive compiled units (same pattern as REPL) */
-#define MAX_LOAD_UNITS 256
+#define MAX_LOAD_UNITS 4096
 static CompiledCode* load_units[MAX_LOAD_UNITS];
 static Value* load_constants[MAX_LOAD_UNITS];
 static int n_load_units = 0;
+
+/* Called by beer.c (embeddable API) to keep code+constants alive. */
+void core_retain_unit(CompiledCode* code, Value* constants) {
+    if (n_load_units < MAX_LOAD_UNITS) {
+        load_units[n_load_units] = code;
+        load_constants[n_load_units] = constants;
+        n_load_units++;
+    } else {
+        fprintf(stderr, "core: warning: too many compiled units, freeing\n");
+        compiled_code_free(code);
+        free(constants);
+    }
+}
 
 /* Load and execute beerlang source from a buffer (used by tar require) */
 static Value native_eval(VM* caller_vm, int argc, Value* argv) {
