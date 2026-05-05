@@ -1,0 +1,74 @@
+(ns beer.nrepl.simple
+  "Plain eval-over-TCP REPL. Designed for netcat and human fingers.
+  Protocol: send a form (one line), receive pr-str result (one line).
+  No framing, no IDs, no ops — just a Lisp REPL over a socket.
+
+  Usage:
+    (require 'beer.nrepl.simple)
+    (beer.nrepl.simple/start! 7889)
+
+  Then:
+    nc localhost 7889
+    (+ 1 2)         → 3
+    (def x 42)      → #'user/x
+    x               → 42
+
+  For a structured protocol with op dispatch and Emacs integration,
+  see beer.nrepl.")
+
+(require 'beer.tcp)
+
+;; ── State ─────────────────────────────────────────────────────────────────────
+
+(def *server*  (atom nil))
+(def *clients* (atom 0))
+
+;; ── Client handler ────────────────────────────────────────────────────────────
+
+(defn handle-client [stream]
+  (swap! *clients* inc)
+  (try
+    (loop []
+      (let [line (read-line stream)]
+        (when line
+          (let [result (try
+                         (pr-str (eval (read-string line)))
+                         (catch e
+                           (str "ERROR: " (:message e))))]
+            (write stream (str result "\n"))
+            (flush stream)
+            (recur)))))
+    (catch _e nil)
+    (finally
+      (close stream)
+      (swap! *clients* dec))))
+
+(defn accept-loop [listener]
+  (loop []
+    (when @*server*
+      (let [client (try (beer.tcp/accept listener) (catch _e nil))]
+        (when client
+          (spawn (fn [] (handle-client client)))
+          (recur))))))
+
+;; ── Public API ────────────────────────────────────────────────────────────────
+
+(defn start!
+  "Start the simple eval server on PORT. Returns the port actually bound.
+  Safe to call multiple times — ignores if already running."
+  [port]
+  (when (not @*server*)
+    (let [listener (beer.tcp/listen port)]
+      (reset! *server* listener)
+      (spawn (fn [] (accept-loop listener)))
+      (beer.tcp/local-port listener))))
+
+(defn stop!
+  "Stop the server. In-flight connections finish naturally."
+  []
+  (let [s @*server*]
+    (when s
+      (reset! *server* nil)
+      (close s))))
+
+(defn clients [] @*clients*)

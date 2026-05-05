@@ -385,6 +385,8 @@ printf '{"op" "eval" "code" "(+ 1 2)" "id" "1"}\n' | nc localhost 7888
 Once connected, `C-c C-z` switches to `*beerlang-nrepl*` instead of the
 local subprocess. Disconnect to fall back to the local REPL.
 
+**Simple alternative:** for `nc`/telnet use, see `beer.nrepl.simple` below.
+
 **Extending the protocol:** add a branch to `dispatch` in `beer.nrepl` —
 each new op is a beerlang function that sends response maps and calls
 `send-done`. No client-side changes needed for ops whose responses go to
@@ -397,6 +399,41 @@ functions. Do not call UI or graphics primitives (e.g., `rl/*` in the
 raylib example) directly from an nREPL client — those require the main OS
 thread. Modify shared state via atoms; the main-thread loop picks up the
 change on the next iteration.
+
+### Simple eval REPL (beer.nrepl.simple)
+
+Require with `(require 'beer.nrepl.simple)`.
+
+A minimal eval-over-TCP server for interactive use with `nc`, `telnet`,
+or any line-oriented terminal. No framing, no IDs, no ops — send a form,
+get a `pr-str` result back. One line each direction.
+
+```clojure
+(require 'beer.nrepl.simple)
+(beer.nrepl.simple/start! 7889)
+```
+
+```
+$ nc localhost 7889
+(+ 1 2)
+3
+(def x 42)
+#'user/x
+x
+42
+(map inc [1 2 3])
+(2 3 4)
+```
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `beer.nrepl.simple/start!` | Start server; returns actual port | `(beer.nrepl.simple/start! 7889)` |
+| `beer.nrepl.simple/stop!` | Stop server | `(beer.nrepl.simple/stop!)` |
+| `beer.nrepl.simple/clients` | Active client count | `(beer.nrepl.simple/clients)` |
+
+Both servers can run simultaneously on different ports — they have
+independent state atoms. A common pattern is to run both: `beer.nrepl` on
+7888 for Emacs, `beer.nrepl.simple` on 7889 for quick `nc` access.
 
 ### JSON (beer.json)
 

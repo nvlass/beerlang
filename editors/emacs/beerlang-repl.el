@@ -10,9 +10,14 @@
 ;; Local REPL (subprocess):
 ;;   M-x beerlang-run-repl        — start or switch to the local REPL buffer
 ;;
-;; Network REPL (connect to a running beerlang process):
+;; Network REPL — structured EDN protocol (beer.nrepl):
 ;;   M-x beerlang-connect         — connect to host:port (default localhost:7888)
 ;;   M-x beerlang-disconnect      — close the network connection
+;;   Eldoc shows docstrings automatically when connected.
+;;
+;; Simple REPL — plain eval over TCP (beer.nrepl.simple), for nc/telnet:
+;;   (beer.nrepl.simple/start! 7889)
+;;   nc localhost 7889 → type forms, get results
 ;;
 ;; From a .beer source buffer (after (require 'beerlang)):
 ;;   C-c C-z  — switch to REPL (nREPL if connected, else local)
@@ -268,6 +273,25 @@ Nil CALLBACK means display responses in the buffer."
     ;; No callback — filter displays result in buffer
     (process-send-string proc wire)))
 
+;; ── Eldoc integration ────────────────────────────────────────────────────────
+;; Async: send a :doc op, call eldoc's callback when the response arrives.
+;; Works in both the nREPL buffer and .beer source buffers (when connected).
+
+(defun beerlang-nrepl-eldoc (callback &rest _)
+  "Eldoc backend: look up documentation for the symbol at point via nREPL.
+CALLBACK is called with the docstring when the server responds.
+Returns non-nil if a request was sent, nil if nREPL is not connected."
+  (when (beerlang-nrepl--connected-p)
+    (when-let ((sym (thing-at-point 'symbol t)))
+      (beer-nrepl--send-op
+       "doc"
+       (lambda (msg)
+         (when-let ((doc (plist-get msg :doc)))
+           (funcall callback doc :thing sym :face 'font-lock-function-name-face)))
+       ":sym" sym)
+      ;; Return non-nil to tell eldoc we're handling it asynchronously
+      t)))
+
 ;; ── nREPL buffer mode ─────────────────────────────────────────────────────────
 
 (define-derived-mode beerlang-nrepl-mode comint-mode "Beer nREPL"
@@ -294,7 +318,11 @@ displayed.  Use `beer-nrepl--send-op' for tooling ops with callbacks."
   (setq-local indent-tabs-mode     nil)
   (setq-local tab-width            2)
   (beerlang--configure-indentation)
-  (setq-local paragraph-start beerlang-nrepl--prompt-re))
+  (setq-local paragraph-start beerlang-nrepl--prompt-re)
+
+  ;; Eldoc: async doc lookup via :doc op
+  (add-hook 'eldoc-documentation-functions #'beerlang-nrepl-eldoc nil t)
+  (eldoc-mode 1))
 
 ;; ── Connect / disconnect ──────────────────────────────────────────────────────
 
@@ -478,6 +506,16 @@ Falls back to `user' if no ns form is found."
   (define-key beerlang-mode-map (kbd "C-c C-n") #'beerlang-set-ns)
   (define-key beerlang-mode-map (kbd "C-c C-j") #'beerlang-connect)
   (define-key beerlang-mode-map (kbd "C-c C-q") #'beerlang-disconnect))
+
+(defun beerlang-nrepl--setup-eldoc ()
+  "Enable nREPL eldoc in the current source buffer when connected."
+  (add-hook 'eldoc-documentation-functions #'beerlang-nrepl-eldoc nil t)
+  (eldoc-mode 1))
+
+;; Call this from beerlang-mode-hook once beerlang.el wires everything up.
+;; beerlang-nrepl-eldoc is a no-op when not connected, so it's safe to
+;; register unconditionally — it just returns nil until beerlang-connect runs.
+(add-hook 'beerlang-mode-hook #'beerlang-nrepl--setup-eldoc)
 
 (provide 'beerlang-repl)
 ;;; beerlang-repl.el ends here
