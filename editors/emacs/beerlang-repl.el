@@ -1,4 +1,4 @@
-;;; beerlang-repl.el --- Beerlang REPL (local process) -*- lexical-binding: t; -*-
+;;; beerlang-repl.el --- Beerlang REPL (local process + network) -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 Beerlang Contributors
 ;; Keywords: languages lisp
@@ -7,17 +7,24 @@
 ;;; Commentary:
 ;; Comint-based REPL integration for Beerlang.
 ;;
-;; Usage:
-;;   M-x beerlang-run-repl        — start or switch to the REPL buffer
+;; Local REPL (subprocess):
+;;   M-x beerlang-run-repl        — start or switch to the local REPL buffer
+;;
+;; Network REPL (connect to a running beerlang process):
+;;   M-x beerlang-connect         — connect to host:port (default localhost:7888)
+;;   M-x beerlang-disconnect      — close the network connection
 ;;
 ;; From a .beer source buffer (after (require 'beerlang)):
-;;   C-c C-z  — switch to REPL (starting it if needed)
+;;   C-c C-z  — switch to REPL (nREPL if connected, else local)
 ;;   C-x C-e  — eval sexp before point
 ;;   C-c C-c  — eval top-level form (defun) around point
 ;;   C-c C-r  — eval active region
 ;;   C-c C-b  — eval entire buffer
 ;;   C-c C-l  — load file into REPL
 ;;   C-c C-n  — set REPL namespace to match current file's (ns ...)
+;;
+;; When a network REPL is connected it takes priority over the local REPL for
+;; all eval commands.  Disconnect to fall back to the local process.
 
 ;;; Code:
 
@@ -57,10 +64,16 @@ Nil means inherit from the parent environment."
 ;; ================================================================
 
 (defconst beerlang-repl--buffer-name "*beerlang-repl*"
-  "Name of the Beerlang REPL buffer.")
+  "Name of the Beerlang local REPL buffer.")
 
 (defconst beerlang-repl--prompt-re "^[a-zA-Z._-]*:[0-9]+>\\s-?"
-  "Regular expression matching a Beerlang REPL prompt.")
+  "Regular expression matching a Beerlang local REPL prompt.")
+
+(defconst beerlang-nrepl--buffer-name "*beerlang-nrepl*"
+  "Name of the Beerlang network REPL buffer.")
+
+(defconst beerlang-nrepl--prompt-re "^nrepl> "
+  "Regular expression matching the beerlang nREPL server prompt.")
 
 ;; ================================================================
 ;; Process management
@@ -104,24 +117,113 @@ Respects `beerlang-repl-program', `beerlang-repl-arguments', and
 ;; Sending code to the REPL
 ;; ================================================================
 
+;; ================================================================
+;; Network REPL (nREPL)
+;; ================================================================
+
+(defcustom beerlang-nrepl-default-host "localhost"
+  "Default host for `beerlang-connect'."
+  :type 'string
+  :group 'beerlang)
+
+(defcustom beerlang-nrepl-default-port 7888
+  "Default port for `beerlang-connect'."
+  :type 'integer
+  :group 'beerlang)
+
+(defun beerlang-nrepl--process ()
+  "Return the live nREPL network process, or nil."
+  (get-buffer-process beerlang-nrepl--buffer-name))
+
+(defun beerlang-nrepl--connected-p ()
+  "Return non-nil if a network REPL connection is live."
+  (let ((proc (beerlang-nrepl--process)))
+    (and proc (process-live-p proc))))
+
+(define-derived-mode beerlang-nrepl-mode comint-mode "Beer nREPL"
+  "Major mode for the Beerlang network REPL buffer."
+  :syntax-table beerlang-mode-syntax-table
+  (setq-local comint-prompt-regexp        beerlang-nrepl--prompt-re)
+  (setq-local comint-prompt-read-only      t)
+  (setq-local comint-use-prompt-regexp     t)
+  (setq-local comint-process-echoes        nil)
+  (setq-local font-lock-defaults
+              '(beerlang-font-lock-keywords nil nil nil nil))
+  (font-lock-mode 1)
+  (setq-local indent-line-function #'lisp-indent-line)
+  (setq-local indent-tabs-mode     nil)
+  (setq-local tab-width            2)
+  (beerlang--configure-indentation)
+  (setq-local paragraph-start beerlang-nrepl--prompt-re))
+
+(defun beerlang-connect (host port)
+  "Connect to a running beerlang nREPL server at HOST:PORT.
+Once connected, all eval commands route here instead of the local REPL.
+Start the server inside beerlang with:
+  (require 'beer.nrepl)
+  (beer.nrepl/start! 7888)"
+  (interactive
+   (list (read-string (format "Host (default %s): " beerlang-nrepl-default-host)
+                      nil nil beerlang-nrepl-default-host)
+         (read-number "Port: " beerlang-nrepl-default-port)))
+  (when (beerlang-nrepl--connected-p)
+    (message "Already connected — disconnect first with M-x beerlang-disconnect")
+    (cl-return-from beerlang-connect))
+  (let* ((buf  (get-buffer-create beerlang-nrepl--buffer-name))
+         (proc (open-network-stream "beerlang-nrepl" buf host port
+                                    :nowait nil)))
+    (with-current-buffer buf
+      (beerlang-nrepl-mode))
+    (set-process-sentinel
+     proc
+     (lambda (p _msg)
+       (unless (process-live-p p)
+         (message "beerlang nREPL: disconnected from %s:%d" host port))))
+    (pop-to-buffer buf)
+    (message "beerlang nREPL: connected to %s:%d" host port)))
+
+(defun beerlang-disconnect ()
+  "Close the network REPL connection."
+  (interactive)
+  (let ((proc (beerlang-nrepl--process)))
+    (if proc
+        (progn (delete-process proc)
+               (message "beerlang nREPL: disconnected"))
+      (message "beerlang nREPL: not connected"))))
+
+;; ================================================================
+;; Unified send — prefers nREPL when connected
+;; ================================================================
+
 (defun beerlang-repl--ensure ()
-  "Ensure the REPL is running, starting it if necessary.
+  "Ensure the local REPL is running, starting it if necessary.
 Returns the REPL process."
   (unless (beerlang-repl--running-p)
     (beerlang-run-repl))
   (beerlang-repl--process))
 
+(defun beerlang-repl--active-buffer ()
+  "Return the buffer name of whichever REPL is currently active.
+Prefers the network REPL if connected."
+  (if (beerlang-nrepl--connected-p)
+      beerlang-nrepl--buffer-name
+    beerlang-repl--buffer-name))
+
 (defun beerlang-repl--send-string (str)
-  "Send STR to the running Beerlang REPL."
-  (let ((proc (beerlang-repl--ensure))
-        (str  (string-trim str)))
-    (when (and proc (not (string-empty-p str)))
-      ;; Make sure each send ends with a newline so the REPL processes it
+  "Send STR to the active Beerlang REPL (network if connected, else local)."
+  (let ((str (string-trim str)))
+    (when (not (string-empty-p str))
       (unless (string-suffix-p "\n" str)
         (setq str (concat str "\n")))
-      (comint-send-string proc str)
-      (when beerlang-repl-popup
-        (display-buffer beerlang-repl--buffer-name)))))
+      (if (beerlang-nrepl--connected-p)
+          (progn
+            (comint-send-string (beerlang-nrepl--process) str)
+            (when beerlang-repl-popup
+              (display-buffer beerlang-nrepl--buffer-name)))
+        (let ((proc (beerlang-repl--ensure)))
+          (comint-send-string proc str)
+          (when beerlang-repl-popup
+            (display-buffer beerlang-repl--buffer-name)))))))
 
 (defun beerlang-eval-region (start end)
   "Send the region between START and END to the Beerlang REPL."
@@ -159,10 +261,13 @@ Returns the REPL process."
    (format "(load \"%s\")" (expand-file-name file))))
 
 (defun beerlang-switch-to-repl ()
-  "Switch to the Beerlang REPL buffer, starting it if needed."
+  "Switch to the active Beerlang REPL buffer.
+Goes to the network REPL if connected, else starts/switches to the local REPL."
   (interactive)
-  (beerlang-repl--ensure)
-  (pop-to-buffer beerlang-repl--buffer-name))
+  (if (beerlang-nrepl--connected-p)
+      (pop-to-buffer beerlang-nrepl--buffer-name)
+    (beerlang-repl--ensure)
+    (pop-to-buffer beerlang-repl--buffer-name)))
 
 (defun beerlang-set-ns ()
   "Set the REPL namespace to match the (ns ...) declaration in the buffer.
@@ -226,7 +331,9 @@ Falls back to `user' if no ns form is found."
   (define-key beerlang-mode-map (kbd "C-c C-r") #'beerlang-eval-region)
   (define-key beerlang-mode-map (kbd "C-c C-b") #'beerlang-eval-buffer)
   (define-key beerlang-mode-map (kbd "C-c C-l") #'beerlang-load-file)
-  (define-key beerlang-mode-map (kbd "C-c C-n") #'beerlang-set-ns))
+  (define-key beerlang-mode-map (kbd "C-c C-n") #'beerlang-set-ns)
+  (define-key beerlang-mode-map (kbd "C-c C-j") #'beerlang-connect)
+  (define-key beerlang-mode-map (kbd "C-c C-q") #'beerlang-disconnect))
 
 (provide 'beerlang-repl)
 ;;; beerlang-repl.el ends here

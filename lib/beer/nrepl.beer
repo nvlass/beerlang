@@ -1,0 +1,71 @@
+(ns beer.nrepl
+  "Minimal network REPL server.
+  Clients connect over TCP, send forms as text, receive pr-str results.
+  Protocol: line-oriented — one form per line, one result per line.
+  A 'nrepl> ' prompt is emitted on connect and after each result so that
+  Emacs comint mode works out of the box.
+  Use (beer.nrepl/start! port) to launch; (beer.nrepl/stop!) to shut down.")
+
+(require 'beer.tcp)
+
+;; ── State ───────────────────────────────────────────────────────────────────
+
+(def *server*   (atom nil))   ; listener stream, or nil when stopped
+(def *clients*  (atom 0))     ; active client count (informational)
+
+(def prompt "nrepl> ")
+
+;; ── Client handler ──────────────────────────────────────────────────────────
+
+(defn- handle-client [stream]
+  (swap! *clients* inc)
+  (try
+    (write stream prompt)
+    (flush stream)
+    (loop []
+      (let [line (read-line stream)]
+        (when line
+          (let [result (try
+                         (pr-str (eval (read-string line)))
+                         (catch Exception e
+                           (str "ERROR: " (.-message e))))]
+            (write stream (str result "\n" prompt))
+            (flush stream)
+            (recur)))))
+    (catch Exception _e nil)
+    (finally
+      (close stream)
+      (swap! *clients* dec))))
+
+;; ── Accept loop ─────────────────────────────────────────────────────────────
+
+(defn- accept-loop [listener]
+  (loop []
+    (when @*server*
+      (let [client (try (beer.tcp/accept listener)
+                        (catch Exception _e nil))]
+        (when client
+          (spawn (fn [] (handle-client client)))
+          (recur))))))
+
+;; ── Public API ──────────────────────────────────────────────────────────────
+
+(defn start!
+  "Start the nREPL server on PORT. Returns the port actually bound.
+  Safe to call multiple times — ignores if already running."
+  [port]
+  (when (not @*server*)
+    (let [listener (beer.tcp/listen port)]
+      (reset! *server* listener)
+      (spawn (fn [] (accept-loop listener)))
+      (beer.tcp/local-port listener))))
+
+(defn stop!
+  "Stop the nREPL server. In-flight client connections finish naturally."
+  []
+  (let [s @*server*]
+    (when s
+      (reset! *server* nil)
+      (close s))))
+
+(defn clients [] @*clients*)

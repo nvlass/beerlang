@@ -144,13 +144,20 @@
   (let [render (:render screen-fnmap)]
     (render @state dt)))
 
-;; ── live REPL (optional) ─────────────────────────────────────────────────────
-;; Uncomment to start a TCP REPL server on port 7888.
-;; Connect with:  nc localhost 7888
-;; Then try:      (swap! game/state assoc :star-speed 5)
+;; ── live network REPL ────────────────────────────────────────────────────────
+;; Starts a TCP nREPL server so you can eval forms into the running game.
 ;;
-;; NOTE: REPL tasks run on scheduler worker threads. Only swap! atoms from the
-;; REPL — never call rl/* directly (raylib requires the main thread).
+;; From Emacs beerlang-mode:
+;;   M-x beerlang-connect  (default localhost:7888)
+;;   C-x C-e / C-c C-c    send form to the running game
+;;   M-x beerlang-disconnect
 ;;
-;; (require 'beer.tcp)
-;; (spawn (fn [] (repl-server 7888)))
+;; From the terminal:
+;;   nc localhost 7888
+;;   (swap! game/state assoc :star-speed 10)
+;;
+;; NOTE: REPL tasks run on scheduler worker threads.
+;; Only swap! atoms — never call rl/* from the REPL (raylib needs the main thread).
+
+(require 'beer.nrepl)
+(beer.nrepl/start! 7888)
