@@ -152,9 +152,10 @@
 ;;   C-x C-e / C-c C-c    send form to the running game
 ;;   M-x beerlang-disconnect
 ;;
-;; From the terminal:
+;; From the terminal (EDN map protocol):
 ;;   nc localhost 7888
-;;   (swap! game/state assoc :star-speed 10)
+;;   {:op "eval" :code "(swap! game/state assoc :star-speed 10)" :id "1"}
+;;   → {:id "1" :value "..."}  {:id "1" :status "done"}
 ;;
 ;; NOTE: REPL tasks run on scheduler worker threads.
 ;; Only swap! atoms — never call rl/* from the REPL (raylib needs the main thread).

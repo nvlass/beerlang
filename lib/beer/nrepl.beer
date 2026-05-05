@@ -1,54 +1,100 @@
 (ns beer.nrepl
-  "Minimal network REPL server.
-  Clients connect over TCP, send forms as text, receive pr-str results.
-  Protocol: line-oriented — one form per line, one result per line.
-  A 'nrepl> ' prompt is emitted on connect and after each result so that
-  Emacs comint mode works out of the box.
-  Use (beer.nrepl/start! port) to launch; (beer.nrepl/stop!) to shut down.")
+  "EDN message-based network REPL server.
+
+  Wire format: one EDN map per line, both directions.
+
+  Client → server:
+    {:op \"eval\"     :code \"(+ 1 2)\"  :id \"id-1\"}
+    {:op \"doc\"      :sym  \"map\"      :id \"id-2\"}
+    {:op \"describe\"                    :id \"id-3\"}
+
+  Server → client (one or more messages per request):
+    {:id \"id-1\" :value \"3\"}
+    {:id \"id-1\" :status \"done\"}
+
+  Extend by adding a branch in `dispatch`. Each handler must send at least
+  one message and always finish with {:id id :status \"done\"}.")
 
 (require 'beer.tcp)
 
-;; ── State ───────────────────────────────────────────────────────────────────
+;; ── State ─────────────────────────────────────────────────────────────────────
 
-(def *server*   (atom nil))   ; listener stream, or nil when stopped
-(def *clients*  (atom 0))     ; active client count (informational)
+(def *server*  (atom nil))   ; listener stream, or nil when stopped
+(def *clients* (atom 0))     ; active client count (informational)
 
-(def prompt "nrepl> ")
+;; ── Wire helpers ──────────────────────────────────────────────────────────────
 
-;; ── Client handler ──────────────────────────────────────────────────────────
+(defn send-msg [stream msg]
+  (write stream (str (pr-str msg) "\n"))
+  (flush stream))
+
+(defn send-done [stream id]
+  (send-msg stream {:id id :status "done"}))
+
+;; ── Op handlers ───────────────────────────────────────────────────────────────
+
+(defn handle-eval [stream id code]
+  (let [result (try
+                 {:id id :value (pr-str (eval (read-string code)))}
+                 (catch e
+                   {:id id :err (str (:message e))}))]
+    (send-msg stream result)
+    (send-done stream id)))
+
+(defn handle-doc [stream id sym-str]
+  (let [result (try
+                 (let [m   (meta (read-string sym-str))
+                       doc (get m :doc "No documentation found.")]
+                   {:id id :doc doc})
+                 (catch e
+                   {:id id :err (str (:message e))}))]
+    (send-msg stream result)
+    (send-done stream id)))
+
+(defn handle-describe [stream id]
+  (send-msg stream {:id      id
+                    :ops     ["eval" "doc" "describe"]
+                    :version "0.1"
+                    :status  "done"}))
+
+;; ── Dispatch ──────────────────────────────────────────────────────────────────
+
+(defn dispatch [stream msg]
+  (let [id (get msg :id "")
+        op (get msg :op "")]
+    (cond
+      (= op "eval")     (handle-eval     stream id (get msg :code "nil"))
+      (= op "doc")      (handle-doc      stream id (get msg :sym  "nil"))
+      (= op "describe") (handle-describe stream id)
+      :else             (do (send-msg stream {:id id :err (str "unknown op: " op)})
+                            (send-done stream id)))))
+
+;; ── Client loop ───────────────────────────────────────────────────────────────
 
 (defn handle-client [stream]
   (swap! *clients* inc)
   (try
-    (write stream prompt)
-    (flush stream)
     (loop []
       (let [line (read-line stream)]
         (when line
-          (let [result (try
-                         (pr-str (eval (read-string line)))
-                         (catch e
-                           (str "ERROR: " (:message e))))]
-            (write stream (str result "\n" prompt))
-            (flush stream)
-            (recur)))))
+          (let [msg (try (read-string line) (catch _e nil))]
+            (when (map? msg)
+              (dispatch stream msg)))
+          (recur))))
     (catch _e nil)
     (finally
       (close stream)
       (swap! *clients* dec))))
 
-;; ── Accept loop ─────────────────────────────────────────────────────────────
-
 (defn accept-loop [listener]
   (loop []
     (when @*server*
-      (let [client (try (beer.tcp/accept listener)
-                        (catch _e nil))]
+      (let [client (try (beer.tcp/accept listener) (catch _e nil))]
         (when client
           (spawn (fn [] (handle-client client)))
           (recur))))))
 
-;; ── Public API ──────────────────────────────────────────────────────────────
+;; ── Public API ────────────────────────────────────────────────────────────────
 
 (defn start!
   "Start the nREPL server on PORT. Returns the port actually bound.
@@ -61,7 +107,7 @@
       (beer.tcp/local-port listener))))
 
 (defn stop!
-  "Stop the nREPL server. In-flight client connections finish naturally."
+  "Stop the server. In-flight client connections finish naturally."
   []
   (let [s @*server*]
     (when s

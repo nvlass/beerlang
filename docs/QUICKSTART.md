@@ -204,13 +204,11 @@ and eval forms into the live process.
 (beer.nrepl/start! 7888)   ; starts listening, returns actual port
 ```
 
-**From the terminal:**
+**From the terminal** (EDN map per line):
 ```bash
-$ nc localhost 7888
-nrepl> (+ 1 2)
-3
-nrepl> (swap! app-state assoc :debug true)
-{:debug true, ...}
+$ printf '{"op" "eval" "code" "(+ 1 2)" "id" "1"}\n' | nc localhost 7888
+{:id "1" :value "3"}
+{:id "1" :status "done"}
 ```
 
 **From Emacs** (with `beerlang-repl.el` loaded):

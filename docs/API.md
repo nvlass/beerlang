@@ -326,17 +326,30 @@ Require with `(require 'beer.tcp :as 'tcp)`.
 
 Require with `(require 'beer.nrepl)`.
 
-Embeds a TCP REPL server into any running beerlang process. Clients send
-forms as text and receive `pr-str` results back. A `nrepl> ` prompt is
-emitted on connect and after each result so that Emacs comint works without
-additional configuration. Multiple concurrent clients are supported; each
-runs in its own spawned task.
+Embeds a structured TCP REPL server into any running beerlang process.
+The protocol is EDN map messages — one map per line in each direction —
+inspired by Clojure's nREPL. Multiple concurrent clients are supported;
+each connection runs in its own spawned task.
 
-| Function | Description | Example |
-|----------|-------------|---------|
-| `beer.nrepl/start!` | Start server on port; returns actual port bound | `(beer.nrepl/start! 7888)` → `7888` |
-| `beer.nrepl/stop!` | Stop the server (in-flight clients finish naturally) | `(beer.nrepl/stop!)` |
-| `beer.nrepl/clients` | Number of currently connected clients | `(beer.nrepl/clients)` → `1` |
+**Protocol**
+
+```
+Client → server   {:op "eval" :code "(+ 1 2)" :id "id-1"}
+Server → client   {:id "id-1" :value "3"}
+                  {:id "id-1" :status "done"}
+```
+
+The `:id` field ties responses to requests, enabling concurrent tooling
+ops (e.g., eldoc firing while an eval is still running). Every request
+receives a final `{:status "done"}` message.
+
+**Supported ops**
+
+| Op | Request fields | Response fields |
+|----|---------------|-----------------|
+| `"eval"` | `:code` — source string | `:value` (pr-str result) or `:err` |
+| `"doc"` | `:sym` — symbol name string | `:doc` (docstring) or `:err` |
+| `"describe"` | — | `:ops` (list), `:version` |
 
 **Starting the server:**
 ```clojure
@@ -344,14 +357,21 @@ runs in its own spawned task.
 (beer.nrepl/start! 7888)
 ```
 
+| Function | Description | Example |
+|----------|-------------|---------|
+| `beer.nrepl/start!` | Start server on port; returns actual port bound | `(beer.nrepl/start! 7888)` → `7888` |
+| `beer.nrepl/stop!` | Stop the server (in-flight clients finish naturally) | `(beer.nrepl/stop!)` |
+| `beer.nrepl/clients` | Number of currently connected clients | `(beer.nrepl/clients)` → `1` |
+
 **Connecting from the terminal:**
 ```
 $ nc localhost 7888
-nrepl> (+ 1 2)
-3
-nrepl> (swap! my-atom assoc :speed 10)
-{:speed 10}
-nrepl>
+{"op": ...}  ← send EDN maps
+```
+```bash
+printf '{"op" "eval" "code" "(+ 1 2)" "id" "1"}\n' | nc localhost 7888
+# → {:id "1" :value "3"}
+# → {:id "1" :status "done"}
 ```
 
 **Emacs integration** (requires `beerlang-repl.el`):
@@ -360,10 +380,16 @@ nrepl>
 |-----|---------|-------|
 | `C-c C-j` | `beerlang-connect` | Prompts for host:port (default `localhost:7888`) |
 | `C-c C-q` | `beerlang-disconnect` | Close connection |
-| `C-x C-e` `C-c C-c` `C-c C-r` … | All eval commands | Auto-route to nREPL when connected |
+| `C-x C-e` `C-c C-c` `C-c C-r` … | All eval commands | Wrap in `{:op "eval"}` and route to nREPL |
 
 Once connected, `C-c C-z` switches to `*beerlang-nrepl*` instead of the
 local subprocess. Disconnect to fall back to the local REPL.
+
+**Extending the protocol:** add a branch to `dispatch` in `beer.nrepl` —
+each new op is a beerlang function that sends response maps and calls
+`send-done`. No client-side changes needed for ops whose responses go to
+the buffer; ops with registered callbacks (future: eldoc, completion)
+register via `beer-nrepl--send-op` in `beerlang-repl.el`.
 
 **Thread safety:** nREPL client tasks run on scheduler worker threads.
 It is safe to `swap!` atoms, `>!`/`<!` channels, and call any pure
