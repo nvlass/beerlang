@@ -184,10 +184,16 @@ Respects `beerlang-repl-program', `beerlang-repl-arguments', and
 
 (defun beer-nrepl--build-msg (op id &rest kvs)
   "Return a wire-ready EDN map string for OP and ID.
-KVTS is a flat list of alternating \":key\" \"value\" strings."
+KVTS is a flat list of alternating \":key\" \"value\" strings.
+String values have text properties stripped before encoding — Emacs
+encodes propertized strings as #(\"str\" 0 N (prop val)), which
+beerlang's reader would interpret as an anonymous function dispatch."
   (let ((parts (list (format ":op %S :id %S" op id))))
     (while kvs
-      (push (format "%s %S" (car kvs) (cadr kvs)) parts)
+      (let* ((k (car kvs))
+             (v (cadr kvs))
+             (v (if (stringp v) (substring-no-properties v) v)))
+        (push (format "%s %S" k v) parts))
       (setq kvs (cddr kvs)))
     (concat "{" (mapconcat #'identity (nreverse parts) " ") "}\n")))
 
