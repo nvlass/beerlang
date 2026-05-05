@@ -17,7 +17,7 @@
 
 ;; ── Client handler ──────────────────────────────────────────────────────────
 
-(defn- handle-client [stream]
+(defn handle-client [stream]
   (swap! *clients* inc)
   (try
     (write stream prompt)
@@ -27,23 +27,23 @@
         (when line
           (let [result (try
                          (pr-str (eval (read-string line)))
-                         (catch Exception e
-                           (str "ERROR: " (.-message e))))]
+                         (catch e
+                           (str "ERROR: " (:message e))))]
             (write stream (str result "\n" prompt))
             (flush stream)
             (recur)))))
-    (catch Exception _e nil)
+    (catch _e nil)
     (finally
       (close stream)
       (swap! *clients* dec))))
 
 ;; ── Accept loop ─────────────────────────────────────────────────────────────
 
-(defn- accept-loop [listener]
+(defn accept-loop [listener]
   (loop []
     (when @*server*
       (let [client (try (beer.tcp/accept listener)
-                        (catch Exception _e nil))]
+                        (catch _e nil))]
         (when client
           (spawn (fn [] (handle-client client)))
           (recur))))))
