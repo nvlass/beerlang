@@ -322,6 +322,56 @@ Require with `(require 'beer.tcp :as 'tcp)`.
 | `tcp/connect` | Connect to host:port | `(tcp/connect "localhost" 8080)` |
 | `tcp/local-port` | Get local port of a stream | `(tcp/local-port listener)` |
 
+### Network REPL (beer.nrepl)
+
+Require with `(require 'beer.nrepl)`.
+
+Embeds a TCP REPL server into any running beerlang process. Clients send
+forms as text and receive `pr-str` results back. A `nrepl> ` prompt is
+emitted on connect and after each result so that Emacs comint works without
+additional configuration. Multiple concurrent clients are supported; each
+runs in its own spawned task.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `beer.nrepl/start!` | Start server on port; returns actual port bound | `(beer.nrepl/start! 7888)` → `7888` |
+| `beer.nrepl/stop!` | Stop the server (in-flight clients finish naturally) | `(beer.nrepl/stop!)` |
+| `beer.nrepl/clients` | Number of currently connected clients | `(beer.nrepl/clients)` → `1` |
+
+**Starting the server:**
+```clojure
+(require 'beer.nrepl)
+(beer.nrepl/start! 7888)
+```
+
+**Connecting from the terminal:**
+```
+$ nc localhost 7888
+nrepl> (+ 1 2)
+3
+nrepl> (swap! my-atom assoc :speed 10)
+{:speed 10}
+nrepl>
+```
+
+**Emacs integration** (requires `beerlang-repl.el`):
+
+| Key | Command | Notes |
+|-----|---------|-------|
+| `C-c C-j` | `beerlang-connect` | Prompts for host:port (default `localhost:7888`) |
+| `C-c C-q` | `beerlang-disconnect` | Close connection |
+| `C-x C-e` `C-c C-c` `C-c C-r` … | All eval commands | Auto-route to nREPL when connected |
+
+Once connected, `C-c C-z` switches to `*beerlang-nrepl*` instead of the
+local subprocess. Disconnect to fall back to the local REPL.
+
+**Thread safety:** nREPL client tasks run on scheduler worker threads.
+It is safe to `swap!` atoms, `>!`/`<!` channels, and call any pure
+functions. Do not call UI or graphics primitives (e.g., `rl/*` in the
+raylib example) directly from an nREPL client — those require the main OS
+thread. Modify shared state via atoms; the main-thread loop picks up the
+change on the next iteration.
+
 ### JSON (beer.json)
 
 Require with `(require 'beer.json :as 'json)`.

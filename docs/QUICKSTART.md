@@ -192,6 +192,45 @@ The `beer.hive` library provides Erlang-inspired message-passing actors.
 
 Beerlang includes TCP sockets (`beer.tcp`) and an HTTP server (`beer.http`). See the [API Reference](API.md) for details.
 
+## Network REPL
+
+`beer.nrepl` embeds a TCP REPL server into any running beerlang process —
+a long-running script, an HTTP server, a game. Connect from Emacs or `nc`
+and eval forms into the live process.
+
+```clojure
+;; In your script or application:
+(require 'beer.nrepl)
+(beer.nrepl/start! 7888)   ; starts listening, returns actual port
+```
+
+**From the terminal:**
+```bash
+$ nc localhost 7888
+nrepl> (+ 1 2)
+3
+nrepl> (swap! app-state assoc :debug true)
+{:debug true, ...}
+```
+
+**From Emacs** (with `beerlang-repl.el` loaded):
+```
+M-x beerlang-connect     — connect to localhost:7888
+C-x C-e                  — send sexp at point to the live process
+C-c C-c                  — send top-level form
+C-c C-j                  — connect (shortcut)
+C-c C-q                  — disconnect
+```
+
+Once connected, all normal eval keybindings (`C-x C-e`, `C-c C-c`,
+`C-c C-r`, `C-c C-b`, `C-c C-n`) route to the remote process.
+Disconnect with `C-c C-q` to fall back to the local REPL subprocess.
+
+**Thread safety:** nREPL tasks run on worker threads. `swap!` atoms freely;
+avoid calling main-thread-only APIs (graphics, UI) directly from the REPL.
+Use atoms as the bridge — update state from the REPL, let the main loop
+read it on the next iteration.
+
 ## Exception handling
 
 ```clojure
