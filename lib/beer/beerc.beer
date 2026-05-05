@@ -1,0 +1,12 @@
+(ns beer.beerc)
+;; Low-level .beerc primitives — implemented as C natives (core_register_aot).
+;;
+;; Natives available in this namespace:
+;;   (beerc/file-mtime   path) → int64 nanoseconds or nil
+;;   (beerc/crc32        path) → int64 (uint32 CRC32) or nil
+;;   (beerc/file-exists? path) → true/false
+;;   (beerc/list-dir     path) → vector of filenames (no . ..) or nil
+;;   (beerc/read-header  path) → {:mtime int64 :crc32 int64 :n-forms int} or nil
+;;   (beerc/compile-file! path) → nil  (writes .beer → .beerc alongside source)
+;;
+;; See beer.build for higher-level stale-checking and batch compilation.

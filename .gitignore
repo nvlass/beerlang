@@ -42,3 +42,6 @@ IDEAS.md
 TODO_BUGS.md
 TODO_OPTIMIZATIONS.md
 editors/emacs/*.elc
+
+# AOT compiled bytecode
+*.beerc

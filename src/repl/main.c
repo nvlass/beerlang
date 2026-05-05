@@ -497,6 +497,36 @@ static int cmd_ubertar(void) {
 }
 
 /* ================================================================
+ * Subcommand: beer compile / beer check
+ * ================================================================ */
+
+static int cmd_compile(const char* path) {
+    /* Default to current directory if no path given */
+    const char* target = (path && path[0]) ? path : ".";
+    char expr[2048];
+    snprintf(expr, sizeof(expr),
+             "(do (require 'beer.build)"
+             "    (let [res (beer.build/compile-stale! \"%s\")]"
+             "      (println (str \"Compiled: \" (:compiled res) \" file(s)\"))"
+             "      (doseq [err (:errors res)]"
+             "        (println (str \"ERROR: \" (:file err) \": \" (:error err))))"
+             "      (if (empty? (:errors res)) 0 1)))",
+             target);
+    return eval_form(expr, "<beer compile>");
+}
+
+static int cmd_check(const char* path) {
+    const char* target = (path && path[0]) ? path : ".";
+    char expr[2048];
+    snprintf(expr, sizeof(expr),
+             "(do (require 'beer.build)"
+             "    (beer.build/check-report \"%s\"))",
+             target);
+    return eval_form(expr, "<beer check>");
+}
+
+
+/* ================================================================
  * REPL mode
  * ================================================================ */
 
@@ -682,6 +712,8 @@ static void print_usage(void) {
     printf("  run            Run the project's -main function\n");
     printf("  build          Build project into a .tar archive\n");
     printf("  ubertar        Build standalone .tar with dependencies\n");
+    printf("  compile [dir]  Compile stale .beer files to .beerc\n");
+    printf("  check   [dir]  Report stale / missing .beerc files\n");
     printf("  repl           Start a REPL (default)\n");
     printf("  <file.beer>    Run a script file\n");
     printf("\nOptions:\n");
@@ -786,6 +818,10 @@ int main(int argc, char** argv) {
             result = cmd_build();
         } else if (strcmp(subcommand, "ubertar") == 0) {
             result = cmd_ubertar();
+        } else if (strcmp(subcommand, "compile") == 0) {
+            result = cmd_compile(subcmd_arg);
+        } else if (strcmp(subcommand, "check") == 0) {
+            result = cmd_check(subcmd_arg);
         } else if (strcmp(subcommand, "repl") == 0) {
             /* Project REPL — load paths from beer.edn if present */
             ProjectConfig config;

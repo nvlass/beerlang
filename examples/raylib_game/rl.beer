@@ -1,0 +1,29 @@
+(ns rl)
+;; Raylib bindings — all functions are registered as C natives by main.c.
+;; This file exists so (require 'rl) works from game.beer.
+;;
+;; Available functions:
+;;
+;;   Drawing
+;;   (rl/begin-drawing)
+;;   (rl/end-drawing)
+;;   (rl/clear-background color)          ; color = [r g b a] or :black :white etc.
+;;   (rl/draw-circle  x y radius color)
+;;   (rl/draw-rectangle x y w h color)
+;;   (rl/draw-line    x1 y1 x2 y2 color)
+;;   (rl/draw-text    text x y size color)
+;;
+;;   Window / timing
+;;   (rl/window-should-close?)            ; → true/false
+;;   (rl/get-fps)                         ; → int
+;;   (rl/get-screen-width)                ; → int
+;;   (rl/get-screen-height)               ; → int
+;;
+;;   Input
+;;   (rl/key-down?    key)                ; key = :space :escape :up :down :left :right :w :a :s :d ...
+;;   (rl/key-pressed? key)
+;;   (rl/mouse-x)                         ; → int
+;;   (rl/mouse-y)                         ; → int
+;;
+;;   Utility
+;;   (rl/random min max)                  ; → int  (raylib GetRandomValue)

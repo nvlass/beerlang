@@ -1,0 +1,160 @@
+(ns beer.build
+  (:require [beer.beerc :as beerc]
+            [beer.shell :as shell]))
+
+;; ---------------------------------------------------------------------------
+;; Path helpers
+;; ---------------------------------------------------------------------------
+
+(defn beerc-path
+  "Given a .beer source path, return the corresponding .beerc path."
+  [src]
+  (str src "c"))  ; .beer → .beerc (append 'c')
+
+;; ---------------------------------------------------------------------------
+;; Staleness check
+;; ---------------------------------------------------------------------------
+
+(defn stale?
+  "True if .beerc is missing, or mtime/crc32 says source has changed."
+  [src-path]
+  (let [bc-path (beerc-path src-path)
+        hdr     (beerc/read-header bc-path)]
+    (if (nil? hdr)
+      true
+      (let [src-mtime (beerc/file-mtime src-path)]
+        (if (nil? src-mtime)
+          true
+          (or (> src-mtime (:mtime hdr))
+              (let [src-crc (beerc/crc32 src-path)]
+                (and (not (nil? src-crc))
+                     (not= src-crc (:crc32 hdr))))))))))
+
+(defn file-status
+  "Return :ok, :stale, or :missing for a .beer source path."
+  [src-path]
+  (let [bc-path (beerc-path src-path)]
+    (if (not (beerc/file-exists? bc-path))
+      :missing
+      (if (stale? src-path)
+        :stale
+        :ok))))
+
+;; ---------------------------------------------------------------------------
+;; Single-file compilation
+;; ---------------------------------------------------------------------------
+
+(defn compile!
+  "Compile a single .beer file to .beerc.  Returns true on success."
+  [src-path]
+  (beerc/compile-file! src-path)
+  true)
+
+;; ---------------------------------------------------------------------------
+;; Directory scanning (recursive)
+;; ---------------------------------------------------------------------------
+
+(defn find-beer-files-in
+  "Recursively collect all .beer file paths under dir-path into acc (a vector)."
+  [dir-path acc]
+  (let [entries (beerc/list-dir dir-path)]
+    (if (nil? entries)
+      acc
+      (reduce
+        (fn [a entry]
+          (let [full (str dir-path "/" entry)]
+            (cond
+              (str/ends-with? entry ".beer")
+              (conj a full)
+
+              ;; Cheap is-dir check: append "/" and see if list-dir works
+              (not (nil? (beerc/list-dir full)))
+              (find-beer-files-in full a)
+
+              :else a)))
+        acc
+        entries))))
+
+(defn find-beer-files
+  "Return a vector of all .beer file paths found recursively under dir."
+  [dir]
+  ;; Strip trailing slash so paths don't double up
+  (let [d (if (str/ends-with? dir "/")
+              (subs dir 0 (- (count dir) 1))
+              dir)]
+    (find-beer-files-in d [])))
+
+;; ---------------------------------------------------------------------------
+;; Batch status
+;; ---------------------------------------------------------------------------
+
+(defn check
+  "Return a vector of {:file path :status :ok/:stale/:missing} maps
+  for every .beer file found under dir."
+  [dir]
+  (map (fn [f] {:file f :status (file-status f)})
+       (find-beer-files dir)))
+
+;; ---------------------------------------------------------------------------
+;; Batch compilation
+;; ---------------------------------------------------------------------------
+
+(defn compile-stale!
+  "Compile only stale or missing .beer files under dir.
+  Returns {:compiled N :ok N :errors []}."
+  [dir]
+  (let [results (check dir)
+        ok-count (count (filter #(= (:status %) :ok) results))
+        to-compile (filter #(not= (:status %) :ok) results)]
+    (reduce
+      (fn [acc r]
+        (try
+          (compile! (:file r))
+          (update acc :compiled inc)
+          (catch Exception e
+            (update acc :errors conj {:file (:file r) :error (str e)}))))
+      {:compiled 0 :ok ok-count :errors []}
+      to-compile)))
+
+(defn compile-all!
+  "Compile all .beer files under dir regardless of freshness.
+  Returns {:compiled N :errors []}."
+  [dir]
+  (let [files (find-beer-files dir)]
+    (reduce
+      (fn [acc f]
+        (try
+          (compile! f)
+          (update acc :compiled inc)
+          (catch Exception e
+            (update acc :errors conj {:file f :error (str e)}))))
+      {:compiled 0 :errors []}
+      files)))
+
+;; ---------------------------------------------------------------------------
+;; Human-readable report
+;; ---------------------------------------------------------------------------
+
+(defn check-report
+  "Scan dir, print a status report, return exit code (0=all ok, 1=issues)."
+  [dir]
+  (let [results (check dir)]
+    (if (empty? results)
+      (do (println (str "No .beer files found under: " dir))
+          0)
+      (let [stale   (filter #(= (:status %) :stale)   results)
+            missing (filter #(= (:status %) :missing)  results)]
+        (doseq [r results]
+          (let [label (cond
+                        (= (:status r) :ok)      "OK     "
+                        (= (:status r) :stale)   "STALE  "
+                        (= (:status r) :missing) "MISSING"
+                        :else                    "??????olean ")]
+            (println (str label " " (:file r)))))
+        (when (or (not (empty? stale)) (not (empty? missing)))
+          (println)
+          (println (str "WARNING: "
+                        (count stale)   " stale, "
+                        (count missing) " uncompiled"
+                        " — run: beerlang compile " dir)))
+        (if (and (empty? stale) (empty? missing)) 0 1)))))

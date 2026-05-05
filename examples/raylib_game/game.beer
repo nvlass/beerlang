@@ -1,0 +1,156 @@
+;;
+;; game.beer — beerlang starfield demo
+;;
+;; A port of the Clojure + libGDX skeleton (github.com/nvlass/game-skeleton).
+;;
+;; The entire game lives here:
+;;   - state in atoms  →  safe to swap! from a network REPL
+;;   - screen = fnmap  →  redefine any fn at the REPL, next frame picks it up
+;;   - tick/init! are the two hooks main.c calls into
+;;
+;; To modify the game live:
+;;   1. Start a TCP REPL (see commented block at the bottom)
+;;   2. Connect from Emacs / netcat: nc localhost 7888
+;;   3. (swap! game/state assoc :star-speed 300)   ; instant effect next frame
+;;   4. (def game/screen-fnmap (assoc game/screen-fnmap :render my-new-render))
+;;
+
+(ns game (:require [rl]))
+
+;; ── constants ────────────────────────────────────────────────────────────────
+
+(def width  800)
+(def height 600)
+
+;; ── state ────────────────────────────────────────────────────────────────────
+;; All mutable state in a single atom — swap!-able from REPL at any time.
+
+(def state
+  (atom {:stars      []
+         :bgstars    []
+         :time       0.0
+         :star-speed 1}))   ; multiplier — increase from REPL for effect
+
+;; ── star helpers ─────────────────────────────────────────────────────────────
+
+(defn rand-float
+  "Random float in [0, max)."
+  [max]
+  (* max (/ (rl/random 0 100000) 100000.0)))
+
+(defn rand-nth-vec
+  "Pick a random element from a vector."
+  [v]
+  (nth v (mod (rl/random 0 1000000) (count v))))
+
+(defn make-bgstar []
+  {:x      (rand-float width)
+   :y      (rand-float height)
+   :radius 0.8
+   :color  [(int (* 80  (+ 0.5 (/ (rl/random 0 100) 200.0))))
+            (int (* 80  (+ 0.5 (/ (rl/random 0 100) 200.0))))
+            (int (* 255 (+ 0.5 (/ (rl/random 0 100) 200.0))))
+            255]})
+
+(defn make-star []
+  {:x      width
+   :y      (rand-float height)
+   :speed  (rand-nth-vec [40 70 110 180 260])   ; pixels/sec
+   :radius (+ 0.8 (rand-float 1.8))
+   :color  [(int (+ 160 (rl/random 0 95)))
+            (int (+ 160 (rl/random 0 95)))
+            255
+            255]})
+
+(defn move-star [s dt multiplier]
+  (update s :x #(- % (* (:speed s) dt multiplier))))
+
+(defn update-stars [stars dt multiplier]
+  (->> stars
+       (map #(move-star % dt multiplier))
+       (filter #(> (:x %) 0))))
+
+(defn maybe-add-star [stars]
+  (if (and (< (count stars) 200)
+           (< (rl/random 0 100) 10))
+    (conj stars (make-star))
+    stars))
+
+(defn update-state [s dt]
+  (let [mult (:star-speed s)]
+    (-> s
+        (update :time + dt)
+        (update :stars update-stars dt mult)
+        (update :stars maybe-add-star))))
+
+;; ── draw helpers ─────────────────────────────────────────────────────────────
+
+(defn draw-star [s]
+  (rl/draw-circle (int (:x s)) (int (:y s)) (:radius s) (:color s)))
+
+;; ── screen fnmap ─────────────────────────────────────────────────────────────
+;; A plain map of keywords → functions, exactly like the Clojure skeleton.
+;; Redefine screen-fnmap from the REPL; next frame picks up the new value
+;; automatically (OP_LOAD_VAR always fetches the current var value).
+
+(def screen-fnmap
+  {:render (fn [s dt]
+             (rl/begin-drawing)
+             (rl/clear-background :black)
+
+             ;; static background stars
+             (doseq [star (:bgstars s)]
+               (draw-star star))
+
+             ;; moving stars
+             (doseq [star (:stars s)]
+               (draw-star star))
+
+             ;; HUD
+             (rl/draw-text
+               (str "FPS: " (rl/get-fps)
+                    "  Stars: " (count (:stars s))
+                    "  Speed: " (:star-speed s)
+                    "  [+/-] adjust speed")
+               10 10 18 [200 200 200 255])
+
+             (rl/end-drawing))})
+
+;; ── input handling ───────────────────────────────────────────────────────────
+
+(defn handle-input []
+  (when (rl/key-pressed? :up)
+    (swap! state update :star-speed inc))
+  (when (rl/key-pressed? :down)
+    (swap! state update :star-speed #(max 1 (dec %)))))
+
+;; ── public API (called by main.c) ────────────────────────────────────────────
+
+(defn init!
+  "Set up initial game state. Called once by main.c before the loop."
+  []
+  (reset! state {:stars      []
+                 :bgstars    (map (fn [_] (make-bgstar)) (range 150))
+                 :time       0.0
+                 :star-speed 1}))
+
+(defn tick
+  "Called every frame by main.c with delta-time in seconds."
+  [dt]
+  ;; update
+  (swap! state update-state dt)
+  (handle-input)
+  ;; render via current screen-fnmap (hot-swappable from REPL)
+  (let [render (:render screen-fnmap)]
+    (render @state dt)))
+
+;; ── live REPL (optional) ─────────────────────────────────────────────────────
+;; Uncomment to start a TCP REPL server on port 7888.
+;; Connect with:  nc localhost 7888
+;; Then try:      (swap! game/state assoc :star-speed 5)
+;;
+;; NOTE: REPL tasks run on scheduler worker threads. Only swap! atoms from the
+;; REPL — never call rl/* directly (raylib requires the main thread).
+;;
+;; (require 'beer.tcp)
+;; (spawn (fn [] (repl-server 7888)))

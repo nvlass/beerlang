@@ -16,6 +16,7 @@
 #include "atom.h"
 #include "scheduler.h"
 #include "core.h"
+#include "aot.h"
 
 /* Global registry instance */
 NamespaceRegistry* global_namespace_registry = NULL;
@@ -354,6 +355,7 @@ void namespace_init(void) {
     core_register_tcp();
     core_register_bits();
     core_register_crypto();
+    core_register_aot();
 
     /* Initialize global scheduler */
     global_scheduler = scheduler_new(DEFAULT_TASK_QUOTA);
