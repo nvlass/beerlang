@@ -53,8 +53,14 @@ void scheduler_free(Scheduler* sched);
 /* Spawn a new task: create task for fn(args...), enqueue to ready */
 Value scheduler_spawn(Scheduler* sched, Value fn, int argc, Value* argv);
 
-/* Run all tasks until ready queue is empty */
+/* Run all tasks until ready queue AND blocked queue are empty (blocks forever
+ * if persistent background tasks like nREPL accept-loops are running). */
 void scheduler_run_until_done(Scheduler* sched);
+
+/* Non-blocking variant: poll I/O reactor once, drain all currently-ready
+ * tasks, then return.  Safe to call from a game/render loop — never hangs
+ * waiting for blocked I/O tasks. */
+void scheduler_run_ready(Scheduler* sched);
 
 /* Run a specific task to completion (may run other tasks too).
  * Saves/restores sched->current for safe re-entrant use from natives. */

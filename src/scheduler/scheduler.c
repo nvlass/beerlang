@@ -275,6 +275,17 @@ void scheduler_run_task_to_completion(Scheduler* sched, Task* target) {
 }
 
 /* Run all tasks until ready queue and blocked queue are empty */
+void scheduler_run_ready(Scheduler* sched) {
+    /* Poll reactor ring once to wake any tasks whose I/O just completed */
+    scheduler_drain_io(sched);
+    /* Drain all tasks that are currently ready */
+    while (scheduler_has_ready(sched)) {
+        scheduler_run_one_tick(sched);
+        /* Check for newly-woken tasks after each tick */
+        scheduler_drain_io(sched);
+    }
+}
+
 void scheduler_run_until_done(Scheduler* sched) {
     int iterations = 0;
     while (scheduler_has_ready(sched) || sched->blocked_count > 0) {

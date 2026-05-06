@@ -120,9 +120,11 @@ static int beer_run_source(BeerState* B, const char* src,
 
     object_release(all_forms);
 
-    /* Drain any tasks spawned by the forms */
+    /* Run any tasks spawned by the forms; use the non-blocking variant so
+     * persistent background tasks (nREPL accept-loops, etc.) do not cause
+     * beer_do_file / beer_do_string to hang forever. */
     if (!error && global_scheduler) {
-        scheduler_run_until_done(global_scheduler);
+        scheduler_run_ready(global_scheduler);
     }
 
     return error;
@@ -303,7 +305,7 @@ BeerValue beer_call(BeerState* B, BeerValue fn, int argc, BeerValue* argv) {
                                          constants, n_constants, global_scheduler);
     Task* task = task_get(task_val);
     scheduler_run_task_to_completion(global_scheduler, task);
-    scheduler_run_until_done(global_scheduler);
+    scheduler_run_ready(global_scheduler);
 
     Value result = VALUE_NIL;
     if (task->vm->error) {
