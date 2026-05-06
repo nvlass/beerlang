@@ -47,7 +47,7 @@
                        doc (get m :doc "No documentation found.")]
                    {:id id :doc doc})
                  (catch e
-                   {:id id :err (str (:message e))}))]
+                     {:id id :err (str (:message e))}))]
     (send-msg stream result)
     (send-done stream id)))
 
@@ -61,7 +61,7 @@
 
 (defn dispatch [stream msg]
   (let [id (get msg :id "")
-        op (get msg :op "")]
+           op (get msg :op "")]
     (cond
       (= op "eval")     (handle-eval     stream id (get msg :code "nil"))
       (= op "doc")      (handle-doc      stream id (get msg :sym  "nil"))
