@@ -381,14 +381,14 @@
     (assoc m (first ks)
            (assoc-in (get m (first ks) {}) (rest ks) v))))
 
-(defn update [m k f]
-  (assoc m k (f (get m k))))
+(defn update [m k f & args]
+  (assoc m k (apply f (get m k) args)))
 
-(defn update-in [m ks f]
+(defn update-in [m ks f & args]
   (if (= (count ks) 1)
-    (update m (first ks) f)
+    (apply update m (first ks) f args)
     (assoc m (first ks)
-           (update-in (get m (first ks) {}) (rest ks) f))))
+           (apply update-in (get m (first ks) {}) (rest ks) f args))))
 
 (defn merge [& maps]
   (reduce (fn [acc m]

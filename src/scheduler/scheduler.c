@@ -275,13 +275,25 @@ void scheduler_run_task_to_completion(Scheduler* sched, Task* target) {
 }
 
 /* Run all tasks until ready queue and blocked queue are empty */
+/* Non-blocking counterpart to scheduler_run_until_done.
+ *
+ * scheduler_run_until_done loops while (ready || blocked_count > 0).
+ * blocked_count is incremented by scheduler_block_io, which is called when
+ * a task blocks on I/O (e.g. tcp/accept in a nREPL server accept-loop).
+ * A persistent background task that blocks on I/O will keep blocked_count
+ * > 0 indefinitely, causing scheduler_run_until_done to spin for up to
+ * 1M × 1ms ≈ 16 minutes before its safety limit fires — effectively
+ * hanging the caller (e.g. beer_do_file) before InitWindow is ever reached.
+ *
+ * scheduler_run_ready avoids this: it polls the reactor ring once (to wake
+ * any tasks whose I/O just completed) then drains whatever is currently
+ * ready, and returns.  Background tasks that remain blocked are left alone;
+ * the next call (e.g. on the next game frame) will pick them up if they
+ * have since been woken by the reactor thread. */
 void scheduler_run_ready(Scheduler* sched) {
-    /* Poll reactor ring once to wake any tasks whose I/O just completed */
     scheduler_drain_io(sched);
-    /* Drain all tasks that are currently ready */
     while (scheduler_has_ready(sched)) {
         scheduler_run_one_tick(sched);
-        /* Check for newly-woken tasks after each tick */
         scheduler_drain_io(sched);
     }
 }

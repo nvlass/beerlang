@@ -45,3 +45,4 @@ editors/emacs/*.elc
 
 # AOT compiled bytecode
 *.beerc
+examples/raylib_game/game

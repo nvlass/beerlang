@@ -120,9 +120,15 @@ static int beer_run_source(BeerState* B, const char* src,
 
     object_release(all_forms);
 
-    /* Run any tasks spawned by the forms; use the non-blocking variant so
-     * persistent background tasks (nREPL accept-loops, etc.) do not cause
-     * beer_do_file / beer_do_string to hang forever. */
+    /* Run tasks spawned by the loaded forms.
+     *
+     * Use scheduler_run_ready (non-blocking) rather than
+     * scheduler_run_until_done here.  scheduler_run_until_done loops while
+     * blocked_count > 0, which means it would spin for ~16 minutes (1M x
+     * 1ms) if a long-lived background task is running — e.g. a nREPL
+     * accept-loop spawned by (beer.nrepl/start! port) inside the loaded
+     * file.  scheduler_run_ready polls the I/O reactor ring once and drains
+     * only currently-ready tasks, then returns immediately. */
     if (!error && global_scheduler) {
         scheduler_run_ready(global_scheduler);
     }
@@ -305,6 +311,8 @@ BeerValue beer_call(BeerState* B, BeerValue fn, int argc, BeerValue* argv) {
                                          constants, n_constants, global_scheduler);
     Task* task = task_get(task_val);
     scheduler_run_task_to_completion(global_scheduler, task);
+    /* Give any newly-spawned tasks a chance to run (non-blocking — see
+     * comment in beer_run_source for why we avoid scheduler_run_until_done). */
     scheduler_run_ready(global_scheduler);
 
     Value result = VALUE_NIL;
