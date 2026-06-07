@@ -1,0 +1,9 @@
+(ns beer.udp)
+;; UDP socket operations — wrappers around C natives
+
+(def socket     udp-socket)
+(def bind       udp-bind)
+(def send       udp-send)
+(def recv       udp-recv)
+(def local-port udp-local-port)
+;; Stream close is in beer.core and available globally.

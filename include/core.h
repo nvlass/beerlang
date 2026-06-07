@@ -39,6 +39,9 @@ void core_register_shell(void);
 /* Register beer.tcp namespace (tcp/listen, tcp/accept, etc.) */
 void core_register_tcp(void);
 
+/* Register beer.udp namespace (udp/socket, udp/bind, udp/send, udp/recv) */
+void core_register_udp(void);
+
 /* Register atom functions (atom, deref, reset!, swap!, compare-and-set!, atom?) */
 void core_register_atoms(void);
 

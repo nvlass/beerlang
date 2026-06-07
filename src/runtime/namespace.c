@@ -353,6 +353,7 @@ void namespace_init(void) {
     core_register_tar();
     core_register_shell();
     core_register_tcp();
+    core_register_udp();
     core_register_bits();
     core_register_crypto();
     core_register_aot();
