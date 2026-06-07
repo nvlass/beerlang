@@ -322,6 +322,44 @@ Require with `(require 'beer.tcp :as 'tcp)`.
 | `tcp/connect` | Connect to host:port | `(tcp/connect "localhost" 8080)` |
 | `tcp/local-port` | Get local port of a stream | `(tcp/local-port listener)` |
 
+### UDP Sockets (beer.udp)
+
+Require with `(require 'beer.udp :as 'udp)`.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `udp/socket` | Create an unbound UDP socket (for sending) | `(udp/socket)` |
+| `udp/bind` | Create a UDP socket bound to a port (for receiving) | `(udp/bind 9999)`, `(udp/bind "0.0.0.0" 9999)` |
+| `udp/send` | Send a datagram to host:port | `(udp/send sock "127.0.0.1" 9999 "hi")` |
+| `udp/recv` | Receive a datagram (blocks cooperatively) | `(udp/recv sock 65507)` → `{:data "hi" :host "127.0.0.1" :port 55324}` |
+| `udp/local-port` | Get bound local port | `(udp/local-port sock)` → `9999` |
+
+`udp/recv` returns a map `{:data string :host string :port int}`. Use `(close sock)` from `beer.core` to close the socket.
+
+**Echo server example:**
+```clojure
+(require 'beer.udp :as 'udp)
+
+(defn echo-server [port]
+  (let [sock (udp/bind port)]
+    (println "UDP echo on port" port)
+    (loop []
+      (let [pkt (udp/recv sock 65507)]
+        (when pkt
+          (udp/send sock (:host pkt) (:port pkt) (:data pkt))
+          (recur))))))
+
+(spawn (echo-server 9999))
+```
+
+**Send a datagram:**
+```clojure
+(require 'beer.udp :as 'udp)
+(def s (udp/socket))
+(udp/send s "127.0.0.1" 9999 "hello")
+(close s)
+```
+
 ### Network REPL (beer.nrepl)
 
 Require with `(require 'beer.nrepl)`.
