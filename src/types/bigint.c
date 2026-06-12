@@ -403,7 +403,7 @@ double bigint_to_double(Value bigint) {
 /* Print bigint */
 void bigint_print(Value bigint) {
     char* str = bigint_to_string(bigint, 10);
-    printf("%s", str);
+    fprintf(PR_OUT, "%s", str);
     free(str);
 }
 

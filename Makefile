@@ -48,7 +48,7 @@ LIBEXECDIR  = $(PREFIX)/lib/beerlang
 SHAREDIR    = $(PREFIX)/share/beerlang
 
 # Targets
-.PHONY: all clean test repl repl-trace debug track-leaks asan install uninstall libbeerlang embed help
+.PHONY: all clean test repl repl-trace debug track-leaks asan install uninstall libbeerlang embed wasm wasm-docker help
 
 all: $(BIN_DIR)/beerlang
 
@@ -81,6 +81,19 @@ embed: libbeerlang
 	$(CC) $(CFLAGS) -o $(BIN_DIR)/embed examples/embed.c \
 		-L$(BUILD_DIR) -lbeerlang $(LDFLAGS)
 	@echo "Built $(BIN_DIR)/embed"
+
+# WASM REPL build (requires emcc on PATH)
+wasm:
+	$(MAKE) -C wasm -f Makefile.wasm
+
+# WASM REPL build via Docker (no local emcc needed)
+wasm-docker:
+	docker run --rm \
+	  -v "$(CURDIR):/src" \
+	  -w /src/wasm \
+	  --user "$(shell id -u):$(shell id -g)" \
+	  emscripten/emsdk \
+	  make -f Makefile.wasm
 
 # Debug build
 debug: CFLAGS = $(DEBUG_CFLAGS)
@@ -171,6 +184,8 @@ help:
 	@echo "  make               Build beerlang (default)"
 	@echo "  make libbeerlang   Build build/libbeerlang.a (embeddable library)"
 	@echo "  make embed         Build examples/embed.c against libbeerlang"
+	@echo "  make wasm          Build WASM REPL (requires emcc on PATH)"
+	@echo "  make wasm-docker   Build WASM REPL via Docker (no local emcc needed)"
 	@echo "  make install       Install to PREFIX (default: /usr/local)"
 	@echo "  make uninstall     Remove installed files"
 	@echo "  make debug         Build with debug symbols"

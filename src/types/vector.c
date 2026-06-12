@@ -444,12 +444,12 @@ void vector_print_readable(Value vec) {
     assert(is_vector(vec));
     Vector* v = (Vector*)untag_pointer(vec);
 
-    printf("[");
+    fprintf(PR_OUT, "[");
     for (size_t i = 0; i < v->length; i++) {
         if (i > 0) {
-            printf(" ");
+            fprintf(PR_OUT, " ");
         }
         value_print_readable(v->elements[i]);
     }
-    printf("]");
+    fprintf(PR_OUT, "]");
 }

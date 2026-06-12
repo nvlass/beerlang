@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 /* Value tag enum */
 typedef enum {
@@ -195,6 +196,12 @@ void value_print(Value v);
 void value_println(Value v);
 void value_print_readable(Value v);
 size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len);
+
+/* Redirect target for value_print_readable and all _print_readable helpers.
+ * NULL = stdout (default). Set to capture output without reassigning stdout
+ * (Emscripten declares stdout as FILE *const). */
+extern FILE* g_value_pr_out;
+#define PR_OUT (g_value_pr_out ? g_value_pr_out : stdout)
 bool value_equal(Value a, Value b);
 const char* value_type_name(Value v);
 bool value_valid(Value v);

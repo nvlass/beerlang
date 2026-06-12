@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Beerlang REPL</title>
+  <style>
+    :root {
+      --bg:       #1a1a1a;
+      --bg2:      #242424;
+      --border:   #333;
+      --amber:    #e8a020;
+      --green:    #6dbf67;
+      --red:      #e06c75;
+      --muted:    #888;
+      --text:     #d4d4d4;
+      --font:     "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    header {
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header .logo {
+      color: var(--amber);
+      font-weight: bold;
+      font-size: 16px;
+      letter-spacing: 0.05em;
+    }
+
+    header .tagline { color: var(--muted); font-size: 12px; }
+
+    header a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 12px;
+      margin-left: auto;
+    }
+    header a:hover { color: var(--amber); }
+
+    #output {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px;
+      line-height: 1.6;
+    }
+
+    .entry { margin-bottom: 4px; }
+
+    .entry .prompt { color: var(--amber); user-select: none; }
+
+    .entry .input  { color: var(--text); }
+
+    .entry .stdout { color: var(--muted); white-space: pre-wrap; }
+
+    .entry .value  { color: var(--green); }
+
+    .entry .error  { color: var(--red); }
+
+    .entry.banner  { color: var(--muted); margin-bottom: 12px; font-size: 12px; }
+
+    #input-row {
+      display: flex;
+      align-items: center;
+      background: var(--bg2);
+      border-top: 1px solid var(--border);
+      padding: 10px 20px;
+      gap: 8px;
+    }
+
+    #input-row .prompt { color: var(--amber); flex-shrink: 0; }
+
+    #input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      caret-color: var(--amber);
+    }
+
+    #run-btn {
+      background: var(--amber);
+      color: var(--bg);
+      border: none;
+      border-radius: 4px;
+      padding: 4px 12px;
+      font-family: var(--font);
+      font-size: 13px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    #run-btn:hover { opacity: 0.85; }
+    #run-btn:disabled { opacity: 0.4; cursor: default; }
+
+    #status {
+      font-size: 11px;
+      color: var(--muted);
+      padding: 4px 20px;
+      background: var(--bg2);
+      border-top: 1px solid var(--border);
+    }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">🍺 beerlang</span>
+  <span class="tagline">a hops-inspired Clojure flavour</span>
+  <a href="https://beerlang.dev" target="_blank">beerlang.dev ↗</a>
+</header>
+
+<div id="output">
+  <div class="entry banner">
+    Loading runtime… (first load may take a moment)
+  </div>
+</div>
+
+<div id="input-row">
+  <span class="prompt">user&gt;</span>
+  <input id="input" type="text" autocomplete="off" autocorrect="off" spellcheck="false"
+         placeholder="(+ 1 2)" disabled>
+  <button id="run-btn" disabled>Run</button>
+</div>
+
+<div id="status" id="status">Initialising…</div>
+
+<script src="beerlang.js"></script>
+<script>
+  const outputEl = document.getElementById('output');
+  const inputEl  = document.getElementById('input');
+  const runBtn   = document.getElementById('run-btn');
+  const statusEl = document.getElementById('status');
+
+  // History
+  const history = [];
+  let histIdx = -1;
+
+  // Stdout capture: Emscripten calls Module.print for every puts/printf to fd1
+  let capturedOutput = '';
+
+  let Module;
+  let beer_wasm_init, beer_wasm_eval, beer_wasm_free;
+
+  BeerlangModule({
+    print(text) {
+      capturedOutput += text + '\n';
+    },
+    printErr(text) {
+      capturedOutput += text + '\n';
+    },
+  }).then(m => {
+    Module = m;
+    beer_wasm_init = Module.cwrap('beer_wasm_init', null,   []);
+    beer_wasm_eval = Module.cwrap('beer_wasm_eval', 'number', ['string']);
+    beer_wasm_free = Module.cwrap('beer_wasm_free', null,   ['number']);
+
+    beer_wasm_init();
+
+    // Clear loading message
+    outputEl.innerHTML = '';
+    appendBanner('Beerlang REPL — type expressions and press Enter');
+    appendBanner('Examples: (+ 1 2)   (map inc [1 2 3])   (defn greet [n] (str "Hello " n))');
+
+    inputEl.disabled = false;
+    runBtn.disabled  = false;
+    statusEl.textContent = 'Ready';
+    inputEl.focus();
+  });
+
+  function appendBanner(text) {
+    const d = document.createElement('div');
+    d.className = 'entry banner';
+    d.textContent = text;
+    outputEl.appendChild(d);
+  }
+
+  function appendEntry(src, stdout, result) {
+    const wrap = document.createElement('div');
+    wrap.className = 'entry';
+
+    const inputLine = document.createElement('div');
+    inputLine.innerHTML = '<span class="prompt">user&gt; </span>' +
+      '<span class="input">' + escHtml(src) + '</span>';
+    wrap.appendChild(inputLine);
+
+    if (stdout) {
+      const out = document.createElement('div');
+      out.className = 'stdout';
+      out.textContent = stdout.replace(/\n$/, '');
+      wrap.appendChild(out);
+    }
+
+    if (result !== null) {
+      const res = document.createElement('div');
+      if (result.ok) {
+        if (result.value) {
+          res.className = 'value';
+          res.textContent = '=> ' + result.value;
+        }
+      } else {
+        res.className = 'error';
+        res.textContent = result.error;
+      }
+      wrap.appendChild(res);
+    }
+
+    outputEl.appendChild(wrap);
+    outputEl.scrollTop = outputEl.scrollHeight;
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function evalInput() {
+    const src = inputEl.value.trim();
+    if (!src) return;
+
+    history.unshift(src);
+    histIdx = -1;
+    inputEl.value = '';
+
+    capturedOutput = '';
+    statusEl.textContent = 'Evaluating…';
+
+    // Run in next tick so UI updates first
+    setTimeout(() => {
+      const ptr = beer_wasm_eval(src);
+      const jsonStr = Module.UTF8ToString(ptr);
+      beer_wasm_free(ptr);
+
+      let result;
+      try { result = JSON.parse(jsonStr); }
+      catch(e) { result = { ok: false, error: 'JSON parse error: ' + jsonStr }; }
+
+      const out = capturedOutput;
+      capturedOutput = '';
+
+      appendEntry(src, out, result);
+      statusEl.textContent = result.ok ? 'Ready' : 'Error';
+      inputEl.focus();
+    }, 0);
+  }
+
+  runBtn.addEventListener('click', evalInput);
+
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      evalInput();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (histIdx + 1 < history.length) {
+        histIdx++;
+        inputEl.value = history[histIdx];
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (histIdx > 0) {
+        histIdx--;
+        inputEl.value = history[histIdx];
+      } else {
+        histIdx = -1;
+        inputEl.value = '';
+      }
+    }
+  });
+</script>
+</body>
+</html>

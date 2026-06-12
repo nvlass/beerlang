@@ -1078,10 +1078,10 @@ static void print_entry(Value key, Value value, void* ctx) {
 
 static void print_entry_readable(Value key, Value value, void* ctx) {
     PrintCtx* pc = (PrintCtx*)ctx;
-    if (!pc->first) printf(", ");
+    if (!pc->first) fprintf(PR_OUT, ", ");
     pc->first = false;
     value_print_readable(key);
-    printf(" ");
+    fprintf(PR_OUT, " ");
     value_print_readable(value);
 }
 
@@ -1095,8 +1095,8 @@ void hashmap_print(Value map) {
 
 void hashmap_print_readable(Value map) {
     assert(is_hashmap(map));
-    printf("{");
+    fprintf(PR_OUT, "{");
     PrintCtx ctx = { true };
     hashmap_foreach(map, print_entry_readable, &ctx);
-    printf("}");
+    fprintf(PR_OUT, "}");
 }

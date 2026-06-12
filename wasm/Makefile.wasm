@@ -1,0 +1,74 @@
+# WASM build — requires Emscripten (emcc on PATH)
+#
+# Usage:
+#   cd wasm && make -f Makefile.wasm          # build
+#   cd wasm && make -f Makefile.wasm serve    # serve locally on :8080
+#   cd wasm && make -f Makefile.wasm clean
+
+EMCC    = emcc
+OUT_DIR = out
+ROOT    = ..
+
+# Source groups (mirror the main Makefile, but exclude platform I/O)
+VM_SRCS      = $(wildcard $(ROOT)/src/vm/*.c)
+TYPES_SRCS   = $(wildcard $(ROOT)/src/types/*.c)
+MEMORY_SRCS  = $(wildcard $(ROOT)/src/memory/*.c)
+READER_SRCS  = $(wildcard $(ROOT)/src/reader/*.c)
+COMPILER_SRCS= $(wildcard $(ROOT)/src/compiler/*.c)
+SCHEDULER_SRCS=$(wildcard $(ROOT)/src/scheduler/*.c)
+TASK_SRCS    = $(wildcard $(ROOT)/src/task/*.c)
+CHANNEL_SRCS = $(wildcard $(ROOT)/src/channel/*.c)
+LIB_SRCS     = $(ROOT)/src/lib/beer.c  # embed API (no aot.c)
+
+# Runtime: core only — tcp/udp/shell/crypto/aot come from stubs.c
+RUNTIME_SRCS = $(ROOT)/src/runtime/core.c \
+               $(ROOT)/src/runtime/bits.c \
+               $(ROOT)/src/runtime/namespace.c
+
+# IO: stream.c + tarindex.c; reactor replaced by stub
+IO_SRCS = $(ROOT)/src/io/stream.c \
+          $(ROOT)/src/io/tarindex.c
+
+VENDOR_SRCS  = $(ROOT)/vendor/mini-gmp.c $(ROOT)/vendor/ulog.c
+
+WASM_SRCS    = io_reactor_stub.c stubs.c wasm_repl.c
+
+ALL_SRCS = $(VM_SRCS) $(TYPES_SRCS) $(MEMORY_SRCS) $(READER_SRCS) \
+           $(COMPILER_SRCS) $(SCHEDULER_SRCS) $(TASK_SRCS) $(CHANNEL_SRCS) \
+           $(RUNTIME_SRCS) $(IO_SRCS) $(LIB_SRCS) $(VENDOR_SRCS) $(WASM_SRCS)
+
+CFLAGS = -std=c11 -D_DEFAULT_SOURCE -DWASM_BUILD \
+         -Wall -Wextra \
+         -O2 -fno-strict-aliasing \
+         -I$(ROOT)/include -I$(ROOT)/vendor -I$(ROOT)
+
+# Emscripten link flags
+EMFLAGS = \
+  -s WASM=1 \
+  -s EXPORTED_FUNCTIONS='["_beer_wasm_init","_beer_wasm_eval","_beer_wasm_free","_malloc","_free"]' \
+  -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8","stackSave","stackRestore","stackAlloc"]' \
+  -s ALLOW_MEMORY_GROWTH=1 \
+  -s INITIAL_MEMORY=67108864 \
+  -s ENVIRONMENT=web \
+  -s MODULARIZE=1 \
+  -s EXPORT_NAME=BeerlangModule \
+  -s NO_EXIT_RUNTIME=1 \
+  -s FILESYSTEM=1 \
+  --embed-file $(ROOT)/lib/core.beer@lib/core.beer \
+  --embed-file $(ROOT)/lib/beer@lib/beer
+
+$(OUT_DIR)/beerlang.js: $(ALL_SRCS) | $(OUT_DIR)
+	$(EMCC) $(CFLAGS) $(ALL_SRCS) $(EMFLAGS) -o $@
+	cp index.html $(OUT_DIR)/index.html
+
+$(OUT_DIR):
+	mkdir -p $(OUT_DIR)
+
+serve: $(OUT_DIR)/beerlang.js
+	@echo "Serving on http://localhost:8080"
+	python3 -m http.server 8080 --directory $(OUT_DIR)
+
+clean:
+	rm -rf $(OUT_DIR)
+
+.PHONY: serve clean

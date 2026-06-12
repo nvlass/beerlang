@@ -494,7 +494,7 @@ void list_print(Value list) {
 
 void list_print_readable(Value list) {
     if (is_nil(list)) {
-        printf("()");
+        fprintf(PR_OUT, "()");
         return;
     }
 
@@ -503,13 +503,13 @@ void list_print_readable(Value list) {
         return;
     }
 
-    printf("(");
+    fprintf(PR_OUT, "(");
     Value current = list;
     bool first = true;
 
     while (is_cons(current)) {
         if (!first) {
-            printf(" ");
+            fprintf(PR_OUT, " ");
         }
         first = false;
 
@@ -518,9 +518,9 @@ void list_print_readable(Value list) {
     }
 
     if (!is_nil(current)) {
-        printf(" . ");
+        fprintf(PR_OUT, " . ");
         value_print_readable(current);
     }
 
-    printf(")");
+    fprintf(PR_OUT, ")");
 }

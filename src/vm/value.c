@@ -9,6 +9,8 @@
 #include <string.h>
 #include <inttypes.h>
 #include "beerlang.h"
+
+FILE* g_value_pr_out = NULL;
 #include "bigint.h"
 #include "function.h"
 #include "native.h"
@@ -118,27 +120,27 @@ void value_println(Value v) {
 /* Print a value in readable mode (strings with quotes, chars with \) */
 void value_print_readable(Value v) {
     if (is_nil(v)) {
-        printf("nil");
+        fprintf(PR_OUT, "nil");
     } else if (is_true(v)) {
-        printf("true");
+        fprintf(PR_OUT, "true");
     } else if (is_false(v)) {
-        printf("false");
+        fprintf(PR_OUT, "false");
     } else if (is_fixnum(v)) {
-        printf("%" PRId64, untag_fixnum(v));
+        fprintf(PR_OUT, "%" PRId64, untag_fixnum(v));
     } else if (is_float(v)) {
-        printf("%g", untag_float(v));
+        fprintf(PR_OUT, "%g", untag_float(v));
     } else if (is_char(v)) {
         uint32_t c = untag_char(v);
         switch (c) {
-            case '\n': printf("\\newline"); break;
-            case '\t': printf("\\tab"); break;
-            case '\r': printf("\\return"); break;
-            case ' ':  printf("\\space"); break;
+            case '\n': fprintf(PR_OUT, "\\newline"); break;
+            case '\t': fprintf(PR_OUT, "\\tab"); break;
+            case '\r': fprintf(PR_OUT, "\\return"); break;
+            case ' ':  fprintf(PR_OUT, "\\space"); break;
             default:
                 if (c >= 32 && c < 127) {
-                    printf("\\%c", (char)c);
+                    fprintf(PR_OUT, "\\%c", (char)c);
                 } else {
-                    printf("\\u%04X", c);
+                    fprintf(PR_OUT, "\\u%04X", c);
                 }
                 break;
         }
@@ -147,33 +149,33 @@ void value_print_readable(Value v) {
         switch (type) {
             case TYPE_STRING: {
                 const char* s = string_cstr(v);
-                printf("\"");
+                fprintf(PR_OUT, "\"");
                 while (*s) {
                     unsigned char ch = (unsigned char)*s;
                     switch (ch) {
-                        case '"':  printf("\\\""); break;
-                        case '\\': printf("\\\\"); break;
-                        case '\n': printf("\\n"); break;
-                        case '\t': printf("\\t"); break;
-                        case '\r': printf("\\r"); break;
+                        case '"':  fprintf(PR_OUT, "\\\""); break;
+                        case '\\': fprintf(PR_OUT, "\\\\"); break;
+                        case '\n': fprintf(PR_OUT, "\\n"); break;
+                        case '\t': fprintf(PR_OUT, "\\t"); break;
+                        case '\r': fprintf(PR_OUT, "\\r"); break;
                         default:
                             if (ch < 32) {
-                                printf("\\u%04X", ch);
+                                fprintf(PR_OUT, "\\u%04X", ch);
                             } else {
-                                putchar(ch);
+                                fputc(ch, PR_OUT);
                             }
                             break;
                     }
                     s++;
                 }
-                printf("\"");
+                fprintf(PR_OUT, "\"");
                 break;
             }
             case TYPE_SYMBOL:
-                printf("%s", symbol_name(v));
+                fprintf(PR_OUT, "%s", symbol_name(v));
                 break;
             case TYPE_KEYWORD:
-                printf(":%s", keyword_name(v));
+                fprintf(PR_OUT, ":%s", keyword_name(v));
                 break;
             case TYPE_BIGINT:
                 bigint_print(v);
@@ -188,42 +190,43 @@ void value_print_readable(Value v) {
                 hashmap_print_readable(v);
                 break;
             case TYPE_FUNCTION:
-                printf("#<fn %s>", function_name(v));
+                fprintf(PR_OUT, "#<fn %s>", function_name(v));
                 break;
             case TYPE_NATIVE_FN:
-                printf("#<fn %s>", native_function_name(v));
+                fprintf(PR_OUT, "#<fn %s>", native_function_name(v));
                 break;
             case TYPE_STREAM: {
                 Stream* s = (Stream*)untag_pointer(v);
                 switch (s->kind) {
-                    case STREAM_STDIN:  printf("#<stream stdin>"); break;
-                    case STREAM_STDOUT: printf("#<stream stdout>"); break;
-                    case STREAM_STDERR: printf("#<stream stderr>"); break;
-                    case STREAM_FILE:   printf("#<stream file:%d>", s->fd); break;
+                    case STREAM_STDIN:   fprintf(PR_OUT, "#<stream stdin>"); break;
+                    case STREAM_STDOUT:  fprintf(PR_OUT, "#<stream stdout>"); break;
+                    case STREAM_STDERR:  fprintf(PR_OUT, "#<stream stderr>"); break;
+                    case STREAM_FILE:    fprintf(PR_OUT, "#<stream file:%d>", s->fd); break;
+                    case STREAM_SOCKET:  fprintf(PR_OUT, "#<stream socket:%d>", s->fd); break;
                 }
                 break;
             }
             case TYPE_TASK:
-                printf("#<task>");
+                fprintf(PR_OUT, "#<task>");
                 break;
             case TYPE_CHANNEL:
-                printf("#<channel>");
+                fprintf(PR_OUT, "#<channel>");
                 break;
             case TYPE_ATOM: {
                 Atom* a = (Atom*)untag_pointer(v);
-                printf("#<atom ");
+                fprintf(PR_OUT, "#<atom ");
                 value_print_readable(a->value);
-                printf(">");
+                fprintf(PR_OUT, ">");
                 break;
             }
             default: {
                 Object* obj = (Object*)untag_pointer(v);
-                printf("#<object type=%d @%p>", obj->type & 0xFF, (void*)obj);
+                fprintf(PR_OUT, "#<object type=%d @%p>", obj->type & 0xFF, (void*)obj);
                 break;
             }
         }
     } else {
-        printf("#<unknown tag=%d>", get_tag(v));
+        fprintf(PR_OUT, "#<unknown tag=%d>", get_tag(v));
     }
 }
 
@@ -323,10 +326,10 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
                 size_t mlen = 0;
                 FILE* mf = open_memstream(&mbuf, &mlen);
                 if (mf) {
-                    FILE* old_stdout = stdout;
-                    stdout = mf;
+                    FILE* old_pr_out = g_value_pr_out;
+                    g_value_pr_out = mf;
                     value_print_readable(v);
-                    stdout = old_stdout;
+                    g_value_pr_out = old_pr_out;
                     fclose(mf);
                     while (len + mlen + 1 > *cap) {
                         *cap = (*cap < 64) ? 64 : *cap * 2;
