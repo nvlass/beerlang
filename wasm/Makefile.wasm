@@ -45,11 +45,12 @@ CFLAGS = -std=c11 -D_DEFAULT_SOURCE -DWASM_BUILD \
 # Emscripten link flags
 EMFLAGS = \
   -s WASM=1 \
+  -s STACK_SIZE=1048576 \
   -s EXPORTED_FUNCTIONS='["_beer_wasm_init","_beer_wasm_eval","_beer_wasm_free","_malloc","_free"]' \
   -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8","stackSave","stackRestore","stackAlloc"]' \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s INITIAL_MEMORY=67108864 \
-  -s ENVIRONMENT=web \
+  -s ENVIRONMENT=web,node \
   -s MODULARIZE=1 \
   -s EXPORT_NAME=BeerlangModule \
   -s NO_EXIT_RUNTIME=1 \
