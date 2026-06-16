@@ -488,11 +488,27 @@ Start the server inside beerlang with:
            "^(ns[ \t\n]+\\(\\(?:\\sw\\|\\s_\\|\\.\\)+\\)" nil t)
       (match-string-no-properties 1))))
 
+(defun beerlang--buffer-ns-form ()
+  "Return the full text of the (ns ...) form at the top of the buffer, or nil.
+Replaying the whole ns form is necessary to re-establish require aliases —
+a bare (in-ns) switches namespace but sets up no aliases."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^(ns[ \t\n]" nil t)
+      (goto-char (match-beginning 0))
+      (condition-case nil
+          (let ((start (point)))
+            (forward-sexp)
+            (buffer-substring-no-properties start (point)))
+        (error nil)))))
+
 (defun beerlang--send-in-ns (code)
-  "Send CODE to the REPL, preceded by (in-ns 'ns) when the buffer has a namespace."
-  (let ((ns (beerlang--buffer-ns)))
-    (if (and ns (not (equal ns "user")))
-        (beerlang-repl--send-string (concat "(in-ns '" ns ")\n" code))
+  "Send CODE to the REPL, preceded by the buffer's (ns ...) form when present.
+Resending the full ns form (not a bare in-ns) ensures (:require ...) aliases
+are active before CODE runs.  Subsequent requires are no-ops via *loaded-libs*."
+  (let ((ns-form (beerlang--buffer-ns-form)))
+    (if ns-form
+        (beerlang-repl--send-string (concat ns-form "\n" code))
       (beerlang-repl--send-string code))))
 
 (defun beerlang-eval-last-sexp ()
