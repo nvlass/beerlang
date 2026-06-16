@@ -24,6 +24,9 @@ void core_register_predicates(void);
 /* Register utility functions (not, str, type, apply) */
 void core_register_utility(void);
 
+/* Register beer.string namespace (upper-case, lower-case, trim, join, split, etc.) */
+void core_register_string(void);
+
 /* Register stream/I/O functions (open, close, read-line, slurp, spit, etc.) */
 void core_register_streams(void);
 

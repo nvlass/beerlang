@@ -335,6 +335,7 @@ void namespace_init(void) {
     core_register_collections();
     core_register_predicates();
     core_register_utility();
+    core_register_string();
 
     /* Initialize stream type and standard streams */
     stream_init();

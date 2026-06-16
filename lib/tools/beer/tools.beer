@@ -1,6 +1,7 @@
 (ns beer.tools
-  (:require [beer.shell :as shell]
-            [beer.tar :as tar]))
+  (:require [beer.shell  :as shell]
+            [beer.tar    :as tar]
+            [beer.string :as str]))
 
 (defn read-config [path]
   (read-string (slurp path)))

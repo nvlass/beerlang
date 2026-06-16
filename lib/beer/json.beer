@@ -1,4 +1,5 @@
-(ns beer.json)
+(ns beer.json
+  (:require [beer.string :as str]))
 
 ;; ============================================================
 ;; JSON Parser — recursive descent on strings

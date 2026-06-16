@@ -1,0 +1,4 @@
+(ns beer.string)
+
+(defn blank? [s]
+  (or (nil? s) (= "" (trim s))))

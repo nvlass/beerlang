@@ -1,6 +1,7 @@
 (ns beer.build
-  (:require [beer.beerc :as beerc]
-            [beer.shell :as shell]))
+  (:require [beer.beerc  :as beerc]
+            [beer.shell  :as shell]
+            [beer.string :as str]))
 
 ;; ---------------------------------------------------------------------------
 ;; Path helpers

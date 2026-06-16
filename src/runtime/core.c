@@ -1500,6 +1500,9 @@ static Value native_require(VM* vm, int argc, Value* argv) {
         if (vm->error) return VALUE_NIL;
 
         /* Mark as loaded */
+        if (!loaded_var) {
+            loaded_var = namespace_define(core_ns, loaded_sym, VALUE_NIL);
+        }
         if (is_nil(loaded_libs)) {
             loaded_libs = hashmap_create_default();
         } else {
@@ -2435,93 +2438,87 @@ static Value native_subs(VM* vm, int argc, Value* argv) {
     return result;
 }
 
-/* str/upper-case */
+/* beer.string natives */
 static Value native_str_upper(VM* vm, int argc, Value* argv) {
     if (argc != 1 || !is_string(argv[0])) {
-        vm_error(vm, "str/upper-case: requires exactly 1 string argument");
+        vm_error(vm, "upper-case: requires exactly 1 string argument");
         return VALUE_NIL;
     }
     return string_upper(argv[0]);
 }
 
-/* str/lower-case */
 static Value native_str_lower(VM* vm, int argc, Value* argv) {
     if (argc != 1 || !is_string(argv[0])) {
-        vm_error(vm, "str/lower-case: requires exactly 1 string argument");
+        vm_error(vm, "lower-case: requires exactly 1 string argument");
         return VALUE_NIL;
     }
     return string_lower(argv[0]);
 }
 
-/* str/trim */
 static Value native_str_trim(VM* vm, int argc, Value* argv) {
     if (argc != 1 || !is_string(argv[0])) {
-        vm_error(vm, "str/trim: requires exactly 1 string argument");
+        vm_error(vm, "trim: requires exactly 1 string argument");
         return VALUE_NIL;
     }
     return string_trim(argv[0]);
 }
 
-/* str/join: (str/join coll) or (str/join sep coll) */
+/* (join coll) or (join sep coll) */
 static Value native_str_join(VM* vm, int argc, Value* argv) {
     if (argc == 1) {
         return string_join(VALUE_NIL, argv[0]);
     }
     if (argc == 2) {
         if (!is_string(argv[0])) {
-            vm_error(vm, "str/join: separator must be a string");
+            vm_error(vm, "join: separator must be a string");
             return VALUE_NIL;
         }
         return string_join(argv[0], argv[1]);
     }
-    vm_error(vm, "str/join: requires 1 or 2 arguments");
+    vm_error(vm, "join: requires 1 or 2 arguments");
     return VALUE_NIL;
 }
 
-/* str/split: (str/split s delim) */
+/* (split s delim) */
 static Value native_str_split(VM* vm, int argc, Value* argv) {
     if (argc != 2) {
-        vm_error(vm, "str/split: requires exactly 2 arguments");
+        vm_error(vm, "split: requires exactly 2 arguments");
         return VALUE_NIL;
     }
     if (!is_string(argv[0]) || !is_string(argv[1])) {
-        vm_error(vm, "str/split: arguments must be strings");
+        vm_error(vm, "split: arguments must be strings");
         return VALUE_NIL;
     }
     return string_split(argv[0], argv[1]);
 }
 
-/* str/includes? */
 static Value native_str_includes(VM* vm, int argc, Value* argv) {
     if (argc != 2 || !is_string(argv[0]) || !is_string(argv[1])) {
-        vm_error(vm, "str/includes?: requires 2 string arguments");
+        vm_error(vm, "includes?: requires 2 string arguments");
         return VALUE_NIL;
     }
     return string_contains(argv[0], argv[1]) ? VALUE_TRUE : VALUE_FALSE;
 }
 
-/* str/starts-with? */
 static Value native_str_starts_with(VM* vm, int argc, Value* argv) {
     if (argc != 2 || !is_string(argv[0]) || !is_string(argv[1])) {
-        vm_error(vm, "str/starts-with?: requires 2 string arguments");
+        vm_error(vm, "starts-with?: requires 2 string arguments");
         return VALUE_NIL;
     }
     return string_starts_with(argv[0], argv[1]) ? VALUE_TRUE : VALUE_FALSE;
 }
 
-/* str/ends-with? */
 static Value native_str_ends_with(VM* vm, int argc, Value* argv) {
     if (argc != 2 || !is_string(argv[0]) || !is_string(argv[1])) {
-        vm_error(vm, "str/ends-with?: requires 2 string arguments");
+        vm_error(vm, "ends-with?: requires 2 string arguments");
         return VALUE_NIL;
     }
     return string_ends_with(argv[0], argv[1]) ? VALUE_TRUE : VALUE_FALSE;
 }
 
-/* str/replace */
 static Value native_str_replace(VM* vm, int argc, Value* argv) {
     if (argc != 3 || !is_string(argv[0]) || !is_string(argv[1]) || !is_string(argv[2])) {
-        vm_error(vm, "str/replace: requires 3 string arguments");
+        vm_error(vm, "replace: requires 3 string arguments");
         return VALUE_NIL;
     }
     return string_replace(argv[0], argv[1], argv[2]);
@@ -2736,15 +2733,6 @@ void core_register_utility(void) {
     register_native(core_ns, "disasm", native_disasm);
     register_native(core_ns, "asm", native_asm);
     register_native(core_ns, "subs", native_subs);
-    register_native(core_ns, "str/upper-case", native_str_upper);
-    register_native(core_ns, "str/lower-case", native_str_lower);
-    register_native(core_ns, "str/trim", native_str_trim);
-    register_native(core_ns, "str/join", native_str_join);
-    register_native(core_ns, "str/split", native_str_split);
-    register_native(core_ns, "str/includes?", native_str_includes);
-    register_native(core_ns, "str/starts-with?", native_str_starts_with);
-    register_native(core_ns, "str/ends-with?", native_str_ends_with);
-    register_native(core_ns, "str/replace", native_str_replace);
     register_native(core_ns, "require", native_require);
     register_native(core_ns, "ns-publics", native_ns_publics);
 
@@ -2816,6 +2804,26 @@ void core_register_utility(void) {
     Value ns_var_sym = symbol_intern("*ns*");
     Value user_sym = symbol_intern("user");
     namespace_define(core_ns, ns_var_sym, user_sym);
+}
+
+/* =================================================================
+ * beer.string Namespace Registration
+ * ================================================================= */
+
+void core_register_string(void) {
+    Namespace* str_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.string");
+    if (!str_ns) return;
+
+    register_native(str_ns, "upper-case",   native_str_upper);
+    register_native(str_ns, "lower-case",   native_str_lower);
+    register_native(str_ns, "trim",         native_str_trim);
+    register_native(str_ns, "join",         native_str_join);
+    register_native(str_ns, "split",        native_str_split);
+    register_native(str_ns, "includes?",    native_str_includes);
+    register_native(str_ns, "starts-with?", native_str_starts_with);
+    register_native(str_ns, "ends-with?",   native_str_ends_with);
+    register_native(str_ns, "replace",      native_str_replace);
+    register_native(str_ns, "subs",         native_subs);
 }
 
 /* =================================================================

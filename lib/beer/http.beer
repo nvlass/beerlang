@@ -1,5 +1,6 @@
 (ns beer.http
-  (:require [beer.tcp :as tcp]))
+  (:require [beer.tcp    :as tcp]
+            [beer.string :as str]))
 
 ;; ============================================================
 ;; Status text table

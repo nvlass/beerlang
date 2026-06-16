@@ -10,8 +10,9 @@
 ;;   curl -X DELETE http://localhost:8080/items/1
 
 (ns json-api
-  (:require [beer.http :as http]
-            [beer.json :as json]))
+  (:require [beer.http   :as http]
+            [beer.json   :as json]
+            [beer.string :as str]))
 
 ;; ----------------------------------------------------------------
 ;; In-memory item store (atom — safe under concurrent requests)
