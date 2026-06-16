@@ -480,29 +480,48 @@ Start the server inside beerlang with:
   (let ((code (buffer-substring-no-properties start end)))
     (beerlang-repl--send-string code)))
 
+(defun beerlang--buffer-ns ()
+  "Return the namespace declared in the current buffer's (ns ...) form, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward
+           "^(ns[ \t\n]+\\(\\(?:\\sw\\|\\s_\\|\\.\\)+\\)" nil t)
+      (match-string-no-properties 1))))
+
+(defun beerlang--send-in-ns (code)
+  "Send CODE to the REPL, preceded by (in-ns 'ns) when the buffer has a namespace."
+  (let ((ns (beerlang--buffer-ns)))
+    (if (and ns (not (equal ns "user")))
+        (beerlang-repl--send-string (concat "(in-ns '" ns ")\n" code))
+      (beerlang-repl--send-string code))))
+
 (defun beerlang-eval-last-sexp ()
-  "Evaluate the sexp immediately before point.
-For multi-line top-level forms (defn, def, …) use `beerlang-eval-defun'
-\(C-c C-c) instead — it finds the enclosing top-level form regardless of
-where point is."
+  "Evaluate the sexp immediately before point in the buffer's namespace."
   (interactive)
   (save-excursion
     (let ((end (point)))
       (condition-case err
           (progn
             (backward-sexp)
-            (beerlang-eval-region (point) end))
+            (beerlang--send-in-ns
+             (buffer-substring-no-properties (point) end)))
         (error (message "beerlang: could not find sexp before point (%s)"
                         (error-message-string err)))))))
 
 (defun beerlang-eval-defun ()
-  "Evaluate the top-level form (defun) containing or preceding point."
+  "Evaluate the top-level form containing point in the buffer's namespace.
+Uses beginning-of-defun + forward-sexp so the form boundary is always exact."
   (interactive)
   (save-excursion
-    (end-of-defun)
-    (let ((end (point)))
-      (beginning-of-defun)
-      (beerlang-eval-region (point) end))))
+    (beginning-of-defun)
+    (let ((start (point)))
+      (condition-case err
+          (progn
+            (forward-sexp)
+            (beerlang--send-in-ns
+             (buffer-substring-no-properties start (point))))
+        (error (message "beerlang: could not find defun at point (%s)"
+                        (error-message-string err)))))))
 
 (defun beerlang-eval-buffer ()
   "Send the entire current buffer to the Beerlang REPL."
@@ -529,11 +548,7 @@ Goes to the network REPL if connected, else starts/switches to the local REPL."
   "Set the REPL namespace to match the (ns ...) declaration in the buffer.
 Falls back to `user' if no ns form is found."
   (interactive)
-  (let ((ns (save-excursion
-              (goto-char (point-min))
-              (if (re-search-forward "^(ns[ \t\n]+\\(\\(?:\\sw\\|\\s_\\|\\.\\)+\\)" nil t)
-                  (match-string-no-properties 1)
-                "user"))))
+  (let ((ns (or (beerlang--buffer-ns) "user")))
     (beerlang-repl--send-string (format "(in-ns '%s)" ns))
     (message "Switched REPL to namespace: %s" ns)))
 
