@@ -644,3 +644,115 @@ Require with `(require 'beer.test :as 't)`.
 | `is` | Assert a condition | `(t/is (= 4 (+ 2 2)))` |
 | `testing` | Label a group of assertions | `(t/testing "addition" (t/is (= 2 (+ 1 1))))` |
 | `run-tests` | Run all tests in current namespace | `(t/run-tests)` |
+
+---
+
+## C Foreign Function Interface (`beer.ffi`)
+
+Requires `make CFFI=1` at build time (links `-lffi`). Without it, `beer.ffi` is not registered.
+
+```clojure
+(ns myscript (:require [beer.ffi :as ffi]))
+```
+
+### Low-level primitives
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ffi/open` | `(ffi/open path)` → cpointer | Load a shared library (`dlopen`) |
+| `ffi/sym` | `(ffi/sym handle name)` → cpointer | Look up a symbol (`dlsym`) |
+| `ffi/close` | `(ffi/close handle)` → nil | Unload library (`dlclose`) |
+| `ffi/call` | `(ffi/call fn-ptr arg-types ret-type args)` → value | Call a C function via libffi |
+| `ffi/malloc` | `(ffi/malloc n)` → cpointer | Allocate n zero-initialised bytes |
+| `ffi/free` | `(ffi/free ptr)` → nil | Free a `ffi/malloc`'d pointer |
+| `ffi/cget` | `(ffi/cget ptr type offset)` → value | Read a typed value from a raw pointer |
+| `ffi/cset!` | `(ffi/cset! ptr type offset val)` → nil | Write a typed value to a raw pointer |
+| `ffi/cpointer?` | `(ffi/cpointer? x)` → bool | True if x is a cpointer |
+| `ffi/cnull?` | `(ffi/cnull? ptr)` → bool | True if ptr is nil or NULL |
+
+**Type keywords** for `ffi/call`, `ffi/cget`, `ffi/cset!`:
+
+| Keyword | C type |
+|---------|--------|
+| `:void` | `void` (return only) |
+| `:bool` | `int` (0/1), marshalled to/from `true`/`false` |
+| `:int8` `:uint8` | `int8_t` / `uint8_t` |
+| `:int16` `:uint16` | `int16_t` / `uint16_t` |
+| `:int32` `:uint32` | `int32_t` / `uint32_t` |
+| `:int64` `:uint64` | `int64_t` / `uint64_t` |
+| `:float` | `float` |
+| `:double` | `double` |
+| `:pointer` | `void*` — passed/returned as cpointer or nil |
+| `:string` | `char*` — Beerlang string copied to null-terminated C string for the call |
+
+### High-level macros
+
+Use these with the `ffi/` alias:
+
+**`ffi/def-cfn`** — bind a C function by name:
+```clojure
+(ffi/def-cfn sqrt "m" "sqrt" [:double] :double)
+(sqrt 2.0)   ;=> 1.41421...
+```
+Args: `fn-name lib-name c-symbol arg-types ret-type`
+
+**`ffi/def-cstruct`** — name a struct descriptor map:
+```clojure
+(ffi/def-cstruct Point {:size 16
+                        :fields [{:name :x :type :double :offset 0}
+                                 {:name :y :type :double :offset 8}]})
+```
+
+**`ffi/def-cstruct-accessors`** — generate helpers from a named struct:
+```clojure
+(ffi/def-cstruct-accessors Point)
+;; generates: point-x, set-point-x!, point-y, set-point-y!, point-alloc, point-size
+(def p (point-alloc))
+(set-point-x! p 3.0)
+(point-x p)   ;=> 3.0
+(ffi/free p)
+```
+
+**`ffi/load-bindings`** — install all fns and structs from a binding map:
+```clojure
+(def libm (read-string (slurp "bindings/libm.beer")))
+(ffi/load-bindings libm)
+;; all :fns and :structs are now defined in the current namespace
+```
+
+### Utility functions
+
+| Function | Description |
+|----------|-------------|
+| `ffi/lib-handle` | Return a cached dlopen handle (opens on first call) |
+| `ffi/find-library` | Resolve short name to platform path (`"m"` → `"libm.dylib"`) |
+| `ffi/current-abi` | ABI string for the current platform, e.g. `"arm64-darwin"` |
+
+### Probe generator (`beer.ffi.probe`)
+
+```clojure
+(ns myscript (:require [beer.ffi.probe :as probe]))
+```
+
+| Function | Description |
+|----------|-------------|
+| `probe/generate-source` | Generate a C probe source string from a spec map |
+| `probe/show-source` | Print generated C without compiling (REPL helper) |
+| `probe/measure` | Compile and run a C probe; return measured struct layouts |
+| `probe/write-bindings` | Measure and write a binding file to a path |
+
+**Spec map keys:** `:headers` (list of `#include` names), `:structs` (list of `{:name :fields}`), `:fns` (verbatim function descriptors), `:cc` (compiler, default `"cc"`), `:cflags` (extra flags), `:library`, `:version` (for `:meta`).
+
+**Binding file format:**
+```clojure
+{:meta    {:library "zlib" :version "1.3.1" :abi "arm64-darwin" :cc "cc" ...}
+ :fns     [{:name "compress" :lib "z" :sym "compress" :args [...] :ret :int32} ...]
+ :structs {"arm64-darwin" [{:name "z_stream" :size 112 :fields [...]}]}}
+```
+`:structs` is keyed by ABI string, allowing a single file to cover multiple platforms.
+
+**`beer-probe` CLI** — generate binding files from a shell:
+```bash
+beer-probe spec.beer bindings/libz.beer   # write binding file
+beer-probe spec.beer                       # print measured layouts to stdout
+```

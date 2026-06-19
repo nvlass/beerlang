@@ -16,9 +16,14 @@ Beerlang is a Clojure-syntax LISP compiled to bytecode and executed on a stack-b
 - **Atoms** — `atom`, `swap!`, `reset!`, `@deref` for managed mutable state
 - **Actor system** — `beer.hive` for Erlang-inspired message-passing actors with supervisors
 - **Networking** — TCP sockets (`beer.tcp`), HTTP server (`beer.http`), JSON parsing (`beer.json`)
+- **CFFI** — call C functions in shared libraries at runtime via `beer.ffi` (libffi backend, `make CFFI=1`)
 - **Callable non-functions** — keywords, maps, and vectors work in head position
 - **Rich stdlib** — `map`, `filter`, `reduce`, `comp`, `partial`, `sort`, string utilities, file I/O, and more
 - **Numeric tower** — fixnums, floats, arbitrary-precision bigints with auto-promotion
+
+## Beerlang site
+
+Beerlang now has a site! https://beerlang.dev
 
 ## Quick taste
 
@@ -56,6 +61,7 @@ Beerlang is a Clojure-syntax LISP compiled to bytecode and executed on a stack-b
 
 ```bash
 make          # Build beerlang
+make CFFI=1   # Build with C foreign function interface (requires libffi)
 make test     # Run unit tests + smoke tests
 make repl     # Start the REPL
 make debug    # Debug build (-g -O0)
@@ -68,34 +74,24 @@ make clean    # Clean build artifacts
 - POSIX system (Linux, macOS, BSD)
 - Make
 - [rlwrap](https://github.com/hanslub42/rlwrap) (optional, for line editing in the REPL)
+- [libffi](https://github.com/libffi/libffi) (optional, for `beer.ffi` CFFI support)
 
 ## Installation
 
-After building, you can run the REPL from anywhere using the `bl.sh` wrapper script. Copy or symlink these to a directory on your `PATH`:
-
-```
-bl.sh          # REPL launcher (resolves lib path, wraps with rlwrap)
-bin/beerlang   # the binary (or place it next to bl.sh as just "beerlang")
-lib/           # standard library (core.beer)
-```
-
-Then start the REPL with:
-
 ```bash
-bl.sh
+make install                    # installs to /usr/local
+make install PREFIX=$HOME/.local  # custom prefix
 ```
 
-The wrapper sets `BEER_LIB_PATH` automatically so that `lib/core.beer` is found regardless of your working directory.
+This places the binary at `$(PREFIX)/bin/beerlang` (a wrapper that sets `BEERPATH` automatically), the real binary at `$(PREFIX)/lib/beerlang/beerlang`, and the standard library at `$(PREFIX)/share/beerlang/lib/`. With `CFFI=1`, `beer-probe` is also installed.
 
-You can also set `BEERPATH` to a colon-separated list of directories for library lookup:
+You can also set `BEERPATH` manually to a colon-separated list of directories for library lookup:
 
 ```bash
 export BEERPATH=/path/to/libs:/other/libs
 ```
 
-Beerlang also supports **tar-based library bundles** — place a `.tar` file in any `BEERPATH` directory and its `.beer` files are transparently available to `require`.
-
-> **Note:** An install script will be added in a future release.
+Beerlang supports **tar-based library bundles** — place a `.tar` file in any `BEERPATH` directory and its `.beer` files are transparently available to `require`.
 
 ## Documentation
 
