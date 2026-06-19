@@ -17,6 +17,7 @@
 #include "scheduler.h"
 #include "core.h"
 #include "aot.h"
+#include "cffi.h"
 
 /* Global registry instance */
 NamespaceRegistry* global_namespace_registry = NULL;
@@ -358,6 +359,11 @@ void namespace_init(void) {
     core_register_bits();
     core_register_crypto();
     core_register_aot();
+
+#ifdef BEER_CFFI
+    cpointer_init();
+    core_register_ffi();
+#endif
 
     /* Initialize global scheduler */
     global_scheduler = scheduler_new(DEFAULT_TASK_QUOTA);

@@ -1,0 +1,138 @@
+(ns beer.ffi
+  (:require [beer.string :as str]
+            [beer.shell  :as sh]))
+
+;; ============================================================
+;; Library handle registry — one dlopen per library name
+;; ============================================================
+
+(def *handles* (atom {}))
+
+(defn find-library [lib-name]
+  (let [os (str/trim (:out (sh/exec "uname" "-s")))]
+    (cond
+      (= os "Darwin") (str "lib" lib-name ".dylib")
+      (= os "Linux")  (str "lib" lib-name ".so")
+      :else           (str "lib" lib-name ".so"))))
+
+(defn lib-handle
+  "Return a cached dlopen handle for lib-name (short name, e.g. \"m\", \"z\").
+   Opens the library the first time; subsequent calls return the cached handle."
+  [lib-name]
+  (or (get @*handles* lib-name)
+      (let [h (beer.ffi/open (find-library lib-name))]
+        (swap! *handles* assoc lib-name h)
+        h)))
+
+;; ============================================================
+;; ABI detection
+;; ============================================================
+
+(defn current-abi
+  "Return a string identifying the current platform ABI, e.g. \"x86_64-darwin\"."
+  []
+  (let [arch (str/trim (:out (sh/exec "uname" "-m")))
+        os   (str/lower-case (str/trim (:out (sh/exec "uname" "-s"))))]
+    (str arch "-" os)))
+
+;; ============================================================
+;; def-cfn — bind a single C function
+;; ============================================================
+
+(defmacro def-cfn
+  "Declare a C function binding.
+   (def-cfn name lib-name c-sym arg-types ret-type)
+
+   Example:
+     (def-cfn sqrt \"m\" \"sqrt\" [:double] :double)
+     (sqrt 2.0)  ;=> 1.41421..."
+  [fn-name lib sym arg-types ret]
+  (let [n       (count arg-types)
+        params  (map (fn [i] (symbol (str "a" i))) (range n))
+        ptr-sym (symbol (str "__ffi-" (name fn-name) "-ptr"))]
+    `(do
+       (def ~ptr-sym (beer.ffi/sym (beer.ffi/lib-handle ~lib) ~sym))
+       (defn ~fn-name [~@params]
+         (beer.ffi/call ~ptr-sym ~arg-types ~ret [~@params])))))
+
+;; ============================================================
+;; def-cstruct — define a struct from a descriptor map
+;; ============================================================
+
+(defmacro def-cstruct
+  "Bind a struct descriptor map to a name.
+   (def-cstruct Point {:size 16
+                       :fields [{:name :x :type :double :offset 0}
+                                {:name :y :type :double :offset 8}]})"
+  [struct-name descriptor]
+  `(def ~struct-name ~descriptor))
+
+;; ============================================================
+;; def-cstruct-accessors — generate field getters/setters
+;; ============================================================
+
+(defmacro def-cstruct-accessors
+  "Generate getter, setter, alloc and size fns from a named struct descriptor.
+   The struct var must already be defined (via def-cstruct or load-bindings).
+
+   For (def-cstruct-accessors Point) this generates:
+     (point-x ptr)        (set-point-x! ptr v)
+     (point-y ptr)        (set-point-y! ptr v)
+     (point-alloc)        — returns ffi/malloc'd zeroed buffer
+     (point-size)         — returns struct size in bytes"
+  [struct-sym]
+  (let [desc   (eval struct-sym)
+        sname  (str/lower-case (name struct-sym))
+        fields (:fields desc)
+        size   (:size desc)]
+    `(do
+       ~@(mapcat
+           (fn [f]
+             (let [fname  (name (:name f))
+                   ftype  (:type f)
+                   foff   (:offset f)
+                   getter (symbol (str sname "-" fname))
+                   setter (symbol (str "set-" sname "-" fname "!"))]
+               [`(defn ~getter [ptr]   (beer.ffi/cget  ptr ~ftype ~foff))
+                `(defn ~setter [ptr v] (beer.ffi/cset! ptr ~ftype ~foff v))]))
+           fields)
+       (defn ~(symbol (str sname "-alloc")) []  (beer.ffi/malloc ~size))
+       (defn ~(symbol (str sname "-size"))  []  ~size))))
+
+;; ============================================================
+;; load-bindings — install all fns and structs from a binding map
+;; ============================================================
+
+(defn resolve-structs [structs]
+  (cond
+    (nil? structs)    []
+    (vector? structs) structs
+    (map? structs)    (or (get structs (current-abi))
+                          (get structs "default")
+                          (first (vals structs)))
+    :else             []))
+
+(defmacro load-bindings
+  "Install all fns and struct accessors declared in a binding map.
+   The binding var must be defined before calling this macro.
+
+   Example:
+     (def libz-bindings (read-string (slurp \"bindings/libz.beer\")))
+     (load-bindings libz-bindings)"
+  [binding-var]
+  (let [b       (eval binding-var)
+        fns     (or (:fns b) [])
+        structs (resolve-structs (:structs b))]
+    `(do
+       ~@(map (fn [f]
+                `(beer.ffi/def-cfn ~(symbol (:name f))
+                                    ~(:lib f)
+                                    ~(:sym f)
+                                    ~(:args f)
+                                    ~(:ret f)))
+              fns)
+       ~@(mapcat (fn [s]
+                   (let [sname (symbol (:name s))]
+                     [`(beer.ffi/def-cstruct ~sname ~s)
+                      `(beer.ffi/def-cstruct-accessors ~sname)]))
+                 structs))))

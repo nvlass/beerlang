@@ -1,0 +1,132 @@
+(ns beer.ffi.probe
+  (:require [beer.string :as str]
+            [beer.shell  :as sh]
+            [beer.ffi    :as ffi]))
+
+;; ============================================================
+;; C probe source generation
+;;
+;; Given a spec map with :headers and :structs (field names + types),
+;; generates a C program that prints measured struct layouts as
+;; beerlang data maps — guaranteed correct for the host ABI.
+;; ============================================================
+
+(defn field-line [struct-name field]
+  (let [fname (name (:name field))
+        ftype (pr-str (:type field))]
+    (str "  printf(\"{:name :" fname
+         " :type " ftype
+         " :offset %zu :field-size %zu}\\n\","
+         " (size_t)offsetof(" struct-name ", " fname "),"
+         " (size_t)sizeof(((" struct-name "*)0)->" fname "));\n")))
+
+(defn struct-block [s]
+  (let [sname (:name s)]
+    (str
+      "  printf(\"{:name \\\"" sname "\\\" :size %zu :fields [\\n\","
+      " (size_t)sizeof(" sname "));\n"
+      (str/join "" (map (partial field-line sname) (:fields s)))
+      "  printf(\"]}\\n\");\n")))
+
+(defn generate-source
+  "Generate a C probe source string from a spec map.
+   :headers — list of header file names to #include (e.g. [\"zlib.h\"])
+   :structs  — list of struct descriptors with :name and :fields"
+  [spec]
+  (let [headers (or (:headers spec)
+                    (when (:header spec) [(:header spec)])
+                    [])
+        structs (or (:structs spec) [])]
+    (str
+      "#include <stdio.h>\n"
+      "#include <stddef.h>\n"
+      (str/join "" (map (fn [h] (str "#include <" h ">\n")) headers))
+      "\nint main(void) {\n"
+      "  printf(\"[\\n\");\n"
+      (str/join "" (map struct-block structs))
+      "  printf(\"]\\n\");\n"
+      "  return 0;\n"
+      "}\n")))
+
+;; ============================================================
+;; Compile, run, and parse
+;; ============================================================
+
+(def probe-src "/tmp/beer-probe.c")
+(def probe-bin "/tmp/beer-probe")
+
+(defn measure
+  "Compile and run a C probe for the given spec.
+   Returns a vector of struct descriptor maps with measured :offset and :field-size.
+
+   Spec keys:
+     :headers  — list of header filenames, e.g. [\"zlib.h\"]
+     :header   — single header (alias for :headers with one entry)
+     :structs  — struct descriptors: [{:name \"Point\" :fields [{:name :x :type :double} ...]}]
+     :cc       — C compiler to use (default \"cc\")
+     :cflags   — vector of extra compiler flags (default [])"
+  [spec]
+  (let [cc     (or (:cc spec) "cc")
+        cflags (or (:cflags spec) [])
+        src    (generate-source spec)]
+    ;; Write probe source
+    (with-open [f (open probe-src :write)]
+      (write f src))
+    ;; Compile: cc [cflags...] probe.c -o probe
+    (let [cmd (str/join " " (into (into [cc] cflags) [probe-src "-o" probe-bin]))
+          cr  (sh/exec "sh" "-c" cmd)]
+      (when (not= (:exit cr) 0)
+        (throw (ex-info "beer.ffi.probe/measure: compilation failed"
+                        {:cmd cmd :stderr (:err cr) :source src})))
+      ;; Run
+      (let [rr (sh/exec probe-bin)]
+        (when (not= (:exit rr) 0)
+          (throw (ex-info "beer.ffi.probe/measure: probe execution failed"
+                          {:stderr (:err rr)})))
+        ;; Clean up
+        (sh/exec "sh" "-c" (str "rm -f " probe-src " " probe-bin))
+        ;; Parse output as beerlang data
+        (read-string (:out rr))))))
+
+;; ============================================================
+;; Binding file writer
+;; ============================================================
+
+(defn write-bindings
+  "Measure struct layouts and write a binding file to path.
+
+   The binding file format:
+     {:meta    {:library ... :version ... :abi ... :cc ... :cflags [...]}
+      :fns     [{:name ... :lib ... :sym ... :args [...] :ret ...} ...]
+      :structs {\"x86_64-darwin\" [{:name ... :size ... :fields [...]} ...]}}
+
+   Spec keys: all keys from measure, plus:
+     :library — library display name for :meta (e.g. \"zlib\")
+     :version — library version string for :meta
+     :fns     — function descriptors to include verbatim in the binding file"
+  [path spec]
+  (let [structs-data (measure spec)
+        abi          (ffi/current-abi)
+        meta         {:library   (or (:library spec) "unknown")
+                      :version   (or (:version spec) "unknown")
+                      :abi       abi
+                      :probed-at (str/trim (:out (sh/exec "date" "-u" "+%Y-%m-%d")))
+                      :cc        (or (:cc spec) "cc")
+                      :cflags    (or (:cflags spec) [])}
+        binding      {:meta    meta
+                      :fns     (or (:fns spec) [])
+                      :structs {abi structs-data}}]
+    (with-open [f (open path :write)]
+      (write f (pr-str binding))
+      (write f "\n"))
+    binding))
+
+;; ============================================================
+;; REPL helpers
+;; ============================================================
+
+(defn show-source
+  "Print the generated C probe source without compiling it.
+   Useful for debugging or when you want to run the probe manually."
+  [spec]
+  (println (generate-source spec)))

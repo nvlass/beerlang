@@ -15,6 +15,9 @@ FILE* g_value_pr_out = NULL;
 #include "function.h"
 #include "native.h"
 #include "atom.h"
+#ifdef BEER_CFFI
+#include "cpointer.h"
+#endif
 
 /* Print a value (for debugging) */
 void value_print(Value v) {
@@ -99,6 +102,11 @@ void value_print(Value v) {
                 printf(">");
                 break;
             }
+#ifdef BEER_CFFI
+            case TYPE_CPOINTER:
+                printf("#<cpointer %p>", cpointer_get(v));
+                break;
+#endif
 
             default: {
                 Object* obj = (Object*)untag_pointer(v);
@@ -219,6 +227,11 @@ void value_print_readable(Value v) {
                 fprintf(PR_OUT, ">");
                 break;
             }
+#ifdef BEER_CFFI
+            case TYPE_CPOINTER:
+                fprintf(PR_OUT, "#<cpointer %p>", cpointer_get(v));
+                break;
+#endif
             default: {
                 Object* obj = (Object*)untag_pointer(v);
                 fprintf(PR_OUT, "#<object type=%d @%p>", obj->type & 0xFF, (void*)obj);
@@ -320,7 +333,11 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
             case TYPE_VECTOR:
             case TYPE_HASHMAP:
             case TYPE_FUNCTION:
-            case TYPE_NATIVE_FN: {
+            case TYPE_NATIVE_FN:
+#ifdef BEER_CFFI
+            case TYPE_CPOINTER:
+#endif
+            {
                 /* Use open_memstream to capture value_print_readable output */
                 char* mbuf = NULL;
                 size_t mlen = 0;
@@ -499,6 +516,9 @@ const char* value_type_name(Value v) {
             case TYPE_TASK: return "task";
             case TYPE_CHANNEL: return "channel";
             case TYPE_ATOM: return "atom";
+#ifdef BEER_CFFI
+            case TYPE_CPOINTER: return "cpointer";
+#endif
             default: return "unknown-object";
         }
     }

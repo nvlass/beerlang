@@ -2,11 +2,26 @@
 # Simple, transparent build system
 
 CC = gcc
-CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -O2 -fno-strict-aliasing -Iinclude -Ivendor -I.
-DEBUG_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ivendor -I. -DDEBUG
-TRACK_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ivendor -I. -DDEBUG -DBEER_TRACK_ALLOCS
-ASAN_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ivendor -I. -DDEBUG -fsanitize=address,undefined -fno-omit-frame-pointer
-LDFLAGS = -lm -lpthread
+
+# Optional features — set on the command line, e.g.: make CFFI=1
+CFFI ?= 0
+ifeq ($(CFFI),1)
+  UNAME_S := $(shell uname -s)
+  ifeq ($(UNAME_S),Darwin)
+    SDKROOT := $(shell xcrun --show-sdk-path 2>/dev/null)
+    EXTRA_CFLAGS  += -DBEER_CFFI -I$(SDKROOT)/usr/include/ffi
+    EXTRA_LDFLAGS += -lffi
+  else
+    EXTRA_CFLAGS  += -DBEER_CFFI $(shell pkg-config --cflags libffi 2>/dev/null)
+    EXTRA_LDFLAGS += $(shell pkg-config --libs libffi 2>/dev/null || echo -lffi)
+  endif
+endif
+
+CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -O2 -fno-strict-aliasing -Iinclude -Ivendor -I. $(EXTRA_CFLAGS)
+DEBUG_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ivendor -I. -DDEBUG $(EXTRA_CFLAGS)
+TRACK_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ivendor -I. -DDEBUG -DBEER_TRACK_ALLOCS $(EXTRA_CFLAGS)
+ASAN_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -g -O0 -Iinclude -Ivendor -I. -DDEBUG -fsanitize=address,undefined -fno-omit-frame-pointer $(EXTRA_CFLAGS)
+LDFLAGS = -lm -lpthread $(EXTRA_LDFLAGS)
 
 # Directories
 SRC_DIR = src
@@ -29,9 +44,17 @@ REPL_SRCS = $(wildcard $(SRC_DIR)/repl/*.c)
 LIB_SRCS = $(wildcard $(SRC_DIR)/lib/*.c)
 VENDOR_SRCS = vendor/mini-gmp.c vendor/ulog.c
 
+# CFFI sources only included when CFFI=1
+ifeq ($(CFFI),1)
+  CFFI_SRCS = $(wildcard $(SRC_DIR)/cffi/*.c)
+else
+  CFFI_SRCS =
+endif
+
 ALL_SRCS = $(VM_SRCS) $(TYPES_SRCS) $(MEMORY_SRCS) $(READER_SRCS) \
            $(COMPILER_SRCS) $(RUNTIME_SRCS) $(SCHEDULER_SRCS) \
-           $(TASK_SRCS) $(CHANNEL_SRCS) $(IO_SRCS) $(REPL_SRCS) $(LIB_SRCS)
+           $(TASK_SRCS) $(CHANNEL_SRCS) $(IO_SRCS) $(REPL_SRCS) $(LIB_SRCS) \
+           $(CFFI_SRCS)
 
 # Object files
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(ALL_SRCS))
@@ -156,9 +179,11 @@ install: $(BIN_DIR)/beerlang
 	  echo 'exec "$(LIBEXECDIR)/beerlang" "$$@"'; \
 	} > $(BINDIR)/beerlang
 	chmod 755 $(BINDIR)/beerlang
+	install -m 755 scripts/beer-probe $(BINDIR)/beer-probe
 	@echo ""
-	@echo "  binary:  $(BINDIR)/beerlang"
-	@echo "  library: $(SHAREDIR)/lib"
+	@echo "  binary:   $(BINDIR)/beerlang"
+	@echo "  beer-probe: $(BINDIR)/beer-probe"
+	@echo "  library:  $(SHAREDIR)/lib"
 	@echo ""
 	@echo "Make sure $(BINDIR) is in your PATH."
 
@@ -166,6 +191,7 @@ install: $(BIN_DIR)/beerlang
 uninstall:
 	@echo "Removing beerlang from $(PREFIX)..."
 	rm -f  $(BINDIR)/beerlang
+	rm -f  $(BINDIR)/beer-probe
 	rm -rf $(LIBEXECDIR)
 	rm -rf $(SHAREDIR)
 	@echo "Done."
@@ -206,6 +232,9 @@ help:
 	@echo "Examples:"
 	@echo "  make install PREFIX=/opt/beerlang"
 	@echo "  make install PREFIX=\$$HOME/.local"
+	@echo ""
+	@echo "Optional features (set on command line):"
+	@echo "  CFFI=1    Enable C Foreign Function Interface via libffi (default: 0)"
 	@echo ""
 	@echo "Build variables:"
 	@echo "  CC=$(CC)"

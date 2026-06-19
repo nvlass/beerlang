@@ -182,6 +182,7 @@ typedef enum {
     TYPE_HAMT_NODE = 0x80,
     TYPE_HAMT_COLLISION = 0x81,
     TYPE_ATOM = 0x85,
+    TYPE_CPOINTER = 0x90,
 } ObjectType;
 
 /* Get object type */

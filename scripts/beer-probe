@@ -1,0 +1,53 @@
+#!/bin/sh
+# beer-probe — measure C struct layouts and write beerlang binding files
+#
+# Usage:
+#   beer-probe <spec-file.beer> <output-binding.beer>
+#   beer-probe <spec-file.beer>                        (prints to stdout)
+#
+# The spec file is a beerlang expression that evaluates to a probe spec map:
+#   {:library "zlib"
+#    :version "1.3.1"
+#    :headers ["zlib.h"]
+#    :structs [{:name "z_stream"
+#               :fields [{:name :next_in   :type :pointer}
+#                        {:name :avail_in  :type :uint32}]}]
+#    :fns     [{:name "compress"   :lib "z" :sym "compress"
+#               :args [:pointer :pointer :pointer :uint64] :ret :int32}]
+#    :cc      "gcc"
+#    :cflags  []}
+#
+# Writes a binding file to <output-binding.beer> (or stdout if omitted).
+
+set -e
+
+BEER="${BEER:-beerlang}"
+TMPSCRIPT="${TMPDIR:-/tmp}/beer-probe-runner-$$.beer"
+
+if [ $# -lt 1 ]; then
+    echo "Usage: beer-probe <spec-file.beer> [output-binding.beer]" >&2
+    exit 1
+fi
+
+SPEC_FILE="$1"
+OUT_FILE="${2:-}"
+
+cleanup() { rm -f "$TMPSCRIPT"; }
+trap cleanup EXIT
+
+if [ -n "$OUT_FILE" ]; then
+    cat > "$TMPSCRIPT" << BEERSCRIPT
+(ns beer-probe.runner (:require [beer.ffi.probe :as probe]))
+(def spec (read-string (slurp "$SPEC_FILE")))
+(probe/write-bindings "$OUT_FILE" spec)
+(println "Written:" "$OUT_FILE")
+BEERSCRIPT
+else
+    cat > "$TMPSCRIPT" << BEERSCRIPT
+(ns beer-probe.runner (:require [beer.ffi.probe :as probe]))
+(def spec (read-string (slurp "$SPEC_FILE")))
+(println (pr-str (probe/measure spec)))
+BEERSCRIPT
+fi
+
+"$BEER" "$TMPSCRIPT"

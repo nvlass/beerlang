@@ -680,7 +680,51 @@ static Value quasiquote_expand(Value form) {
         return list_nth_or_nil(form, 1);
     }
 
-    /* Atom (non-list) -> (quote atom) */
+    /* Vector: process each element and rebuild as (into [] (concat ...)).
+     * This makes `[~@xs a ~b] work correctly inside quasi-quoted forms. */
+    if (is_vector(form)) {
+        Value concat_sym = symbol_intern("concat");
+        Value list_sym   = symbol_intern("list");
+        Value into_sym   = symbol_intern("into");
+        size_t n = vector_length(form);
+
+        /* Build segments list (forward order) */
+        Value segments = VALUE_NIL;
+        for (size_t i = n; i > 0; i--) {
+            Value elem = vector_get(form, i - 1);
+            if (is_tagged_list(elem, "unquote-splicing")) {
+                Value spliced = list_nth_or_nil(elem, 1);
+                segments = cons(spliced, segments);
+            } else {
+                Value expanded = quasiquote_expand(elem);
+                Value wrapped  = cons(list_sym, cons(expanded, VALUE_NIL));
+                segments = cons(wrapped, segments);
+            }
+        }
+
+        int seg_count = 0;
+        Value cur = segments;
+        while (is_cons(cur)) { seg_count++; cur = cdr(cur); }
+
+        Value inner;
+        if (seg_count == 0) {
+            /* empty vector: (into [] '()) */
+            Value quote_sym = symbol_intern("quote");
+            inner = cons(quote_sym, cons(VALUE_NIL, VALUE_NIL));
+        } else if (seg_count == 1) {
+            inner = car(segments);
+        } else {
+            inner = cons(concat_sym, segments);
+        }
+
+        /* (into [] inner) — empty vector literal as quoted constant */
+        Value quote_sym  = symbol_intern("quote");
+        Value empty_vec  = vector_create(0);
+        Value quoted_vec = cons(quote_sym, cons(empty_vec, VALUE_NIL));
+        return cons(into_sym, cons(quoted_vec, cons(inner, VALUE_NIL)));
+    }
+
+    /* Atom (non-list, non-vector) -> (quote atom) */
     if (!is_cons(form)) {
         Value quote_sym = symbol_intern("quote");
         return cons(quote_sym, cons(form, VALUE_NIL));
