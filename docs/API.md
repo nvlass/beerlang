@@ -244,6 +244,7 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 | `in-ns` | Switch/create namespace | `(in-ns 'my.ns)` |
 | `require` | Load namespace with optional alias | `(require 'foo.bar :as 'fb)` |
 | `eval` | Compile and execute a form | `(eval '(+ 1 2))` → `3` |
+| `read-string` | Parse a string into a beerlang value (one form) | `(read-string "(+ 1 2)")` → `(+ 1 2)` |
 | `keyword` | Create keyword from string | `(keyword "foo")` → `:foo` |
 | `name` | Get name of symbol or keyword as string | `(name :foo)` → `"foo"` |
 | `load` | Load and execute a .beer file | `(load "path/to/file.beer")` |
@@ -255,6 +256,7 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 |----------|-------------|---------|
 | `chan` | Create channel (unbuffered or buffered) | `(chan)`, `(chan 10)` |
 | `close!` | Close channel | `(close! ch)` |
+| `sleep` | Suspend the current task for n milliseconds | `(sleep 500)` |
 | `task-watch` | Watch a task; calls callback with result on completion | `(task-watch t (fn [v] (println v)))` |
 
 Use special forms `>!`, `<!`, `spawn`, `await`, `yield` for task/channel operations.
@@ -630,7 +632,51 @@ Actor handlers receive `(state msg)` and return `{:state new-state}` (or `{:stat
 | `*err*` | Standard error stream |
 | `*loaded-libs*` | Map of loaded namespace files |
 | `*load-path*` | Vector of library search paths (from `BEERPATH` env var + `"lib/"`) |
-| `*loaded-libs*` | Map tracking which namespaces have been loaded |
+
+---
+
+## Bytecode Metaprogramming
+
+`disasm` and `asm` expose the VM's bytecode representation as plain beerlang data, enabling inspection, transformation, and hand-crafted code generation.
+
+### `disasm`
+
+Decompile a bytecode function into a data map:
+
+```clojure
+(defn square [x] (* x x))
+(disasm square)
+;=> {:arity 1
+;    :constants [*]
+;    :code [[:ENTER 1] [:LOAD_LOCAL 0] [:LOAD_LOCAL 0]
+;           [:LOAD_VAR 0] [:TAIL_CALL 2] [:RETURN]]}
+```
+
+- **`:arity`** — number of fixed parameters (-1 for variadic)
+- **`:constants`** — constant pool (values referenced by index in `:code`)
+- **`:code`** — vector of `[opcode-keyword operand ...]` tuples
+
+### `asm`
+
+Assemble a data map back into a callable function:
+
+```clojure
+(def sq (asm (disasm (fn [x] (* x x)))))
+(sq 7)   ;=> 49
+```
+
+The map must have `:code`, `:constants`, and `:arity`. Round-tripping `(asm (disasm f))` produces an equivalent function.
+
+### Use cases
+
+```clojure
+;; Inspect what the compiler generates
+(disasm (fn [x] (if (> x 0) x (- x))))
+
+;; Transform a function's bytecode
+(let [d (disasm my-fn)]
+  (asm (assoc d :code (transform (:code d)))))
+```
 
 ---
 
