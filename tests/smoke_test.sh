@@ -1084,6 +1084,56 @@ check_multi '(require (quote beer.hive) :as (quote hive))
 (spawn (fn [] (>! ch (hive/ask pid [:read]))))
 (<! ch)' '3' "actor ask with state update"
 
+# --- Supervisor ---
+echo ""
+echo "--- beer.hive supervisor ---"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def sup (hive/supervisor :one-for-one
+  [(fn [] (hive/spawn-actor (fn [s m] (+ s 1)) 0 {:name :sup-c1}))]))
+(count (:children sup))' '1' "supervisor starts children"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def sup (hive/supervisor :one-for-one
+  [(fn [] (hive/spawn-actor (fn [s m] s) nil {:name :sup-c2}))
+   (fn [] (hive/spawn-actor (fn [s m] s) nil {:name :sup-c3}))]))
+(count (:children sup))' '2' "supervisor two children"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def sup (hive/supervisor :one-for-one
+  [{:start (fn [] (hive/spawn-actor (fn [s m] (if (= m :get) {:reply s :state s} s)) 0 {:name :sup-named}))
+    :name :sup-named}]))
+(hive/ask (hive/whereis :sup-named) :get)' '0' "supervisor named child registered"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def sup (hive/supervisor :one-for-one
+  [{:start (fn [] (hive/spawn-actor
+                    (fn [s m]
+                      (cond
+                        (= m :get)   {:reply s :state s}
+                        (= m :crash) (throw {:type :intentional})
+                        :else        (inc s)))
+                    0
+                    {:name :sup-crash-test}))
+    :name :sup-crash-test}]))
+(hive/send (hive/whereis :sup-crash-test) :crash)
+(sleep 150)
+(hive/ask (hive/whereis :sup-crash-test) :get)' '0' "supervisor restarts crashed child"
+
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def restart-count (atom 0))
+(hive/supervisor :one-for-one
+  [{:start (fn []
+              (swap! restart-count inc)
+              (hive/spawn-actor
+                (fn [s m]
+                  (if (= m :crash) (throw {:type :boom}) s))
+                nil
+                {:name :sup-count-test}))}])
+(hive/send (hive/whereis :sup-count-test) :crash)
+(sleep 150)
+@restart-count' '2' "supervisor increments start count on restart"
+
 # --- Bitwise operations ---
 echo ""
 echo "--- Bitwise ops ---"

@@ -129,17 +129,71 @@
   (close! (get pid :mailbox)))
 
 ;; ================================================================
-;; Supervisor (Phase 1 — unchanged)
+;; Supervisor — Phase 3: restartable local + cross-node remote
+;;
+;; Child spec formats (all accepted):
+;;   (fn [] pid)                          — legacy thunk, restarts on crash
+;;   {:start (fn [] pid)}                 — explicit map, restarts on crash
+;;   {:start (fn [] pid) :name :kw}       — named, re-registered on restart
+;;   {:remote remote-pid}                  — watch remote node, no local restart
+;;   {:remote remote-pid :start (fn [])}  — watch remote; spawn local replace on :down
+;;
+;; strategy: :one-for-one (default) — restart only the failed/downed child
 ;; ================================================================
 
-(defn supervisor [strategy child-specs]
-  (let* [children (map (fn [spec] (spec)) child-specs)]
-    (doseq [child children]
-      (task-watch (get child :task)
+(defn -normalize-spec [spec]
+  (if (fn? spec)
+    {:start spec}
+    spec))
+
+(defn -start-child! [spec]
+  (when (:start spec)
+    (let [pid ((:start spec))]
+      (when (:name spec)
+        (swap! beer.hive/*registry* assoc (:name spec) pid))
+      pid)))
+
+(defn -watch-local! [spec]
+  (let [pid (-start-child! spec)]
+    (when pid
+      (task-watch (:task pid)
         (fn [result]
-          (when (= (get result :status) :error)
-            (println "supervisor: child failed:" (get result :message))))))
-    {:strategy strategy :children children}))
+          (when (= (:status result) :error)
+            (-watch-local! spec))))
+      pid)))
+
+(defn -watch-remote! [spec]
+  (when (:remote spec)
+    (let [mon-ch (monitor (:remote spec))]
+      (when mon-ch
+        (spawn (fn []
+                 (let [down-msg (<! mon-ch)]
+                   (when (and down-msg (:start spec))
+                     (-watch-local! spec)))))
+        mon-ch))))
+
+(defn supervisor
+  "Start a supervisor for a set of child specs.
+   strategy: :one-for-one (the only supported strategy — restart only the failed child).
+
+   Child spec formats:
+     (fn [] pid)                         — legacy thunk, restarts on crash
+     {:start (fn [] pid)}                — map form, restarts on crash
+     {:start (fn [] pid) :name :kw}      — named; re-registered in registry on restart
+     {:remote remote-pid}                 — watch a remote actor; no local restart
+     {:remote remote-pid :start (fn [])} — watch remote; spawn local replacement on :down
+
+   Returns a map with :strategy, :children (started pids), :specs (normalized)."
+  ([child-specs] (supervisor :one-for-one child-specs))
+  ([strategy child-specs]
+   (let [specs    (map -normalize-spec child-specs)
+         children (into []
+                    (map (fn [spec]
+                           (let [local-pid  (-watch-local! spec)
+                                 mon-ch     (-watch-remote! spec)]
+                             {:pid local-pid :mon-ch mon-ch :spec spec}))
+                         specs))]
+     {:strategy strategy :children children :specs specs})))
 
 ;; ================================================================
 ;; Distributed node API (Phase 2)
