@@ -83,7 +83,15 @@ make install                    # installs to /usr/local
 make install PREFIX=$HOME/.local  # custom prefix
 ```
 
-This places the binary at `$(PREFIX)/bin/beerlang` (a wrapper that sets `BEERPATH` automatically), the real binary at `$(PREFIX)/lib/beerlang/beerlang`, and the standard library at `$(PREFIX)/share/beerlang/lib/`. With `CFFI=1`, `beer-probe` is also installed.
+This places:
+- `$(PREFIX)/bin/beerlang` — REPL/runtime wrapper (sets `BEERPATH`, execs the real binary)
+- `$(PREFIX)/bin/beer` — project tool CLI (`beer new`, `beer run`, `beer build`, `beer ubertar`)
+- `$(PREFIX)/lib/beerlang/beerlang` — the real binary
+- `$(PREFIX)/share/beerlang/lib/` — standard library (including `beer.tools`)
+
+With `CFFI=1`, `beer-probe` is also installed.
+
+> **Note:** The `beer` CLI is currently being redesigned. Subcommand logic has moved from C into `beer.tools` (pure beerlang); the next step is to move dispatch out of the binary entirely into the shell script, so the binary stays a pure runtime. See `TODO.md` for details.
 
 You can also set `BEERPATH` manually to a colon-separated list of directories for library lookup:
 

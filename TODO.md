@@ -243,37 +243,40 @@ changes to user-facing code.
 - [ ] Debugger: breakpoints, stepping, stack inspection
 - [ ] Profiler: sampling or instrumentation-based
 - [ ] Documentation generation (docstrings → HTML/markdown)
+- [ ] **CLI redesign** — see note below
 
 **Design notes:**
-  - The CLI is the same `beerlang` binary with subcommands. Project management is built into
-    the language itself — no external tool (like leiningen, cargo, etc.) is required.
   - Line editing: simplest approach is `rlwrap beerlang` (zero code changes). Built-in
     editing (linenoise or raw terminal) only if needed later.
 
-**Future consideration: separating project management from the core binary**
-  - Currently `new`, `run`, `build`, and `ubertar` are implemented in C in `main.c`.
-    An alternative approach would move them into a beerlang library (`beer.tools`)
-    that the CLI simply delegates to, similar to how Clojure's `clj` wrapper invokes
-    `clojure.main` and `clojure.tools.deps`.
-  - What this would look like:
-    - `beer.tools.new/create-project` — generate skeleton (uses `shell/exec` for mkdir
-      or a new `beer.fs` namespace with `mkdir`, `file-exists?`, etc.)
-    - `beer.tools.project/read-config`, `prepend-load-paths` — move beer.edn parsing to beerlang
-      (currently C `read_beer_edn()`, but `read-string` + `slurp` already exist)
-    - `beer.tools.runner/run-main` — `(require main-ns) (apply (resolve (symbol main-ns "-main")) args)`
-    - The C side would only need: parse argv → find beer.edn → bootstrap load path → eval one form
-  - Trade-offs:
-    - **Pro:** More self-hosted, easier to extend, dogfoods the language
-    - **Pro:** Project management becomes customizable via beerlang code
-    - **Con:** Slower startup (need to compile/load beer.tools before doing anything)
-    - **Con:** Chicken-and-egg: beer.tools needs to be on the load path to load it
-    - **Con:** `beer new` currently doesn't even need runtime init — pure C is fast and dependency-free
-  - A middle ground (like Clojure): keep the binary minimal (`beer <file>`, `beer -m ns`,
-    `beer repl`) and let project management be a library that's invoked via
-    `beer -m beer.tools.cli new myproject`. The binary only needs to know how to
-    find and run a `-main` function — everything else is library code.
-  - **Decision: defer.** Current approach works well. Revisit when the language has
-    a richer filesystem API (`beer.fs`) and startup time is optimized.
+**CLI redesign (in progress)**
+
+Subcommand logic (`new`, `run`, `build`, `ubertar`) has been moved out of C into
+`beer.tools` (pure beerlang). The C binary is now a thin dispatcher. The next step
+is to remove even that dispatch from C and move it entirely into the `beer` shell
+script, so the binary has zero knowledge of subcommands:
+
+```
+beer new myproject
+  → beer (shell script): sees 'new', calls: beerlang -e "(require 'beer.tools) (beer.tools/new-project \"myproject\")"
+  → beerlang binary: evaluates; no subcommand awareness needed
+
+beer run
+  → beer (shell script): sees 'run', calls: beerlang -e "(require 'beer.tools) (beer.tools/run)"
+  → beerlang binary: evaluates; beer.tools/run reads beer.edn, sets up paths, calls -main
+```
+
+Adding a new subcommand would then mean: add a function to `beer.tools` + add a
+`case` in the `beer` shell script — zero C changes.
+
+**Open question:** passing subcommand args (e.g. project name for `beer new`, alias
+for `beer run :test`) through inline `-e` string interpolation is fragile for names
+containing quotes or spaces. Possible solutions:
+- Write args to a temp file, read inside beerlang
+- Add a `-a arg` flag to the binary for passing through structured args
+- Require subcommand args to be valid beerlang identifiers (project names already are)
+
+Defer until dependency/alias support in `beer.edn` clarifies what arg shapes are needed.
 
 ### 6. AOT Compilation
 Ahead-of-time compilation to bytecode — skip the reader+compiler at runtime.
