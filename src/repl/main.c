@@ -248,72 +248,41 @@ static int cmd_eval_exprs(const char** exprs, int n) {
 }
 
 /* ================================================================
- * beer.edn reading
+ * beer.edn reading — used only for REPL startup path setup.
+ * Subcommand implementations live in lib/tools/beer/tools.beer.
  * ================================================================ */
 
 typedef struct {
-    char name[256];
-    char version[64];
-    char main_ns[256];
     char paths[16][256];
     int n_paths;
-} ProjectConfig;
+} ProjectPaths;
 
-static bool read_beer_edn(ProjectConfig* config) {
-    memset(config, 0, sizeof(ProjectConfig));
+static bool read_project_paths(ProjectPaths* out) {
+    memset(out, 0, sizeof(ProjectPaths));
 
     FILE* f = fopen("beer.edn", "r");
     if (!f) return false;
 
-    /* Read entire file */
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
     char* source = malloc(fsize + 1);
+    if (!source) { fclose(f); return false; }
     fread(source, 1, fsize, f);
     source[fsize] = '\0';
     fclose(f);
 
-    /* Parse with the reader */
     Reader* reader = reader_new(source, "beer.edn");
     Value form = reader_read(reader);
-    if (reader_has_error(reader)) {
-        fprintf(stderr, "Error reading beer.edn: %s\n", reader_error_msg(reader));
-        reader_free(reader);
-        free(source);
-        return false;
-    }
+    bool ok = !reader_has_error(reader);
     reader_free(reader);
     free(source);
 
-    if (!is_pointer(form) || object_type(form) != TYPE_HASHMAP) {
-        fprintf(stderr, "beer.edn must be a map\n");
-        object_release(form);
+    if (!ok || !is_pointer(form) || object_type(form) != TYPE_HASHMAP) {
+        if (ok) object_release(form);
         return false;
     }
 
-    /* Extract :name */
-    Value k_name = keyword_intern("name");
-    Value v_name = hashmap_get(form, k_name);
-    if (is_string(v_name)) {
-        snprintf(config->name, sizeof(config->name), "%s", string_cstr(v_name));
-    }
-
-    /* Extract :version */
-    Value k_version = keyword_intern("version");
-    Value v_version = hashmap_get(form, k_version);
-    if (is_string(v_version)) {
-        snprintf(config->version, sizeof(config->version), "%s", string_cstr(v_version));
-    }
-
-    /* Extract :main */
-    Value k_main = keyword_intern("main");
-    Value v_main = hashmap_get(form, k_main);
-    if (is_pointer(v_main) && object_type(v_main) == TYPE_SYMBOL) {
-        snprintf(config->main_ns, sizeof(config->main_ns), "%s", symbol_str(v_main));
-    }
-
-    /* Extract :paths */
     Value k_paths = keyword_intern("paths");
     Value v_paths = hashmap_get(form, k_paths);
     if (is_pointer(v_paths) && object_type(v_paths) == TYPE_VECTOR) {
@@ -322,8 +291,8 @@ static bool read_beer_edn(ProjectConfig* config) {
         for (size_t i = 0; i < n; i++) {
             Value p = vector_get(v_paths, i);
             if (is_string(p)) {
-                snprintf(config->paths[config->n_paths], 256, "%s", string_cstr(p));
-                config->n_paths++;
+                snprintf(out->paths[out->n_paths], 256, "%s", string_cstr(p));
+                out->n_paths++;
             }
         }
     }
@@ -332,8 +301,7 @@ static bool read_beer_edn(ProjectConfig* config) {
     return true;
 }
 
-/* Prepend project paths to *load-path* */
-static void prepend_load_paths(ProjectConfig* config) {
+static void prepend_load_paths(ProjectPaths* pp) {
     Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
     if (!core_ns) return;
 
@@ -342,158 +310,45 @@ static void prepend_load_paths(ProjectConfig* config) {
     if (!lp_var) return;
 
     Value old_lp = var_get_value(lp_var);
-    Value new_lp = vector_create(config->n_paths + (int)vector_length(old_lp));
+    Value new_lp = vector_create(pp->n_paths + (int)vector_length(old_lp));
 
-    /* Add project paths first */
-    for (int i = 0; i < config->n_paths; i++) {
+    for (int i = 0; i < pp->n_paths; i++) {
         char buf[512];
-        size_t len = strlen(config->paths[i]);
-        if (len > 0 && config->paths[i][len-1] == '/') {
-            snprintf(buf, sizeof(buf), "%s", config->paths[i]);
-        } else {
-            snprintf(buf, sizeof(buf), "%s/", config->paths[i]);
-        }
+        size_t len = strlen(pp->paths[i]);
+        snprintf(buf, sizeof(buf), "%s%s", pp->paths[i],
+                 (len > 0 && pp->paths[i][len-1] == '/') ? "" : "/");
         Value s = string_from_cstr(buf);
         vector_push(new_lp, s);
         object_release(s);
     }
-
-    /* Then existing paths */
     size_t n = vector_length(old_lp);
-    for (size_t i = 0; i < n; i++) {
-        vector_push(new_lp, vector_get(old_lp, i));
-    }
+    for (size_t i = 0; i < n; i++) vector_push(new_lp, vector_get(old_lp, i));
 
     var_set_value(lp_var, new_lp);
     object_release(new_lp);
 }
 
 /* ================================================================
- * Subcommand: beer new <name>
+ * Subcommands — all delegate to beer.tools (lib/tools/beer/tools.beer)
  * ================================================================ */
-
-static int mkdirp(const char* path) {
-    char tmp[1024];
-    snprintf(tmp, sizeof(tmp), "%s", path);
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755);
-            *p = '/';
-        }
-    }
-    return mkdir(tmp, 0755);
-}
 
 static int cmd_new(const char* dir) {
-    /* Extract project name from the last path component */
-    const char* name = strrchr(dir, '/');
-    name = name ? name + 1 : dir;
-
-    /* Create directory structure */
-    char path[1024];
-
-    /* Convert dots to slashes for nested source dirs */
-    char ns_path[256];
-    snprintf(ns_path, sizeof(ns_path), "%s", name);
-    for (char* p = ns_path; *p; p++) {
-        if (*p == '.') *p = '/';
-    }
-
-    snprintf(path, sizeof(path), "%s/src/%s", dir, ns_path);
-    mkdirp(path);
-    snprintf(path, sizeof(path), "%s/lib", dir);
-    mkdirp(path);
-    snprintf(path, sizeof(path), "%s/test", dir);
-    mkdirp(path);
-
-    /* Write beer.edn */
-    snprintf(path, sizeof(path), "%s/beer.edn", dir);
-    FILE* f = fopen(path, "w");
-    if (!f) {
-        fprintf(stderr, "Error: cannot create %s: %s\n", path, strerror(errno));
-        return 1;
-    }
-    fprintf(f, "{:name \"%s\"\n :version \"0.1.0\"\n :paths [\"src\" \"lib\"]\n :dependencies []\n :main %s.core}\n", name, name);
-    fclose(f);
-
-    /* Write src/<name>/core.beer */
-    snprintf(path, sizeof(path), "%s/src/%s/core.beer", dir, ns_path);
-    f = fopen(path, "w");
-    if (!f) {
-        fprintf(stderr, "Error: cannot create %s: %s\n", path, strerror(errno));
-        return 1;
-    }
-    fprintf(f, "(ns %s.core)\n\n(defn -main []\n  (println \"Hello from %s!\"))\n", name, name);
-    fclose(f);
-
-    printf("Created project: %s\n", name);
-    printf("  %s/\n", dir);
-    printf("  ├── beer.edn\n");
-    printf("  ├── src/%s/core.beer\n", ns_path);
-    printf("  ├── lib/\n");
-    printf("  └── test/\n");
-    return 0;
-}
-
-/* ================================================================
- * Subcommand: beer run
- * ================================================================ */
-
-static int cmd_run(void) {
-    ProjectConfig config;
-    if (!read_beer_edn(&config)) {
-        fprintf(stderr, "Error: beer.edn not found in current directory\n");
-        return 1;
-    }
-    if (config.main_ns[0] == '\0') {
-        fprintf(stderr, "Error: :main not specified in beer.edn\n");
-        return 1;
-    }
-
-    prepend_load_paths(&config);
-
-    /* Build expression: (do (require 'main.ns) (main.ns/-main)) */
     char expr[1024];
     snprintf(expr, sizeof(expr),
-             "(do (require '%s) (%s/-main))", config.main_ns, config.main_ns);
-
-    return eval_form(expr, "<beer run>");
+             "(do (require 'beer.tools) (beer.tools/new-project \"%s\"))", dir);
+    return eval_form(expr, "<beer new>");
 }
 
-/* ================================================================
- * Subcommand: beer build / beer ubertar
- * ================================================================ */
+static int cmd_run(void) {
+    return eval_form("(do (require 'beer.tools) (beer.tools/run))", "<beer run>");
+}
 
 static int cmd_build(void) {
-    ProjectConfig config;
-    if (!read_beer_edn(&config)) {
-        fprintf(stderr, "Error: beer.edn not found in current directory\n");
-        return 1;
-    }
-
-    prepend_load_paths(&config);
-
-    /* Delegate to beer.tools/build */
-    char expr[2048];
-    snprintf(expr, sizeof(expr),
-             "(do (require 'beer.tools) (beer.tools/build))");
-    return eval_form(expr, "<beer build>");
+    return eval_form("(do (require 'beer.tools) (beer.tools/build))", "<beer build>");
 }
 
 static int cmd_ubertar(void) {
-    ProjectConfig config;
-    if (!read_beer_edn(&config)) {
-        fprintf(stderr, "Error: beer.edn not found in current directory\n");
-        return 1;
-    }
-
-    prepend_load_paths(&config);
-
-    char expr[2048];
-    snprintf(expr, sizeof(expr),
-             "(do (require 'beer.tools) (beer.tools/ubertar))");
-    return eval_form(expr, "<beer ubertar>");
+    return eval_form("(do (require 'beer.tools) (beer.tools/ubertar))", "<beer ubertar>");
 }
 
 /* ================================================================
@@ -772,13 +627,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    /* 'new' doesn't need full runtime init */
-    if (subcommand && strcmp(subcommand, "new") == 0) {
-        if (!subcmd_arg) {
-            fprintf(stderr, "Usage: beer new <project-name>\n");
-            return 1;
-        }
-        return cmd_new(subcmd_arg);
+    if (subcommand && strcmp(subcommand, "new") == 0 && !subcmd_arg) {
+        fprintf(stderr, "Usage: beer new <project-name>\n");
+        return 1;
     }
 
     /* Initialize systems */
@@ -811,8 +662,9 @@ int main(int argc, char** argv) {
         vm_free(vm);
         object_release(path_str);
     } else if (subcommand) {
-        /* Try to load beer.edn for project-aware commands */
-        if (strcmp(subcommand, "run") == 0) {
+        if (strcmp(subcommand, "new") == 0) {
+            result = cmd_new(subcmd_arg);
+        } else if (strcmp(subcommand, "run") == 0) {
             result = cmd_run();
         } else if (strcmp(subcommand, "build") == 0) {
             result = cmd_build();
@@ -824,8 +676,8 @@ int main(int argc, char** argv) {
             result = cmd_check(subcmd_arg);
         } else if (strcmp(subcommand, "repl") == 0) {
             /* Project REPL — load paths from beer.edn if present */
-            ProjectConfig config;
-            if (read_beer_edn(&config)) {
+            ProjectPaths config;
+            if (read_project_paths(&config)) {
                 prepend_load_paths(&config);
             }
             result = run_repl();
@@ -836,8 +688,8 @@ int main(int argc, char** argv) {
         }
     } else {
         /* Default: REPL, optionally with project paths */
-        ProjectConfig config;
-        if (read_beer_edn(&config)) {
+        ProjectPaths config;
+        if (read_project_paths(&config)) {
             prepend_load_paths(&config);
         }
         result = run_repl();

@@ -155,20 +155,21 @@ $(BIN_DIR)/test_%: $(TEST_DIR)/%.c $(OBJS) $(VENDOR_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $< $(filter-out $(BUILD_DIR)/repl/main.o,$(OBJS)) $(VENDOR_OBJS) $(LDFLAGS)
 
-# Tools tar
+# Tools tar — rebuilt whenever tools.beer changes
 lib/tools.tar: lib/tools/beer/tools.beer
 	cd lib/tools && COPYFILE_DISABLE=1 tar cf ../tools.tar beer/tools.beer
 
 # Install
 # Installs the binary and standard library under PREFIX (default /usr/local).
-# The real binary goes to $(LIBEXECDIR)/beerlang; a generated wrapper at
-# $(BINDIR)/beerlang sets BEERPATH and exec's it — no manual env setup needed.
+#
+#   beerlang   — REPL/script runner (wrapper that sets BEERPATH + execs binary)
+#   beer       — project tool CLI (subcommand dispatch → beer.tools)
 #
 # Examples:
 #   make install                       # → /usr/local
 #   make install PREFIX=/opt/beerlang
 #   make install PREFIX=$$HOME/.local
-install: $(BIN_DIR)/beerlang
+install: $(BIN_DIR)/beerlang lib/tools.tar
 	@echo "Installing beerlang to $(PREFIX)..."
 	install -d $(BINDIR) $(LIBEXECDIR) $(SHAREDIR)/lib
 	install -m 755 $(BIN_DIR)/beerlang $(LIBEXECDIR)/beerlang
@@ -179,11 +180,27 @@ install: $(BIN_DIR)/beerlang
 	  echo 'exec "$(LIBEXECDIR)/beerlang" "$$@"'; \
 	} > $(BINDIR)/beerlang
 	chmod 755 $(BINDIR)/beerlang
+	@{ \
+	  echo '#!/bin/sh'; \
+	  echo '# beer — beerlang project tool'; \
+	  echo '# Subcommands are implemented in beer.tools ($(SHAREDIR)/lib/tools/).'; \
+	  echo '# Adding a directory earlier in BEERPATH overrides any bundled library.'; \
+	  echo '_BEER_BIN="$(LIBEXECDIR)/beerlang"'; \
+	  echo 'export BEERPATH="$(SHAREDIR)/lib"'; \
+	  echo 'case "$$1" in'; \
+	  echo '  new|run|build|ubertar)'; \
+	  echo '    exec "$$_BEER_BIN" "$$@";;'; \
+	  echo '  *)'; \
+	  echo '    exec "$$_BEER_BIN" "$$@";;'; \
+	  echo 'esac'; \
+	} > $(BINDIR)/beer
+	chmod 755 $(BINDIR)/beer
 	install -m 755 scripts/beer-probe $(BINDIR)/beer-probe
 	@echo ""
-	@echo "  binary:   $(BINDIR)/beerlang"
+	@echo "  binary:     $(BINDIR)/beerlang"
+	@echo "  beer:       $(BINDIR)/beer"
 	@echo "  beer-probe: $(BINDIR)/beer-probe"
-	@echo "  library:  $(SHAREDIR)/lib"
+	@echo "  library:    $(SHAREDIR)/lib"
 	@echo ""
 	@echo "Make sure $(BINDIR) is in your PATH."
 
@@ -191,6 +208,7 @@ install: $(BIN_DIR)/beerlang
 uninstall:
 	@echo "Removing beerlang from $(PREFIX)..."
 	rm -f  $(BINDIR)/beerlang
+	rm -f  $(BINDIR)/beer
 	rm -f  $(BINDIR)/beer-probe
 	rm -rf $(LIBEXECDIR)
 	rm -rf $(SHAREDIR)
