@@ -13,7 +13,7 @@ ifeq ($(CFFI),1)
     EXTRA_LDFLAGS += -lffi
   else
     EXTRA_CFLAGS  += -DBEER_CFFI $(shell pkg-config --cflags libffi 2>/dev/null)
-    EXTRA_LDFLAGS += $(shell pkg-config --libs libffi 2>/dev/null || echo -lffi)
+    EXTRA_LDFLAGS += $(shell pkg-config --libs libffi 2>/dev/null || echo -lffi) -ldl
   endif
 endif
 
