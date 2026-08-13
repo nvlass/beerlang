@@ -25,6 +25,10 @@ Beerlang is a Clojure-syntax LISP compiled to bytecode and executed on a stack-b
 
 Beerlang now has a site! https://beerlang.dev
 
+## Beer/OS
+
+And a fun "bare-metal" implementation -- https://github.com/nvlass/beeros
+
 ## Quick taste
 
 ```clojure
