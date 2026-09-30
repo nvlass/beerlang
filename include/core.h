@@ -62,6 +62,10 @@ void core_register_bits(void);
  * in beer.crypto namespace */
 void core_register_crypto(void);
 
+/* Register beer.bytes namespace (mutable ByteBuffer: alloc, cursor ops,
+ * endian-aware accessors, bulk copy/blit, hex dump) */
+void core_register_bytes(void);
+
 /* Load and execute a beerlang source file */
 #include "value.h"
 #include "vm.h"

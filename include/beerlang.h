@@ -28,6 +28,7 @@ typedef struct VM VM;
 #include "memory.h"
 #include "bigint.h"
 #include "bstring.h"
+#include "bytebuffer.h"
 #include "symbol.h"
 #include "cons.h"
 #include "vector.h"

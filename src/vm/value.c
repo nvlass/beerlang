@@ -102,6 +102,9 @@ void value_print(Value v) {
                 printf(">");
                 break;
             }
+            case TYPE_BYTEBUFFER:
+                printf("#<bytebuffer %zu>", bytebuffer_capacity(v));
+                break;
 #ifdef BEER_CFFI
             case TYPE_CPOINTER:
                 printf("#<cpointer %p>", cpointer_get(v));
@@ -227,6 +230,9 @@ void value_print_readable(Value v) {
                 fprintf(PR_OUT, ">");
                 break;
             }
+            case TYPE_BYTEBUFFER:
+                fprintf(PR_OUT, "#<bytebuffer %zu>", bytebuffer_capacity(v));
+                break;
 #ifdef BEER_CFFI
             case TYPE_CPOINTER:
                 fprintf(PR_OUT, "#<cpointer %p>", cpointer_get(v));

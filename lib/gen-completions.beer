@@ -1,2 +1,0 @@
-(doseq [sym (ns-publics 'beer.core)]
-  (println sym))

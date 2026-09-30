@@ -127,6 +127,28 @@
 - `doc` macro for printing documentation
 - `__print-doc` native for formatted output
 
+### ByteBuffer (`beer.bytes`) — COMPLETE
+- `TYPE_BYTEBUFFER` heap type: mutable, non-UTF8-validated binary buffer,
+  NIO-style position/limit cursor (`src/types/bytebuffer.c`)
+- Driven by beeros driver work (virtio-blk/virtio-input/virtio-gpu need a
+  real mutable byte type) — full design in `docs/beerlang-bytebuffer.md`
+  in the beeros repo
+- Construction/cursor: `alloc`, `from-string`, `capacity`, `position`/`!`,
+  `limit`/`!`, `remaining`, `rewind!`, `clear!`, `flip!`
+- Absolute accessors (bounds-checked vs. capacity): `u8`/`i8` and
+  `u16/u32/u64` × `le`/`be`, signed + unsigned, plus `!` setters
+- Relative accessors (bounds-checked vs. limit, advance position):
+  `get-`/`put-!` for u8/u16le/u16be/u32le/u32be/u64le/u64be
+- Bulk: `fill!`, `copy!` (buffer↔buffer), `blit-from-addr!`/`blit-to-addr!`
+  (raw pointer↔buffer, same trust model as CFFI), `slice` (always a copy —
+  no aliasing in v1), `->string`/`->string-lossy`, `hex`
+- DMA: `addr` — raw pointer to `data[0]`
+- No opcode/compiler/reader changes — pure native-function surface
+- `tests/types/test_bytebuffer.c`; verified end-to-end at the REPL
+- **Not yet wired**: beeros's `mem/addr-of` dispatching on ByteBuffer
+  alongside String — follow-up once beeros driver work (post-filesystem)
+  actually needs it
+
 ---
 
 ## Near-term TODO (priority order)
@@ -355,6 +377,27 @@ Erlang-inspired distributed computing for beerlang. Design goal: pure beerlang l
 - ~304 occurrences to rename (purely mechanical)
 - Separate GitHub repo
 - Do after reaching a "complete" release
+
+### 12. "This would be fun" — C → Beerlang backend
+Not a real plan, just an itch to maybe scratch someday. Idea: compile a
+restricted subset of C down to beerlang, targeting either the VM's bytecode
+directly or an LLVM IR frontend feeding a custom backend.
+
+**Not a CFFI replacement** — different axis entirely. CFFI is the low-level
+work force: it calls into real, already-compiled C (GMP, ncurses, whatever)
+across a boundary. This idea is about running C *source* as beerlang, with
+no boundary at all. The two are complementary, not competing.
+
+- **Full LLVM IR backend is likely not worth it** — LLVM backends assume a
+  conventional target: flat memory, fixed-width registers, static types,
+  load/store semantics. Beerlang's VM is dynamically-typed, refcounted,
+  tagged-value, arbitrary-precision-by-default. Every pointer becomes a GC'd
+  heap object, every arithmetic op needs overflow-to-bigint boxing checks —
+  closer to "target WASM from LLVM" but without WASM's flat/static memory
+  model to lean on.
+- **More realistic version**: a small transpiler for a restricted C subset
+  (no raw pointer arithmetic, no unions, fixed type set) straight to
+  beerlang source or bytecode — Emscripten-flavored, not backend-flavored.
 
 ## Known Issues
 
