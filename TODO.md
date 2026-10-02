@@ -155,19 +155,23 @@ bugs masked each other, so they had to be fixed together:
 - Result: `examples/embedded_http` is ASAN-clean under load, live heap flat
   across 45k requests (was 18 leaked blocks per request).
 
+**Done since:** interned symbols/keywords are now immortal
+(`REFCOUNT_IMMORTAL`, set in `intern_value`; `symbol_shutdown` restores a
+normal count to free them), so a stray retain/release on one is a no-op.
+That removes this whole bug class, including a pre-existing shutdown-only
+use-after-free (`read-string` returned a borrowed symbol that
+`task_destroy` released). The `beer_release` special case is gone again.
+The full smoke suite under ASAN now reports no memory errors.
+`MEMORY_MODEL.md` no longer documents the nonexistent
+`value_release`/`value_retain`.
+
 **Follow-ups found along the way (not fixed):**
-- Interned symbols/keywords should be immortal (`REFCOUNT_IMMORTAL`) so
-  any stray release is harmless. That would remove this whole bug class,
-  including a pre-existing shutdown-only use-after-free (`read-string`
-  returns a borrowed symbol that `task_destroy` releases, so
-  `symbol_shutdown` touches freed memory).
 - `function_new_closure` stores the arity in `header.size`, which the free
   path uses for byte accounting; that's why "Bytes still allocated" at REPL
   exit is a huge underflowed number.
 - The Makefile has no header dependency tracking (`-MMD`): changing a
   struct in a header leaves stale objects that segfault. Needs a clean build.
 - UBSan: signed left shift in `read_int64` (`src/vm/vm.c:215`).
-- `docs/design/MEMORY_MODEL.md` documents a `value_release()` that doesn't exist.
 
 ### Persistent Vectors — COMPLETE
 - Clojure-style 32-way bit-partitioned trie + tail (`src/types/vector.c`),

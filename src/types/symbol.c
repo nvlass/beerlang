@@ -68,33 +68,34 @@ void symbol_init(void) {
     }
 }
 
+/* Interned values are immortal, so object_release alone is a no-op: give
+ * the table's reference back a normal count so the release frees it. */
+static void free_interned(Value v) {
+    ((struct Object*)untag_pointer(v))->refcount = 1;
+    object_release(v);
+}
+
+static void free_table(InternEntry** table, size_t table_size) {
+    for (size_t i = 0; i < table_size; i++) {
+        InternEntry* entry = table[i];
+        while (entry) {
+            InternEntry* next = entry->next;
+            free_interned(entry->value);
+            free(entry);
+            entry = next;
+        }
+    }
+    free(table);
+}
+
 /* Shutdown and free interning tables */
 void symbol_shutdown(void) {
     if (g_symbol_table) {
-        for (size_t i = 0; i < g_symbol_table_size; i++) {
-            InternEntry* entry = g_symbol_table[i];
-            while (entry) {
-                InternEntry* next = entry->next;
-                object_release(entry->value);  /* Release interned value */
-                free(entry);
-                entry = next;
-            }
-        }
-        free(g_symbol_table);
+        free_table(g_symbol_table, g_symbol_table_size);
         g_symbol_table = NULL;
     }
-
     if (g_keyword_table) {
-        for (size_t i = 0; i < g_keyword_table_size; i++) {
-            InternEntry* entry = g_keyword_table[i];
-            while (entry) {
-                InternEntry* next = entry->next;
-                object_release(entry->value);  /* Release interned value */
-                free(entry);
-                entry = next;
-            }
-        }
-        free(g_keyword_table);
+        free_table(g_keyword_table, g_keyword_table_size);
         g_keyword_table = NULL;
     }
 }
@@ -153,8 +154,11 @@ static Value intern_value(uint8_t type, InternEntry*** table, size_t* table_size
         entry = entry->next;
     }
 
-    /* Not found - create new symbol/keyword */
+    /* Not found - create new symbol/keyword. Immortal: interned values live
+     * until symbol_shutdown, so retain/release on them become no-ops and a
+     * stray release can never free a live interned object. */
     Value value = create_symbol_object(type, ns, name, hash);
+    object_make_immortal(value);
 
     /* Add to table */
     entry = malloc(sizeof(InternEntry));
@@ -162,8 +166,6 @@ static Value intern_value(uint8_t type, InternEntry*** table, size_t* table_size
     entry->next = (*table)[index];
     (*table)[index] = entry;
     (*count)++;
-
-    /* Don't retain - the table holds the only reference (refcount starts at 1) */
 
     return value;
 }

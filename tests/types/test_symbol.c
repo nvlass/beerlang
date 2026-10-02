@@ -222,14 +222,22 @@ TEST(symbol_memory_management) {
 
     MemoryStats after_alloc = memory_stats();
 
-    /* Interned values have refcount = 1 (held by interning table) */
-    ASSERT_EQ(object_refcount(sym), 1, "Interned symbol should have refcount 1");
-    ASSERT_EQ(object_refcount(kw), 1, "Interned keyword should have refcount 1");
+    /* Interned values are immortal: retain/release are no-ops */
+    ASSERT(object_refcount(sym) == REFCOUNT_IMMORTAL, "Interned symbol should be immortal");
+    ASSERT(object_refcount(kw) == REFCOUNT_IMMORTAL, "Interned keyword should be immortal");
 
     /* Objects are alive */
     ASSERT(after_alloc.objects_alive > initial.objects_alive, "Objects should be allocated");
 
-    /* Note: Users should NOT release interned symbols/keywords - they live until shutdown */
+    /* A stray release (or unbalanced retain) must not free or leak them */
+    for (int i = 0; i < 10; i++) {
+        object_release(sym);
+        object_release(kw);
+    }
+    object_retain(sym);
+    ASSERT(object_refcount(sym) == REFCOUNT_IMMORTAL, "Still immortal after stray ops");
+    ASSERT(value_identical(symbol_intern("test-symbol"), sym), "Still interned after stray releases");
+    ASSERT_EQ(memory_stats().objects_alive, after_alloc.objects_alive, "Nothing freed by stray releases");
 
     /* Shutdown releases interned values */
     symbol_shutdown();

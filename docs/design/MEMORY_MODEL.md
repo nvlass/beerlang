@@ -49,25 +49,25 @@ These values have `tag = TAG_OBJECT` and point to heap objects:
 
 | Type | Type Code | Storage | Memory Management |
 |------|-----------|---------|-------------------|
-| Bigint | `0x01` | Object + mpz_t | **Refcounted** - call `value_release()` |
-| Float | `0x02` | Object + double | **Refcounted** - call `value_release()` |
-| String | `0x12` | Object + UTF-8 data | **Refcounted** - call `value_release()` |
-| Symbol | `0x10` | Object + name data | **Interned** - never release |
-| Keyword | `0x11` | Object + name data | **Interned** - never release |
-| Cons | `0x20` | Object + car/cdr Values | **Refcounted** - call `value_release()` |
-| Vector | `0x21` | Object + trie root/tail (persistent) | **Refcounted** - call `value_release()` |
+| Bigint | `0x01` | Object + mpz_t | **Refcounted** - call `object_release()` |
+| Float | `0x02` | Object + double | **Refcounted** - call `object_release()` |
+| String | `0x12` | Object + UTF-8 data | **Refcounted** - call `object_release()` |
+| Symbol | `0x10` | Object + name data | **Immortal** (interned) - release is a no-op |
+| Keyword | `0x11` | Object + name data | **Immortal** (interned) - release is a no-op |
+| Cons | `0x20` | Object + car/cdr Values | **Refcounted** - call `object_release()` |
+| Vector | `0x21` | Object + trie root/tail (persistent) | **Refcounted** - call `object_release()` |
 | VecNode | `0x82` | Object + Value slots (internal, never exposed) | **Refcounted** - shared between vectors |
-| HashMap | `0x22` | Object + hash table | **Refcounted** - call `value_release()` |
-| Function | `0x30` | Object + bytecode refs + closed[] | **Refcounted** - call `value_release()` |
-| NativeFunction | `0x31` | Object + C fn pointer | **Refcounted** - call `value_release()` |
-| Var | `0x40` | Object + name + value | **Refcounted** - call `value_release()` |
-| Namespace | `0x08` | Object + name + vars map | **Refcounted** - call `value_release()` |
+| HashMap | `0x22` | Object + hash table | **Refcounted** - call `object_release()` |
+| Function | `0x30` | Object + bytecode refs + closed[] | **Refcounted** - call `object_release()` |
+| NativeFunction | `0x31` | Object + C fn pointer | **Refcounted** - call `object_release()` |
+| Var | `0x40` | Object + name + value | **Refcounted** - call `object_release()` |
+| Namespace | `0x08` | Object + name + vars map | **Refcounted** - call `object_release()` |
 
 **Example:**
 ```c
 Value str = string_from_cstr("hello");  // Allocates on heap, refcount = 1
 // str.tag = TAG_OBJECT, str.as.object -> String on heap
-value_release(str);  // Decrement refcount, free when it reaches 0
+object_release(str);  // Decrement refcount, free when it reaches 0
 ```
 
 ## Object Header
@@ -94,29 +94,29 @@ struct Object {
 
 2. **Sharing**: Call `object_retain()` when storing in another structure
    ```c
-   object_retain(obj.as.object);  // refcount = 2
+   object_retain(obj);  // refcount = 2
    ```
 
-3. **Release**: Call `object_release()` (via `value_release()`) when done
+3. **Release**: Call `object_release()` when done
    ```c
-   value_release(obj);  // refcount--, free when it reaches 0
+   object_release(obj);  // refcount--, free when it reaches 0
    ```
 
 ### For Interned Objects (Symbol, Keyword)
 
-**Do NOT call `object_release()` on symbols/keywords!**
+**Interned values are immortal** (`REFCOUNT_IMMORTAL`):
 
-- Interned values are created once and live until program shutdown
+- Created once by `symbol_intern`/`keyword_intern`, live until `symbol_shutdown`
 - Same name always returns same pointer
-- Their refcount is managed by the intern table, not by callers
+- `object_retain`/`object_release` on them are no-ops, so callers never need
+  to track them — and a stray release can't free a live interned object
 
 ```c
-Value sym1 = symbol_intern("foo", NULL);  // Creates and interns
-Value sym2 = symbol_intern("foo", NULL);  // Returns same object
+Value sym1 = symbol_intern("foo");  // Creates, interns, marks immortal
+Value sym2 = symbol_intern("foo");  // Returns same object
 // sym1.as.object == sym2.as.object  (pointer equality)
 
-// Do NOT release:
-// value_release(sym1);  // WRONG! Never do this
+object_release(sym1);  // harmless no-op
 ```
 
 ### For Immediate Values (Fixnum, Character, nil, true, false)
@@ -145,36 +145,30 @@ The VM stack **does** perform reference counting:
 **STORE_LOCAL**: Retain the new value BEFORE releasing the old:
 ```c
 // CORRECT:
-value_retain(new_val);       // new_val might be sub-object of old
-value_release(old_val);      // safe to release now
+object_retain(new_val);       // new_val might be sub-object of old
+object_release(old_val);      // safe to release now
 locals[slot] = new_val;
 
 // WRONG:
-value_release(old_val);      // might free new_val if it's a sub-object!
-value_retain(new_val);       // too late - may be dangling
+object_release(old_val);      // might free new_val if it's a sub-object!
+object_retain(new_val);       // too late - may be dangling
 ```
 
 **RETURN**: Retain the return value before cleaning up locals:
 ```c
 Value ret = vm_pop(vm);      // pop return value
-value_retain(ret);           // protect it
+object_retain(ret);           // protect it
 // ... release all locals and args in cleanup loop ...
 vm_push(vm, ret);            // push to caller's stack
-value_release(ret);          // balance the extra retain
+object_release(ret);          // balance the extra retain
 ```
 
 ## Memory Management Helpers
 
-```c
-// value_release handles the tag check internally:
-void value_release(Value v) {
-    if (v.tag != TAG_OBJECT) return;        // immediate - nothing to do
-    Object* obj = v.as.object;
-    uint8_t type = obj->type & 0xFF;
-    if (type == TYPE_SYMBOL || type == TYPE_KEYWORD) return;  // interned
-    object_release(obj);                     // decrement refcount
-}
-```
+`object_retain`/`object_release` (`src/memory/alloc.c`) take any `Value`:
+immediates are ignored, immortal objects (interned symbols/keywords, function
+templates) are ignored, everything else is counted. When a count reaches
+zero, the type's registered destructor runs, then the object is freed.
 
 ## Common Patterns
 
@@ -190,8 +184,8 @@ Value create_something(void) {
 ### Storing in a Structure
 ```c
 void set_field(MyStruct* s, Value new_val) {
-    value_retain(new_val);       // Retain new FIRST
-    value_release(s->field);     // Release old SECOND
+    object_retain(new_val);       // Retain new FIRST
+    object_release(s->field);     // Release old SECOND
     s->field = new_val;
 }
 ```
@@ -201,7 +195,7 @@ void set_field(MyStruct* s, Value new_val) {
 void example(void) {
     Value temp = string_from_cstr("temporary");  // refcount = 1
     // Use temp...
-    value_release(temp);  // Free when done
+    object_release(temp);  // Free when done
 }
 ```
 

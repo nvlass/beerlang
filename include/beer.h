@@ -141,10 +141,10 @@ static inline BeerValue beer_nil(void)          { return VALUE_NIL; }
 BeerValue beer_string(const char* s);
 
 /* Return an interned keyword (":name" — do not include the colon).
- * Borrowed from the intern table: do not release. */
+ * Immortal: no need to release (releasing is a harmless no-op). */
 BeerValue beer_keyword(const char* name);
 
-/* Return an interned symbol. Borrowed from the intern table: do not release. */
+/* Return an interned symbol. Immortal, like beer_keyword. */
 BeerValue beer_symbol(const char* name);
 
 /* ------------------------------------------------------------------ */
@@ -201,17 +201,10 @@ BeerValue beer_get(BeerValue map, BeerValue key);
 void object_retain(Value v);
 void object_release(Value v);
 
-/* beer_keyword/beer_symbol return interned values owned by the intern
- * table: never release them. beer_release ignores symbols and keywords so
- * that releasing one by mistake can't free a live interned object (they
- * live until shutdown, so an unmatched retain on one is harmless). */
+/* Interned symbols/keywords (beer_keyword, beer_symbol) are immortal:
+ * retaining or releasing them is a harmless no-op. */
 static inline void beer_retain (BeerValue v) { if (is_pointer(v)) object_retain(v);  }
-static inline void beer_release(BeerValue v) {
-    if (!is_pointer(v)) return;
-    uint8_t t = object_type(v);
-    if (t == TYPE_SYMBOL || t == TYPE_KEYWORD) return;
-    object_release(v);
-}
+static inline void beer_release(BeerValue v) { if (is_pointer(v)) object_release(v); }
 
 #ifdef __cplusplus
 }
