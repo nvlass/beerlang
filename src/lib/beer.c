@@ -284,7 +284,7 @@ BeerValue beer_call(BeerState* B, BeerValue fn, int argc, BeerValue* argv) {
     Value* constants = malloc((size_t)(n_constants) * sizeof(Value));
     for (int i = 0; i < argc; i++) constants[i] = argv[i];
     constants[argc] = fn;
-    /* Retain each constant so the task owns them */
+    /* Keep fn and args alive for the duration of the call (released below) */
     for (int i = 0; i < n_constants; i++) beer_retain(constants[i]);
 
     /* Bytecode: PUSH_CONST for each arg, PUSH_CONST for fn, CALL argc, HALT */
@@ -326,7 +326,13 @@ BeerValue beer_call(BeerState* B, BeerValue fn, int argc, BeerValue* argv) {
 
     object_release(task_val);
     free(code);
-    /* constants are owned by the task (task_new_from_code takes ownership) */
+    /* task_new_from_code copies the constants array and borrows its values
+     * (task_destroy frees the copy without releasing them), so the retains
+     * above are ours to undo, and the original array is ours to free. */
+    for (int i = 0; i < n_constants; i++) {
+        if (is_pointer(constants[i])) object_release(constants[i]);
+    }
+    free(constants);
 
     return result;
 }

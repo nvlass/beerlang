@@ -1228,37 +1228,28 @@ void vm_step(VM* vm) {
             int args_start = vm->stack_pointer - (int)n_args - 1;
             int frame_base = frame->base_pointer;
 
-            /* Release extra locals beyond params (e.g. self-ref slot in named fn) */
-            for (int i = frame_base + (int)n_args; i < args_start; i++) {
+            /* Release everything the old frame owns: its params, locals and
+             * temporaries, i.e. exactly [frame_base, args_start). Releasing
+             * per target slot while moving would be wrong: when the new call
+             * has more args than the old frame had slots, target slots
+             * overlap source arg slots that were already moved. */
+            for (int i = frame_base; i < args_start; i++) {
                 if (is_pointer(vm->stack[i])) {
                     object_release(vm->stack[i]);
                 }
             }
 
-            /* Copy new arguments over old frame (skip function) */
+            /* Move the new arguments down; references transfer as-is. */
             for (int i = 0; i < (int)n_args; i++) {
-                Value v = vm->stack[args_start + i];
-                /* Release old value at target position */
-                if (frame_base + i < vm->stack_pointer) {
-                    if (is_pointer(vm->stack[frame_base + i])) {
-                        object_release(vm->stack[frame_base + i]);
-                    }
-                }
-                vm->stack[frame_base + i] = v;
-                /* Don't retain - we're moving the reference */
+                vm->stack[frame_base + i] = vm->stack[args_start + i];
             }
-
-            /* Adjust stack pointer (just the args, no function) */
             vm->stack_pointer = frame_base + n_args;
 
-            /* Update frame function (release old, retain new) */
+            /* The frame takes over the stack slot's reference to fn. */
             if (is_pointer(frame->function)) {
                 object_release(frame->function);
             }
             frame->function = fn;
-            if (is_pointer(fn)) {
-                object_retain(fn);
-            }
 
             /* Switch to function's bytecode and constants if available */
             if (function_get_code(fn) != NULL) {
@@ -1692,6 +1683,11 @@ void vm_step(VM* vm) {
                                                   n_closed, closed_values, fn_name);
 
             if (closed_values) {
+                /* function_new_closure retained what it captured; drop the
+                 * temporary retains taken above to survive the pops. */
+                for (int i = 0; i < (int)n_closed; i++) {
+                    if (is_pointer(closed_values[i])) object_release(closed_values[i]);
+                }
                 free(closed_values);
             }
 
@@ -1713,7 +1709,9 @@ void vm_step(VM* vm) {
                 }
             }
 
+            /* vm_push retains; the stack now holds the only reference */
             vm_push(vm, closure);
+            object_release(closure);
             break;
         }
 

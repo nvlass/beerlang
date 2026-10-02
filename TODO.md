@@ -127,6 +127,48 @@
 - `doc` macro for printing documentation
 - `__print-doc` native for formatted output
 
+### Refcount fixes: closures, tail calls, spawn, embedding — COMPLETE
+Found via a crash in `examples/embedded_http` under `wrk` load. Several
+bugs masked each other, so they had to be fixed together:
+- `OP_MAKE_CLOSURE` never released its allocation reference after
+  `vm_push`, and kept an extra retain on every captured value: every
+  closure with captures leaked, together with everything it captured.
+- That leak hid an over-release in `OP_TAIL_CALL`: when the new call has
+  more args than the old frame had slots, slots already moved were
+  released again. Its `fn` stack reference also leaked. Rewritten to
+  release exactly `[frame_base, args_start)`, then move args down, with
+  the frame inheriting the stack's reference to `fn`.
+- It also hid that `task_new` borrowed `fn`/args without retaining them:
+  a spawned task runs after the spawner drops its references. Tasks now
+  retain what they store (`owns_constant_values`). The task-watch
+  workaround that compensated for the old borrow was removed.
+- `task_destroy` freed `vm->code`/`vm->constants`, which the VM swaps on
+  every call, so a task ending inside a callee freed someone else's
+  arrays: the pre-existing double frees in `task_destroy` and
+  `compiled_code_free` seen under ASAN. Tasks now record their own arrays.
+- `beer_call` leaked its constants array and the retains on fn/args, so
+  every embedded call leaked its whole argument (the request map).
+- `beer_release` is now a no-op on interned symbols/keywords, and `beer.h`
+  documents that `beer_keyword`/`beer_symbol` return borrowed values: the
+  example released them, freeing live interned keywords.
+- Regression test: `tests/runtime/test_refcount.c` (fails on the old code).
+- Result: `examples/embedded_http` is ASAN-clean under load, live heap flat
+  across 45k requests (was 18 leaked blocks per request).
+
+**Follow-ups found along the way (not fixed):**
+- Interned symbols/keywords should be immortal (`REFCOUNT_IMMORTAL`) so
+  any stray release is harmless. That would remove this whole bug class,
+  including a pre-existing shutdown-only use-after-free (`read-string`
+  returns a borrowed symbol that `task_destroy` releases, so
+  `symbol_shutdown` touches freed memory).
+- `function_new_closure` stores the arity in `header.size`, which the free
+  path uses for byte accounting; that's why "Bytes still allocated" at REPL
+  exit is a huge underflowed number.
+- The Makefile has no header dependency tracking (`-MMD`): changing a
+  struct in a header leaves stale objects that segfault. Needs a clean build.
+- UBSan: signed left shift in `read_int64` (`src/vm/vm.c:215`).
+- `docs/design/MEMORY_MODEL.md` documents a `value_release()` that doesn't exist.
+
 ### Persistent Vectors — COMPLETE
 - Clojure-style 32-way bit-partitioned trie + tail (`src/types/vector.c`),
   new internal object type `TYPE_VEC_NODE = 0x82`; public C API unchanged

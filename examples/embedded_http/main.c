@@ -62,6 +62,13 @@ static void lowercase_into(char *dst, const char *src, size_t cap) {
     dst[i] = '\0';
 }
 
+/* Store an OWNED value under keyword :name. Keywords from beer_keyword are
+ * borrowed from the intern table and must never be released. */
+static void put_owned(Value map, const char *name, Value owned) {
+    hashmap_set(map, beer_keyword(name), owned);
+    beer_release(owned);
+}
+
 static Value build_request_map(struct mg_connection *conn) {
     const struct mg_request_info *ri = mg_get_request_info(conn);
 
@@ -71,65 +78,43 @@ static Value build_request_map(struct mg_connection *conn) {
      * lib/beer/http.beer's (keyword (str/lower-case s)) convention. */
     char method_lc[16];
     lowercase_into(method_lc, ri->request_method, sizeof(method_lc));
-    {
-        Value k = beer_keyword("method");
-        Value v = beer_keyword(method_lc);
-        hashmap_set(req, k, v);
-        beer_release(k);
-        beer_release(v);
-    }
+    hashmap_set(req, beer_keyword("method"), beer_keyword(method_lc));
 
     /* :uri -- raw string, matching beer.http's :uri (not :path). */
-    {
-        Value k = beer_keyword("uri");
-        Value v = beer_string(ri->request_uri ? ri->request_uri : "/");
-        hashmap_set(req, k, v);
-        beer_release(k);
-        beer_release(v);
-    }
+    put_owned(req, "uri", beer_string(ri->request_uri ? ri->request_uri : "/"));
 
     /* :headers -- map with lowercased string keys (civetweb preserves
      * wire case; beer.http's convention lowercases on parse). */
-    {
-        Value headers = hashmap_create_default();
-        for (int i = 0; i < ri->num_headers; i++) {
-            char name_lc[256];
-            lowercase_into(name_lc, ri->http_headers[i].name, sizeof(name_lc));
-            Value hk = beer_string(name_lc);
-            Value hv = beer_string(ri->http_headers[i].value);
-            hashmap_set(headers, hk, hv);
-            beer_release(hk);
-            beer_release(hv);
-        }
-        Value k = beer_keyword("headers");
-        hashmap_set(req, k, headers);
-        beer_release(k);
-        beer_release(headers);
+    Value headers = hashmap_create_default();
+    for (int i = 0; i < ri->num_headers; i++) {
+        char name_lc[256];
+        lowercase_into(name_lc, ri->http_headers[i].name, sizeof(name_lc));
+        Value hk = beer_string(name_lc);
+        Value hv = beer_string(ri->http_headers[i].value);
+        hashmap_set(headers, hk, hv);
+        beer_release(hk);
+        beer_release(hv);
     }
+    put_owned(req, "headers", headers);
 
     /* :body -- read the full request body, if any. */
-    {
-        Value k = beer_keyword("body");
-        Value v;
-        long long len = ri->content_length;
-        if (len > 0) {
-            char *buf = malloc((size_t)len + 1);
-            long long total = 0;
-            while (total < len) {
-                int n = mg_read(conn, buf + total, (size_t)(len - total));
-                if (n <= 0) break;
-                total += n;
-            }
-            buf[total] = '\0';
-            v = beer_string(buf);
-            free(buf);
-        } else {
-            v = beer_string("");
+    Value body;
+    long long len = ri->content_length;
+    if (len > 0) {
+        char *buf = malloc((size_t)len + 1);
+        long long total = 0;
+        while (total < len) {
+            int n = mg_read(conn, buf + total, (size_t)(len - total));
+            if (n <= 0) break;
+            total += n;
         }
-        hashmap_set(req, k, v);
-        beer_release(k);
-        beer_release(v);
+        buf[total] = '\0';
+        body = beer_string(buf);
+        free(buf);
+    } else {
+        body = beer_string("");
     }
+    put_owned(req, "body", body);
 
     return req;
 }
@@ -145,20 +130,14 @@ static void send_response(struct mg_connection *conn, BeerValue resp) {
     Value headers = VALUE_NIL;
 
     if (!beer_is_nil(resp) && beer_is_map(resp)) {
-        Value k_status = beer_keyword("status");
-        Value status_val = hashmap_get(resp, k_status);
-        beer_release(k_status);
+        Value status_val = hashmap_get(resp, beer_keyword("status"));
         if (beer_is_int(status_val)) {
             status = (int)beer_to_int(status_val);
         }
 
-        Value k_headers = beer_keyword("headers");
-        headers = hashmap_get(resp, k_headers);
-        beer_release(k_headers);
+        headers = hashmap_get(resp, beer_keyword("headers"));
 
-        Value k_body = beer_keyword("body");
-        Value body_val = hashmap_get(resp, k_body);
-        beer_release(k_body);
+        Value body_val = hashmap_get(resp, beer_keyword("body"));
         if (beer_is_string(body_val)) {
             body = beer_to_cstring(body_val);
         }

@@ -137,13 +137,14 @@ static inline BeerValue beer_float(double d)   { return make_float(d);  }
 static inline BeerValue beer_bool(int b)        { return b ? VALUE_TRUE : VALUE_FALSE; }
 static inline BeerValue beer_nil(void)          { return VALUE_NIL; }
 
-/* Allocate a beerlang string from a C string. */
+/* Allocate a beerlang string from a C string. Owned: beer_release it. */
 BeerValue beer_string(const char* s);
 
-/* Return an interned keyword (":name" — do not include the colon). */
+/* Return an interned keyword (":name" — do not include the colon).
+ * Borrowed from the intern table: do not release. */
 BeerValue beer_keyword(const char* name);
 
-/* Return an interned symbol. */
+/* Return an interned symbol. Borrowed from the intern table: do not release. */
 BeerValue beer_symbol(const char* name);
 
 /* ------------------------------------------------------------------ */
@@ -200,8 +201,17 @@ BeerValue beer_get(BeerValue map, BeerValue key);
 void object_retain(Value v);
 void object_release(Value v);
 
+/* beer_keyword/beer_symbol return interned values owned by the intern
+ * table: never release them. beer_release ignores symbols and keywords so
+ * that releasing one by mistake can't free a live interned object (they
+ * live until shutdown, so an unmatched retain on one is harmless). */
 static inline void beer_retain (BeerValue v) { if (is_pointer(v)) object_retain(v);  }
-static inline void beer_release(BeerValue v) { if (is_pointer(v)) object_release(v); }
+static inline void beer_release(BeerValue v) {
+    if (!is_pointer(v)) return;
+    uint8_t t = object_type(v);
+    if (t == TYPE_SYMBOL || t == TYPE_KEYWORD) return;
+    object_release(v);
+}
 
 #ifdef __cplusplus
 }

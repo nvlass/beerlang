@@ -43,6 +43,16 @@ typedef struct Task {
 
     /* Completion watchers */
     WatcherNode* watchers;
+
+    /* The bytecode/constants arrays this task allocated. vm->code and
+     * vm->constants are swapped on every call, so a task that ends inside a
+     * callee frame can't rely on them pointing at its own arrays. */
+    uint8_t* own_code;
+    Value*   own_constants;
+    int      n_own_constants;
+    /* task_new retains the fn/args it stores and must release them;
+     * task_new_from_code borrows a compiled unit's values and must not. */
+    bool owns_constant_values;
 } Task;
 
 /* Create a new task that will call fn with the given args.

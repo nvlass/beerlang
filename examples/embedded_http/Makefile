@@ -36,7 +36,7 @@ check-deps:
 civetweb.o: vendor/civetweb.c
 	$(CC) $(CIVET_CFLAGS) -c vendor/civetweb.c -o civetweb.o
 
-embedded_http: main.c civetweb.o
+embedded_http: main.c civetweb.o $(BEER_LIB)/libbeerlang.a
 	$(CC) $(CFLAGS) -o embedded_http main.c civetweb.o $(LDFLAGS)
 	@echo "Built: ./embedded_http"
 

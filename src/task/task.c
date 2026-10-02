@@ -13,9 +13,14 @@
 void task_destroy(struct Object* obj) {
     Task* task = (Task*)obj;
     if (task->vm) {
-        /* Free the mini bytecode and constants we allocated in task_new */
-        free(task->vm->code);
-        free(task->vm->constants);
+        /* Free the bytecode and constants this task allocated */
+        if (task->owns_constant_values) {
+            for (int i = 0; i < task->n_own_constants; i++) {
+                if (is_pointer(task->own_constants[i])) object_release(task->own_constants[i]);
+            }
+        }
+        free(task->own_code);
+        free(task->own_constants);
         task->vm->code = NULL;
         task->vm->constants = NULL;
         vm_free(task->vm);
@@ -72,11 +77,16 @@ Value task_new(Value fn, int argc, Value* argv, Scheduler* sched) {
     uint8_t* code = malloc(code_size);
     Value* consts = malloc(sizeof(Value) * (size_t)n_consts);
 
-    /* Constants: args first, then fn */
+    /* Constants: args first, then fn. Retained: a spawned task runs after
+     * the spawner has dropped its own references to fn and args. */
     for (int i = 0; i < argc; i++) {
         consts[i] = argv[i];
     }
     consts[argc] = fn;
+    for (int i = 0; i < n_consts; i++) {
+        if (is_pointer(consts[i])) object_retain(consts[i]);
+    }
+    task->owns_constant_values = true;
 
     /* Emit bytecode */
     size_t pc = 0;
@@ -94,6 +104,9 @@ Value task_new(Value fn, int argc, Value* argv, Scheduler* sched) {
 
     vm_load_code(vm, code, (int)pc);
     vm_load_constants(vm, consts, n_consts);
+    task->own_code = code;
+    task->own_constants = consts;
+    task->n_own_constants = n_consts;
 
     /* The task owns the code and constants memory.
      * We store them in the VM; they'll be freed when the task is destroyed
@@ -132,6 +145,9 @@ Value task_new_from_code(uint8_t* code, int code_size,
 
     vm_load_code(vm, code_copy, code_size);
     vm_load_constants(vm, consts_copy, n_constants);
+    task->own_code = code_copy;
+    task->own_constants = consts_copy;
+    task->n_own_constants = n_constants;
     task->vm = vm;
 
     return task_val;

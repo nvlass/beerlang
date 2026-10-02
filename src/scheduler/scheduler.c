@@ -203,17 +203,11 @@ void scheduler_fire_watchers(Scheduler* sched, Task* task) {
         hashmap_set(result_map, keyword_intern("result"), task->result);
     }
 
-    /* Spawn a callback task for each watcher.
-     * task_new copies argv values into constants without retaining,
-     * effectively taking ownership of one reference per spawn.
-     * We retain once per spawn so each task owns a ref, then release
-     * our original ref at the end. */
+    /* Spawn a callback task for each watcher (task_new retains the
+     * callback and result_map itself), then drop the watcher node's ref. */
     while (w) {
         WatcherNode* next = w->next;
-        object_retain(result_map);
-        object_retain(w->callback);  /* task_new takes ownership */
         scheduler_spawn(sched, w->callback, 1, &result_map);
-        /* Release the watcher node's ref (separate from the one task_new took) */
         if (is_pointer(w->callback)) {
             object_release(w->callback);
         }
