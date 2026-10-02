@@ -414,7 +414,7 @@ int beer_length(BeerValue v) {
     if (t == TYPE_VECTOR)  return (int)vector_length(v);
     if (t == TYPE_CONS)    return (int)list_length(v);
     if (t == TYPE_HASHMAP) return -1;  /* use beer_get */
-    if (t == TYPE_STRING)  return (int)vector_length(v); /* string char count */
+    if (t == TYPE_STRING)  return (int)string_char_length(v);
     return -1;
 }
 

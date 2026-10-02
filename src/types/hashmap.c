@@ -105,11 +105,22 @@ uint32_t value_hash(Value v) {
             free(str);
             return h;
         }
+        /* Lists and vectors that are value_equal must hash alike, and an
+         * empty sequence equals nil, so it must hash to nil's 0. */
         case TYPE_VECTOR: {
-            uint32_t h = 2166136261u;
             size_t len = vector_length(v);
+            if (len == 0) return 0;
+            uint32_t h = 2166136261u;
             for (size_t i = 0; i < len; i++) {
                 h ^= value_hash(vector_get(v, i));
+                h *= 16777619u;
+            }
+            return h;
+        }
+        case TYPE_CONS: {
+            uint32_t h = 2166136261u;
+            for (Value cur = v; is_cons(cur); cur = cdr(cur)) {
+                h ^= value_hash(car(cur));
                 h *= 16777619u;
             }
             return h;

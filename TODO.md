@@ -127,6 +127,44 @@
 - `doc` macro for printing documentation
 - `__print-doc` native for formatted output
 
+### Persistent Vectors — COMPLETE
+- Clojure-style 32-way bit-partitioned trie + tail (`src/types/vector.c`),
+  new internal object type `TYPE_VEC_NODE = 0x82`; public C API unchanged
+  except `vector_pop` now returns an owned reference (was a use-after-free)
+- Persistent `vector_conj` / `vector_assoc_n` / `vector_pop_persistent`;
+  O(1) `vector_clone`; in-place builder ops guarded by top-down uniqueness
+- Beerlang: `assoc` on vectors, new `pop`, `peek`, `subvec`; `update`,
+  `assoc-in`, `update-in` now work on vectors via `assoc`
+- `into []` of 200k elements: 35.2s → 0.25s; small-vector reads unchanged
+- Fixed: `value_hash` now hashes `=` lists/vectors alike (and empty seqs
+  like nil); `beer_length` on strings called `vector_length`
+- Tests: trie depth boundaries, persistence, top-down sharing trap,
+  pop-to-empty across depth-3, heap-element refcounts, differential fuzz;
+  ASAN/UBSan clean
+- **Follow-ups:** sets on the HAMT (`#{}` reads as `(hash-set ...)` but
+  nothing defines it); RRB trees for O(log N) `subvec`/concat;
+  user-facing transients
+
+### O(n) list builders in `lib/core.beer` — COMPLETE
+- `range`, `map`, `filter`, `take`, `take-while`, `butlast`, `repeat`,
+  `repeatedly`, `partition`, `mapcat`, `interleave`, `flatten`, `distinct`,
+  `group-by` used `(concat acc (list x))`, copying the accumulator every
+  step. Now they cons in reverse and flip once (`__rev`); return types and
+  order unchanged.
+- `rest` on a vector copies the remainder, so walking a vector input was
+  also O(n²) (`reduce`, `map`, `some`, `every?`, `last`, `zipmap`, ...).
+  Loops now start from `(__seq coll)` (native, vector → list once).
+  `drop`/`drop-while` convert only once something is actually dropped, so
+  `(drop 0 v)` still returns `v`. `(drop -1 xs)` now returns `xs` (was `()`).
+- Workload of 11 ops over 20k elements: 154.3s → 0.66s, identical output.
+- Remaining: a real vector seq type would make `rest` on vectors O(1)
+  without the up-front conversion.
+
+### `println`/`str` on collections print type names — TODO
+`(println [1 2 3])` prints `vector`, `(str {:a 1})` prints `hashmap` in
+script mode (REPL printing and `prn` are correct). Pre-existing, found
+while testing persistent vectors.
+
 ### ByteBuffer (`beer.bytes`) — COMPLETE
 - `TYPE_BYTEBUFFER` heap type: mutable, non-UTF8-validated binary buffer,
   NIO-style position/limit cursor (`src/types/bytebuffer.c`)

@@ -80,12 +80,15 @@ struct Object {
 0x11 - Keyword      (interned keyword)
 0x12 - String       (UTF-8 string)
 0x20 - Cons         (cons cell / list node)
-0x21 - Vector       (dynamic array)
+0x21 - Vector       (persistent vector wrapper)
 0x22 - HashMap      (hash table)
 0x30 - Function     (bytecode function / closure)
 0x31 - NativeFunction (C function callable from Beerlang)
 0x40 - Var          (namespace-level binding)
 0x41 - Namespace    (reserved alias)
+0x80 - HamtNode     (internal: hashmap trie node)
+0x81 - HamtCollision (internal: hashmap hash-collision node)
+0x82 - VecNode      (internal: vector trie node / tail)
 ```
 
 #### Object Types
@@ -170,21 +173,33 @@ typedef struct {
 - Immutable, structural sharing
 - `cdr` must be either another Cons or nil
 
-**Vector (type 0x21):**
+**Vector (type 0x21) and VecNode (type 0x82):**
 ```c
 typedef struct {
     struct Object header;
-    size_t length;      /* Number of elements */
-    size_t capacity;    /* Allocated capacity */
-    Value* elements;    /* Dynamic array of values */
+    Value slots[];      /* capacity derived from header.size */
+} VecNode;              /* tree leaf, internal node, or tail */
+
+typedef struct {
+    struct Object header;
+    uint32_t cnt;
+    uint32_t shift;     /* 5 * tree depth */
+    Value root;         /* VecNode, or nil while cnt <= 32 */
+    Value tail;         /* VecNode, or nil while cnt == 0 */
 } Vector;
 ```
-- Simple dynamic array with amortized O(1) append
-- Default initial capacity of 8 elements
-- Grows by doubling when full
-- O(1) indexed access and O(n) update
-
-> **Future: Persistent Implementation** -- The current mutable dynamic array will be replaced with a persistent vector using HAMT/RRB-tree structure for O(log32 N) access and update with structural sharing.
+- Clojure-style persistent vector: 32-way bit-partitioned trie plus a
+  tail buffer. Index `i < tailoff(cnt)` walks the tree, the rest is in the
+  tail, so vectors of up to 32 elements are a wrapper plus one tail node.
+- Tree leaves and internal nodes are always 32 slots; the tail grows
+  8 → 16 → 32 to keep small vectors small. One destructor (release every
+  pointer slot) serves all node kinds.
+- Persistent ops (`vector_conj`, `vector_assoc_n`, `vector_pop_persistent`)
+  path-copy and share unchanged nodes: O(log32 N). `vector_clone` is O(1).
+- In-place ops (`vector_push`, `vector_set`, `vector_pop`) are for C code
+  building a vector it hasn't published yet. They mutate a node only if the
+  wrapper and every node on the path from the root have refcount 1, decided
+  top-down (see `src/types/vector.c` and the contract in `include/vector.h`).
 
 **HashMap (type 0x22):**
 ```c
@@ -357,9 +372,9 @@ Namespace["user"].vars:
 
 Notice how many symbols can share the same `Namespace*` pointer, eliminating string duplication.
 
-#### Future: Persistent Data Structure Implementation
+#### Persistent Data Structures
 
-**Vectors and HashMaps will eventually use structural sharing:**
+**Vectors and HashMaps both use structural sharing:**
 
 ```
 Original vector: [a b c d e]
@@ -373,13 +388,12 @@ Updated vector:  [a b X d e]
 - Old version remains valid
 - Fits perfectly with reference counting (tree-shaped graphs)
 
-**HAMT (Hash Array Mapped Trie):**
-- 32-way branching at each level
-- Bitmap compression (sparse arrays)
-- Excellent cache locality
-- Will be used for both vectors and hashmaps
-
-The current implementation uses mutable dynamic arrays (Vector) and open-addressing hash tables (HashMap) for simplicity. Persistent implementations are planned for a future phase.
+- HashMaps are a HAMT (`src/types/hashmap.c`): 32-way branching with
+  bitmap compression.
+- Vectors are a bit-partitioned trie plus tail (`src/types/vector.c`):
+  32-way branching indexed directly by position, no bitmaps needed.
+- Not yet persistent-optimized: `subvec`/concat copy (RRB trees would make
+  them O(log N)).
 
 #### Memory Layout Considerations
 

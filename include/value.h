@@ -182,6 +182,7 @@ typedef enum {
     TYPE_CHANNEL = 0x70,
     TYPE_HAMT_NODE = 0x80,
     TYPE_HAMT_COLLISION = 0x81,
+    TYPE_VEC_NODE = 0x82,
     TYPE_ATOM = 0x85,
     TYPE_CPOINTER = 0x90,
 } ObjectType;

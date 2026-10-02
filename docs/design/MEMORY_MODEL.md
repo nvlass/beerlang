@@ -55,7 +55,8 @@ These values have `tag = TAG_OBJECT` and point to heap objects:
 | Symbol | `0x10` | Object + name data | **Interned** - never release |
 | Keyword | `0x11` | Object + name data | **Interned** - never release |
 | Cons | `0x20` | Object + car/cdr Values | **Refcounted** - call `value_release()` |
-| Vector | `0x21` | Object + elements array | **Refcounted** - call `value_release()` |
+| Vector | `0x21` | Object + trie root/tail (persistent) | **Refcounted** - call `value_release()` |
+| VecNode | `0x82` | Object + Value slots (internal, never exposed) | **Refcounted** - shared between vectors |
 | HashMap | `0x22` | Object + hash table | **Refcounted** - call `value_release()` |
 | Function | `0x30` | Object + bytecode refs + closed[] | **Refcounted** - call `value_release()` |
 | NativeFunction | `0x31` | Object + C fn pointer | **Refcounted** - call `value_release()` |

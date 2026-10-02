@@ -939,8 +939,29 @@ static Value native_assoc(VM* vm, int argc, Value* argv) {
         return VALUE_NIL;
     }
     Value coll = argv[0];
+    if (is_vector(coll)) {
+        Value result = coll;
+        object_retain(result);
+        for (int i = 1; i < argc; i += 2) {
+            if (!is_fixnum(argv[i])) {
+                object_release(result);
+                vm_error(vm, "assoc: vector index must be an integer");
+                return VALUE_NIL;
+            }
+            int64_t idx = untag_fixnum(argv[i]);
+            if (idx < 0 || (size_t)idx > vector_length(result)) {
+                object_release(result);
+                vm_error(vm, "assoc: vector index out of bounds");
+                return VALUE_NIL;
+            }
+            Value next = vector_assoc_n(result, (size_t)idx, argv[i + 1]);
+            object_release(result);
+            result = next;
+        }
+        return result;
+    }
     if (!is_hashmap(coll) && !is_nil(coll)) {
-        vm_error(vm, "assoc: first argument must be a map or nil");
+        vm_error(vm, "assoc: first argument must be a map, vector or nil");
         return VALUE_NIL;
     }
     Value result = is_nil(coll) ? hashmap_create_default() : coll;
@@ -951,6 +972,85 @@ static Value native_assoc(VM* vm, int argc, Value* argv) {
         result = next;
     }
     return result;
+}
+
+/* __seq: (__seq coll) => a vector as a list, anything else unchanged.
+ * Lets lib/core.beer walk a vector with O(1) `rest` after one O(n)
+ * conversion; `rest` on a vector copies the remainder every call. */
+static Value native_seq_internal(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "__seq: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    Value coll = argv[0];
+    if (is_vector(coll)) return vector_to_list(coll);
+    if (is_pointer(coll)) object_retain(coll);
+    return coll;
+}
+
+/* peek: (peek coll) => last of a vector, first of a list, nil for nil */
+static Value native_peek(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "peek: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    Value coll = argv[0];
+    Value x;
+    if (is_nil(coll)) return VALUE_NIL;
+    if (is_vector(coll)) {
+        x = vector_last(coll);
+    } else if (is_cons(coll)) {
+        x = car(coll);
+    } else {
+        vm_error(vm, "peek: argument must be a vector or list");
+        return VALUE_NIL;
+    }
+    if (is_pointer(x)) object_retain(x);
+    return x;
+}
+
+/* pop: (pop coll) => vector without its last element, list without its first */
+static Value native_pop(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "pop: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    Value coll = argv[0];
+    if (is_vector(coll)) {
+        if (vector_length(coll) == 0) {
+            vm_error(vm, "pop: can't pop an empty vector");
+            return VALUE_NIL;
+        }
+        return vector_pop_persistent(coll);
+    }
+    if (is_cons(coll)) {
+        Value rest = cdr(coll);
+        if (is_pointer(rest)) object_retain(rest);
+        return rest;
+    }
+    if (is_nil(coll)) {
+        vm_error(vm, "pop: can't pop an empty list");
+        return VALUE_NIL;
+    }
+    vm_error(vm, "pop: argument must be a vector or list");
+    return VALUE_NIL;
+}
+
+/* subvec: (subvec v start) / (subvec v start end) => copy of the range */
+static Value native_subvec(VM* vm, int argc, Value* argv) {
+    if (argc < 2 || argc > 3 || !is_vector(argv[0]) || !is_fixnum(argv[1]) ||
+        (argc == 3 && !is_fixnum(argv[2]))) {
+        vm_error(vm, "subvec: requires a vector, a start index and an optional end index");
+        return VALUE_NIL;
+    }
+    int64_t len = (int64_t)vector_length(argv[0]);
+    int64_t start = untag_fixnum(argv[1]);
+    int64_t end = argc == 3 ? untag_fixnum(argv[2]) : len;
+    if (start < 0 || end > len || start > end) {
+        vm_error(vm, "subvec: index out of bounds");
+        return VALUE_NIL;
+    }
+    return vector_slice(argv[0], (size_t)start, (size_t)end);
 }
 
 /* dissoc: (dissoc map k ...) => new map with keys removed */
@@ -2673,6 +2773,10 @@ void core_register_collections(void) {
     register_native(core_ns, "get", native_get);
     register_native(core_ns, "assoc", native_assoc);
     register_native(core_ns, "dissoc", native_dissoc);
+    register_native(core_ns, "__seq", native_seq_internal);
+    register_native(core_ns, "peek", native_peek);
+    register_native(core_ns, "pop", native_pop);
+    register_native(core_ns, "subvec", native_subvec);
     register_native(core_ns, "keys", native_keys);
     register_native(core_ns, "vals", native_vals);
     register_native(core_ns, "contains?", native_contains_q);

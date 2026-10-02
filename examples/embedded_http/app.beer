@@ -1,0 +1,38 @@
+;; app.beer — routing + handler logic for the embedded_http example.
+;;
+;; The C host (main.c) owns the socket/HTTP-parsing layer (CivetWeb) and
+;; looks up `app/handle-request` once at startup via beer_lookup, then calls
+;; it once per completed HTTP request via beer_call. This mirrors the
+;; Ring-style request/response map shape used by the pure-beerlang
+;; beer.http library (lib/beer/http.beer), so handler code looks the same
+;; whether the transport is beer.tcp or a fast embedded C library.
+;;
+;; Request map:  {:method :get  :uri "/"  :headers {"..." "..."}  :body "..."}
+;; Response map: {:status 200   :headers {"..." "..."}            :body "..."}
+;;
+;; `(host/request-id)` is a native registered from C (main.c, via
+;; beer_register) — demonstrates the C-provides-native-to-beerlang half of
+;; the embedding API, not just beerlang-handler-called-from-C.
+
+(ns app
+  (:require [beer.json :as json]))
+
+(defn handle-request [req]
+  (let [method (:method req)
+        uri (:uri req)]
+    (cond
+      (and (= method :get) (= uri "/"))
+      {:status 200
+       :headers {"content-type" "text/plain"}
+       :body "Hello from beerlang, embedded in a CivetWeb host!\n"}
+
+      (and (= method :get) (= uri "/api/time"))
+      {:status 200
+       :headers {"content-type" "application/json"}
+       :body (json/emit {:request-id (host/request-id)
+                          :message "hello from beerlang"})}
+
+      :else
+      {:status 404
+       :headers {"content-type" "text/plain"}
+       :body "Not Found\n"})))
