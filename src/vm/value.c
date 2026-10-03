@@ -289,6 +289,7 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
     char tmp[64];
     const char* s = NULL;
     size_t slen = 0;
+    char* owned = NULL;   /* heap-allocated s, freed after appending */
 
     if (is_nil(v)) {
         s = "nil"; slen = 3;
@@ -333,7 +334,9 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
                 s = tmp;
                 break;
             case TYPE_BIGINT:
-                s = "#<bigint>"; slen = 9;
+                owned = bigint_to_string(v, 10);
+                s = owned;
+                slen = strlen(owned);
                 break;
             case TYPE_CONS:
             case TYPE_VECTOR:
@@ -380,6 +383,7 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
         *buf = realloc(*buf, *cap);
     }
     memcpy(*buf + len, s, slen);
+    free(owned);
     return len + slen;
 }
 

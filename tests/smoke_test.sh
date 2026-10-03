@@ -270,6 +270,12 @@ check '(zipmap [:a :b] [1 2])'                     '{:b 2, :a 1}'
 check '(partition 2 [1 2 3 4])'                    '((1 2) (3 4))'
 check '(mapcat (fn [x] (list x x)) [1 2 3])'      '(1 1 2 2 3 3)'
 
+# --- Bigint printing and full-width overflow ---
+check '(pr-str 9223372036854775808)'               '"9223372036854775808"'
+check '(str "n=" (* 3037000500 3037000500))'       '"n=9223372037000250000"'
+check '(= (* 3037000500 3037000500) 9223372037000250000)' 'true'
+check '(pr-str [1 (- 0 9223372036854775807 2)])'   '"[1 -9223372036854775809]"'
+
 # --- Persistent vectors ---
 check '(assoc [1 2 3] 0 :a)'                       '[:a 2 3]'
 check '(assoc [1 2 3] 3 :end)'                     '[1 2 3 :end]'

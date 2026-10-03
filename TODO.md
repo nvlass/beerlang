@@ -209,7 +209,23 @@ The full smoke suite under ASAN now reports no memory errors.
 ### `println`/`str` on collections print type names — TODO
 `(println [1 2 3])` prints `vector`, `(str {:a 1})` prints `hashmap` in
 script mode (REPL printing and `prn` are correct). Pre-existing, found
-while testing persistent vectors.
+while testing persistent vectors. The cause is `value_sprint` in
+`src/runtime/core.c` falling back to `value_type_name` for collections.
+(Bigints had the same stub there and in `value_sprint_readable`: fixed.)
+
+### WASM build and 64-bit integers on wasm32 — COMPLETE
+- `wasm/Makefile.wasm` lists runtime sources explicitly, so the new
+  `src/runtime/bytes.c` was missing: undefined `core_register_bytes`.
+  Added, with a comment that new `src/runtime` files must be listed there
+  or stubbed in `wasm/stubs.c`.
+- `bigint_from_int64`/`bigint_to_int64` used `mpz_set_si`/`mpz_get_si`/
+  `mpz_cmp_si`, which take a C `long` -- 32-bit on wasm32. Overflow
+  promotion truncated operands: `(* 3037000500 3037000500)` was wrong in
+  the browser REPL. Now uses `mpz_import`/`mpz_export` of a 64-bit word.
+- `pr-str`/`str` printed bigints as `#<bigint>` (all platforms; visible on
+  the site because the WASM REPL renders results with `pr-str`).
+- Tests: full-width int64 round-trip in `test_bigint.c`, bigint smoke
+  checks; verified in the Docker-built WASM module under Node.
 
 ### ByteBuffer (`beer.bytes`) — COMPLETE
 - `TYPE_BYTEBUFFER` heap type: mutable, non-UTF8-validated binary buffer,

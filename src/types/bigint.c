@@ -28,6 +28,29 @@ static void bigint_init_type(void) {
     object_register_destructor(TYPE_BIGINT, bigint_destructor);
 }
 
+/* int64 <-> mpz without mpz_set_si / mpz_get_si: those take a C `long`,
+ * which is 32-bit on wasm32 (and Windows), silently truncating. The
+ * magnitude is moved as one 64-bit word via mpz_import/mpz_export. */
+static void mpz_set_int64(mpz_t z, int64_t n) {
+    uint64_t mag = n < 0 ? (uint64_t)0 - (uint64_t)n : (uint64_t)n;
+    mpz_import(z, 1, -1, sizeof(mag), 0, 0, &mag);
+    if (n < 0) mpz_neg(z, z);
+}
+
+static bool mpz_get_int64(const mpz_t z, int64_t* out) {
+    if (mpz_sizeinbase(z, 2) > 64) return false;
+    uint64_t mag = 0;
+    mpz_export(&mag, NULL, -1, sizeof(mag), 0, 0, z);  /* exports |z| */
+    if (mpz_sgn(z) >= 0) {
+        if (mag > (uint64_t)INT64_MAX) return false;
+        *out = (int64_t)mag;
+    } else {
+        if (mag > (uint64_t)INT64_MAX + 1) return false;
+        *out = mag == (uint64_t)INT64_MAX + 1 ? INT64_MIN : -(int64_t)mag;
+    }
+    return true;
+}
+
 /* Create a bigint from int64_t */
 Value bigint_from_int64(int64_t n) {
     bigint_init_type();
@@ -36,7 +59,7 @@ Value bigint_from_int64(int64_t n) {
     Value obj = tag_pointer(big);
 
     mpz_init(big->mpz);
-    mpz_set_si(big->mpz, n);
+    mpz_set_int64(big->mpz, n);
 
     return obj;
 }
@@ -70,16 +93,7 @@ bool bigint_to_int64(Value bigint, int64_t* out) {
     assert(object_type(bigint) == TYPE_BIGINT);
 
     Bigint* big = (Bigint*)untag_pointer(bigint);
-
-    /* Check if it fits in int64_t range */
-    /* Compare with INT64_MAX and INT64_MIN */
-    if (mpz_cmp_si(big->mpz, INT64_MAX) > 0 ||
-        mpz_cmp_si(big->mpz, INT64_MIN) < 0) {
-        return false;
-    }
-
-    *out = mpz_get_si(big->mpz);
-    return true;
+    return mpz_get_int64(big->mpz, out);
 }
 
 /* Try to demote bigint to fixnum */

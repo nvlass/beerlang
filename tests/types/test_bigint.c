@@ -364,7 +364,42 @@ TEST(bigint_memory_management) {
 }
 
 /* Test suite */
+/* int64 <-> bigint must not depend on the width of C `long` (32-bit on
+ * wasm32), so check values beyond 32 bits and the int64 extremes. */
+TEST(bigint_int64_roundtrip_full_width) {
+    memory_init();
+
+    int64_t vals[] = {0, 1, -1, 2147483647LL, 2147483648LL, -2147483648LL,
+                      -2147483649LL, 3037000500LL, 4294967296LL,
+                      INT64_MAX, INT64_MIN, INT64_MIN + 1};
+    for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
+        Value b = bigint_from_int64(vals[i]);
+        int64_t back = 0;
+        ASSERT(bigint_to_int64(b, &back), "fits in int64");
+        ASSERT(back == vals[i], "round-trips exactly");
+        object_release(b);
+    }
+
+    Value min = bigint_from_int64(INT64_MIN);
+    char* s = bigint_to_string(min, 10);
+    ASSERT_STR_EQ(s, "-9223372036854775808", "INT64_MIN digits");
+    free(s);
+    object_release(min);
+
+    int64_t out;
+    Value over = bigint_from_string("9223372036854775808", 10);
+    ASSERT(!bigint_to_int64(over, &out), "INT64_MAX + 1 does not fit");
+    object_release(over);
+    Value under = bigint_from_string("-9223372036854775809", 10);
+    ASSERT(!bigint_to_int64(under, &out), "INT64_MIN - 1 does not fit");
+    object_release(under);
+
+    memory_shutdown();
+    return NULL;
+}
+
 static const char* all_tests(void) {
+    RUN_TEST(bigint_int64_roundtrip_full_width);
     RUN_TEST(bigint_from_int64);
     RUN_TEST(bigint_from_string);
     RUN_TEST(bigint_from_fixnum);

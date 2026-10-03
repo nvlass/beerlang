@@ -20,9 +20,11 @@ TASK_SRCS    = $(wildcard $(ROOT)/src/task/*.c)
 CHANNEL_SRCS = $(wildcard $(ROOT)/src/channel/*.c)
 LIB_SRCS     = $(ROOT)/src/lib/beer.c  # embed API (no aot.c)
 
-# Runtime: core only — tcp/udp/shell/crypto/aot come from stubs.c
+# Runtime: portable sources only — tcp/udp/shell/crypto/aot come from
+# stubs.c. A new src/runtime file must be added here or stubbed there.
 RUNTIME_SRCS = $(ROOT)/src/runtime/core.c \
                $(ROOT)/src/runtime/bits.c \
+               $(ROOT)/src/runtime/bytes.c \
                $(ROOT)/src/runtime/namespace.c
 
 # IO: stream.c + tarindex.c; reactor replaced by stub

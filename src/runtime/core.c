@@ -1233,6 +1233,7 @@ static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len) {
     char tmp[64];
     const char* s = NULL;
     size_t slen = 0;
+    char* owned = NULL;   /* heap-allocated s, freed after appending */
 
     if (is_nil(v)) {
         s = "nil"; slen = 3;
@@ -1267,13 +1268,11 @@ static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len) {
                 slen = (size_t)snprintf(tmp, sizeof(tmp), ":%s", keyword_name(v));
                 s = tmp;
                 break;
-            case TYPE_BIGINT: {
-                /* bigint_print writes to stdout; we need a string.
-                 * Use a temporary approach: print to a temp buffer via snprintf/bigint_to_str
-                 * For now, fall through to default which is the type name */
-                s = "#<bigint>"; slen = 9;
+            case TYPE_BIGINT:
+                owned = bigint_to_string(v, 10);
+                s = owned;
+                slen = strlen(owned);
                 break;
-            }
             default:
                 /* For complex types, just use the type name */
                 s = value_type_name(v);
@@ -1290,6 +1289,7 @@ static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len) {
         *buf = realloc(*buf, *cap);
     }
     memcpy(*buf + len, s, slen);
+    free(owned);
     return len + slen;
 }
 
