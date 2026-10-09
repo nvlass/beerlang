@@ -1777,6 +1777,57 @@ check '(reduce-kv (fn [acc k v] (+ acc 1)) 0 nil)' '0'
 check '(get (reduce-kv (fn [acc k v] (assoc acc k (* v 2))) {} {:a 1 :b 2 :c 3}) :b)' '4'
 check '(count (reduce-kv (fn [acc k v] (conj acc k)) [] {:x 1 :y 2}))' '2'
 
+# --- Small-items batch: range step, keywords, nth, destructuring, require :refer, *out* ---
+check '(range 5 0 -1)'                             '(5 4 3 2 1)'
+check '(range 0 -5 -2)'                            '(0 -2 -4)'
+check '(range 0 5 -1)'                             'nil'
+check '(try (range 0 5 0) (catch e (:message e)))' '"range: step must be non-zero"'
+check ':foo/bar'                                   ':foo/bar'
+check "'a.b/c"                                     'a.b/c'
+check '(str :foo/bar)'                             '":foo/bar"'
+check '[(name :foo/bar) (namespace :foo/bar) (namespace :x)]' '["bar" "foo" nil]'
+check '(keyword "foo" "bar")'                      ':foo/bar'
+check '(keyword nil "bar")'                        ':bar'
+check '(namespace (keyword "foo/bar"))'            '"foo"'
+check '(symbol "n" "s")'                           'n/s'
+check_multi '(def k (keyword "zz/top"))
+(= k :zz/top)' 'true' 'dynamic keyword interns like the reader'
+check '[(nth [] 0 :d) (nth nil 0 :d) (nth (list 1) 3 :d) (nth [1 2] 1 :d)]' '[:d :d :d 2]'
+check '(try (nth (list 1) 3) (catch e (:message e)))' '"nth: index out of bounds"'
+check '(let [[a [b c]] [1 [2 3]]] [a b c])'        '[1 2 3]'
+check '(let [[a & [b c]] [1 2 3]] [a b c])'        '[1 2 3]'
+check '(let [[a b] [1]] [a b])'                    '[1 nil]'
+check '((fn [[a b] c] [a b c]) [1 2] 3)'           '[1 2 3]'
+check '(map (fn [[k v]] (str k v)) [[:a 1] [:b 2]])' '(":a1" ":b2")'
+check '((fn [[x & more] acc] (if x (recur more (+ acc x)) acc)) [1 2 3 4] 0)' '10'
+check_multi '(defn g [a [b [c d]] & [e]] [a b c d e])
+(g 1 [2 [3 4]] 5)' '[1 2 3 4 5]' 'defn nested + rest destructuring'
+check_multi '(defn h ([[a]] a) ([[a] [b]] (+ a b)))
+[(h [7]) (h [1] [2])]' '[7 3]' 'multi-arity defn destructuring'
+check_multi '(require (quote beer.string) :refer (quote [blank?]))
+(blank? "  ")' 'true' 'require :refer'
+check_multi '(ns refer.test (:require [beer.string :as s :refer [blank?]]))
+[(blank? "") (s/blank? "x")]' '[true false]' 'ns :require :as + :refer'
+check_multi '(require (quote beer.string) :refer (quote [blank?]))
+(defn blank? [x] :shadowed)
+[(blank? "") (beer.string/blank? "")]' '[:shadowed true]' 'local def shadows referred var'
+check '(try (require (quote beer.string) :refer (quote [nope])) (catch e (:message e)))' "\"require: nope does not exist in 'beer.string'\""
+TMPOUT=$(mktemp /tmp/beer_out_XXXXXX)
+check_multi "(def log (open \"$TMPOUT\" :write))
+(def *out* log)
+(println \"hi\" 1)
+(prn :k)
+(def *out* beer.core/*out*)
+(close log)
+(slurp \"$TMPOUT\")" '"hi 1\n:k\n"' 'println/prn honour *out*'
+check_multi "(def f (open \"$TMPOUT\" :write))
+(def b (beer.bytes/from-string \"hello world\"))
+(beer.bytes/position! b 6)
+(def n (write-bytes f b))
+(close f)
+[n (beer.bytes/position b) (slurp \"$TMPOUT\")]" '[5 11 "world"]' 'write-bytes writes position..limit'
+rm -f "$TMPOUT"
+
 echo ""
 echo "===================="
 echo "Passed: $PASS"

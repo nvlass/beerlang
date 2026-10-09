@@ -28,6 +28,7 @@
 #include "reader.h"
 #include "compiler.h"
 #include "stream.h"
+#include "bytebuffer.h"
 #include "task.h"
 #include "channel.h"
 #include "scheduler.h"
@@ -521,9 +522,19 @@ static void stream_write_value(Value out, Value v, bool readable) {
 }
 
 /* Print: (print arg1 arg2 ...) - prints values separated by spaces */
+/* Stream bound to *out*, resolved like any unqualified symbol: current
+ * namespace first, then beer.core. Falls back to stdout. */
+static Value current_out(void) {
+    Value sym = symbol_intern("*out*");
+    Var* var = namespace_lookup(namespace_registry_current(global_namespace_registry), sym);
+    if (!var) var = namespace_lookup(namespace_registry_get_core(global_namespace_registry), sym);
+    Value out = var ? var_get_value(var) : VALUE_NIL;
+    return is_stream(out) ? out : stream_get_stdout();
+}
+
 static Value native_print(VM* vm, int argc, Value* argv) {
     (void)vm;
-    Value out = stream_get_stdout();
+    Value out = current_out();
     for (int i = 0; i < argc; i++) {
         if (i > 0) stream_write_string(out, " ", 1);
         stream_write_value(out, argv[i], false);
@@ -535,7 +546,7 @@ static Value native_print(VM* vm, int argc, Value* argv) {
 /* Println: (println arg1 arg2 ...) - prints values with newline */
 static Value native_println(VM* vm, int argc, Value* argv) {
     (void)vm;
-    Value out = stream_get_stdout();
+    Value out = current_out();
     for (int i = 0; i < argc; i++) {
         if (i > 0) stream_write_string(out, " ", 1);
         stream_write_value(out, argv[i], false);
@@ -986,8 +997,8 @@ static Value native_rest(VM* vm, int argc, Value* argv) {
 
 /* nth: (nth coll n) => nth element */
 static Value native_nth(VM* vm, int argc, Value* argv) {
-    if (argc != 2) {
-        vm_error(vm, "nth: requires exactly 2 arguments");
+    if (argc != 2 && argc != 3) {
+        vm_error(vm, "nth: requires 2 or 3 arguments");
         return VALUE_NIL;
     }
     Value coll = argv[0];
@@ -996,33 +1007,28 @@ static Value native_nth(VM* vm, int argc, Value* argv) {
         vm_error(vm, "nth: index must be an integer");
         return VALUE_NIL;
     }
+    if (!is_nil(coll) && !is_cons(coll) && !is_vector(coll) && !is_string(coll)) {
+        vm_error(vm, "nth: argument must be a sequence");
+        return VALUE_NIL;
+    }
     int64_t idx = untag_fixnum(idx_val);
-    if (idx < 0) {
+    size_t len = is_nil(coll)    ? 0
+               : is_cons(coll)   ? list_length(coll)
+               : is_vector(coll) ? vector_length(coll)
+               : string_char_length(coll);
+    if (idx < 0 || (size_t)idx >= len) {
+        if (argc == 3) {
+            if (is_pointer(argv[2])) object_retain(argv[2]);
+            return argv[2];
+        }
         vm_error(vm, "nth: index out of bounds");
         return VALUE_NIL;
     }
 
-    if (is_cons(coll)) { Value v = list_nth(coll, (size_t)idx); if (is_pointer(v)) object_retain(v); return v; }
-    if (is_vector(coll)) {
-        if ((size_t)idx >= vector_length(coll)) {
-            vm_error(vm, "nth: index out of bounds");
-            return VALUE_NIL;
-        }
-        Value v = vector_get(coll, (size_t)idx); if (is_pointer(v)) object_retain(v); return v;
-    }
-    if (is_string(coll)) {
-        if ((size_t)idx >= string_char_length(coll)) {
-            vm_error(vm, "nth: index out of bounds");
-            return VALUE_NIL;
-        }
-        return make_char(string_char_at(coll, (size_t)idx));
-    }
-    if (is_nil(coll)) {
-        vm_error(vm, "nth: index out of bounds");
-        return VALUE_NIL;
-    }
-    vm_error(vm, "nth: argument must be a sequence");
-    return VALUE_NIL;
+    if (is_string(coll)) return make_char(string_char_at(coll, (size_t)idx));
+    Value v = is_cons(coll) ? list_nth(coll, (size_t)idx) : vector_get(coll, (size_t)idx);
+    if (is_pointer(v)) object_retain(v);
+    return v;
 }
 
 /* count: (count coll) => number of elements */
@@ -1585,12 +1591,12 @@ static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len) {
                 slen = string_byte_length(v);
                 break;
             case TYPE_SYMBOL:
-                s = symbol_name(v);
+                s = symbol_str(v);
                 slen = strlen(s);
                 break;
             case TYPE_KEYWORD:
                 /* Include the leading colon */
-                slen = (size_t)snprintf(tmp, sizeof(tmp), ":%s", keyword_name(v));
+                slen = (size_t)snprintf(tmp, sizeof(tmp), ":%s", keyword_str(v));
                 s = tmp;
                 break;
             case TYPE_BIGINT:
@@ -1708,20 +1714,34 @@ static Value native_str(VM* vm, int argc, Value* argv) {
     return result;
 }
 
-/* symbol: (symbol str) => create a symbol from a string */
+/* Optional namespace argument of (symbol ns name) / (keyword ns name):
+ * nil or a string. Returns false (with vm_error) on a bad type. */
+static bool ns_arg(VM* vm, const char* who, Value v, const char** out) {
+    if (is_nil(v)) { *out = NULL; return true; }
+    if (is_string(v)) { *out = string_cstr(v); return true; }
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%s: namespace must be a string or nil", who);
+    vm_error(vm, buf);
+    return false;
+}
+
+/* symbol: (symbol name) or (symbol ns name) */
 static Value native_symbol(VM* vm, int argc, Value* argv) {
-    if (argc != 1) {
-        vm_error(vm, "symbol: requires exactly 1 argument");
+    if (argc < 1 || argc > 2) {
+        vm_error(vm, "symbol: requires 1 or 2 arguments");
         return VALUE_NIL;
     }
-    if (!is_pointer(argv[0]) || object_type(argv[0]) != TYPE_STRING) {
-        vm_error(vm, "symbol: argument must be a string");
+    Value x = argv[argc - 1];
+    if (argc == 1 && is_pointer(x) && object_type(x) == TYPE_SYMBOL) {
+        return x;
+    }
+    if (!is_string(x)) {
+        vm_error(vm, "symbol: name must be a string");
         return VALUE_NIL;
     }
-    const char* name = string_cstr(argv[0]);
-    Value s = symbol_intern(name);
-    if (is_pointer(s)) object_retain(s);
-    return s;
+    const char* ns = NULL;
+    if (argc == 2 && !ns_arg(vm, "symbol", argv[0], &ns)) return VALUE_NIL;
+    return ns ? symbol_intern_ns(ns, string_cstr(x)) : symbol_intern(string_cstr(x));
 }
 
 /* name: (name x) => string name of symbol or keyword */
@@ -1743,22 +1763,44 @@ static Value native_name(VM* vm, int argc, Value* argv) {
     return VALUE_NIL;
 }
 
-/* keyword: (keyword s) => keyword from string */
-static Value native_keyword(VM* vm, int argc, Value* argv) {
+/* namespace: (namespace x) => namespace string of a symbol/keyword, or nil */
+static Value native_namespace(VM* vm, int argc, Value* argv) {
     if (argc != 1) {
-        vm_error(vm, "keyword: requires exactly 1 argument");
+        vm_error(vm, "namespace: requires exactly 1 argument");
         return VALUE_NIL;
     }
     Value x = argv[0];
-    if (is_pointer(x) && object_type(x) == TYPE_KEYWORD) return x;
-    if (is_pointer(x) && object_type(x) == TYPE_SYMBOL) {
-        return keyword_intern(symbol_name(x));
+    if (is_pointer(x) && (object_type(x) == TYPE_SYMBOL || object_type(x) == TYPE_KEYWORD)) {
+        bool sym = object_type(x) == TYPE_SYMBOL;
+        if (!(sym ? symbol_has_namespace(x) : keyword_has_namespace(x))) return VALUE_NIL;
+        const char* full = sym ? symbol_str(x) : keyword_str(x);
+        return string_from_buffer(full, strchr(full, '/') - full);
     }
-    if (is_string(x)) {
-        return keyword_intern(string_cstr(x));
-    }
-    vm_error(vm, "keyword: argument must be a string, symbol, or keyword");
+    vm_error(vm, "namespace: argument must be a symbol or keyword");
     return VALUE_NIL;
+}
+
+/* keyword: (keyword name) or (keyword ns name) */
+static Value native_keyword(VM* vm, int argc, Value* argv) {
+    if (argc < 1 || argc > 2) {
+        vm_error(vm, "keyword: requires 1 or 2 arguments");
+        return VALUE_NIL;
+    }
+    Value x = argv[argc - 1];
+    if (argc == 1) {
+        if (is_pointer(x) && object_type(x) == TYPE_KEYWORD) return x;
+        if (is_pointer(x) && object_type(x) == TYPE_SYMBOL) return keyword_intern(symbol_str(x));
+        if (is_string(x)) return keyword_intern(string_cstr(x));
+        vm_error(vm, "keyword: argument must be a string, symbol, or keyword");
+        return VALUE_NIL;
+    }
+    if (!is_string(x)) {
+        vm_error(vm, "keyword: name must be a string");
+        return VALUE_NIL;
+    }
+    const char* ns = NULL;
+    if (!ns_arg(vm, "keyword", argv[0], &ns)) return VALUE_NIL;
+    return ns ? keyword_intern_ns(ns, string_cstr(x)) : keyword_intern(string_cstr(x));
 }
 
 /* gensym: (gensym) or (gensym prefix) => unique symbol */
@@ -1861,9 +1903,16 @@ static bool is_currently_requiring(const char* ns_name) {
     return false;
 }
 
+static bool is_keyword_named(Value v, const char* name) {
+    return is_pointer(v) && object_type(v) == TYPE_KEYWORD &&
+           !keyword_has_namespace(v) && strcmp(keyword_name(v), name) == 0;
+}
+
+/* (require 'ns :as 'alias :refer '[a b]) — options in any order;
+ * :refer also takes :all */
 static Value native_require(VM* vm, int argc, Value* argv) {
-    if (argc != 1 && argc != 3) {
-        vm_error(vm, "require: usage (require 'ns) or (require 'ns :as 'alias)");
+    if (argc < 1 || argc % 2 == 0) {
+        vm_error(vm, "require: usage (require 'ns :as 'alias :refer '[syms])");
         return VALUE_NIL;
     }
 
@@ -1874,16 +1923,29 @@ static Value native_require(VM* vm, int argc, Value* argv) {
     }
 
     Value alias_sym = VALUE_NIL;
-    if (argc == 3) {
-        /* Check :as keyword */
-        if (object_type(argv[1]) != TYPE_KEYWORD ||
-            strcmp(keyword_name(argv[1]), "as") != 0) {
-            vm_error(vm, "require: expected :as keyword");
-            return VALUE_NIL;
-        }
-        alias_sym = argv[2];
-        if (!is_pointer(alias_sym) || object_type(alias_sym) != TYPE_SYMBOL) {
-            vm_error(vm, "require: alias must be a symbol");
+    Value refer = VALUE_NIL;
+    for (int i = 1; i < argc; i += 2) {
+        Value opt = argv[i], val = argv[i + 1];
+        if (is_keyword_named(opt, "as")) {
+            if (!is_pointer(val) || object_type(val) != TYPE_SYMBOL) {
+                vm_error(vm, "require: :as alias must be a symbol");
+                return VALUE_NIL;
+            }
+            alias_sym = val;
+        } else if (is_keyword_named(opt, "refer")) {
+            bool ok = is_keyword_named(val, "all") ||
+                      (is_pointer(val) && object_type(val) == TYPE_VECTOR);
+            for (size_t j = 0; ok && !is_keyword_named(val, "all") && j < vector_length(val); j++) {
+                Value s = vector_get(val, j);
+                ok = is_pointer(s) && object_type(s) == TYPE_SYMBOL;
+            }
+            if (!ok) {
+                vm_error(vm, "require: :refer takes a vector of symbols or :all");
+                return VALUE_NIL;
+            }
+            refer = val;
+        } else {
+            vm_error(vm, "require: unknown option (expected :as or :refer)");
             return VALUE_NIL;
         }
     }
@@ -2010,10 +2072,35 @@ static Value native_require(VM* vm, int argc, Value* argv) {
         object_release(loaded_libs);
     }
 
-    /* Handle :as alias */
+    Namespace* current = namespace_registry_current(global_namespace_registry);
     if (!is_nil(alias_sym)) {
-        Namespace* current = namespace_registry_current(global_namespace_registry);
         namespace_add_alias(current, alias_sym, ns_name);
+    }
+
+    if (!is_nil(refer)) {
+        Namespace* target = namespace_registry_get(global_namespace_registry, ns_name);
+        if (!target) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "require: namespace '%s' not found after loading", ns_name);
+            vm_error(vm, buf);
+            return VALUE_NIL;
+        }
+        bool all = is_keyword_named(refer, "all");
+        Value syms = all ? hashmap_keys(target->vars) : refer;
+        for (size_t i = 0; i < vector_length(syms); i++) {
+            Value sym = vector_get(syms, i);
+            Value var_val = hashmap_get(target->vars, sym);
+            if (is_nil(var_val)) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "require: %s does not exist in '%s'",
+                         symbol_str(sym), ns_name);
+                if (all) object_release(syms);
+                vm_error(vm, buf);
+                return VALUE_NIL;
+            }
+            namespace_refer(current, sym, (Var*)untag_pointer(var_val));
+        }
+        if (all) object_release(syms);
     }
 
     return VALUE_NIL;
@@ -2312,7 +2399,7 @@ static Value native_pr_str(VM* vm, int argc, Value* argv) {
 /* prn: (prn & args) => print readable, then newline, return nil */
 static Value native_prn(VM* vm, int argc, Value* argv) {
     (void)vm;
-    Value out = stream_get_stdout();
+    Value out = current_out();
     for (int i = 0; i < argc; i++) {
         if (i > 0) stream_write_string(out, " ", 1);
         stream_write_value(out, argv[i], true);
@@ -3224,6 +3311,7 @@ void core_register_utility(void) {
     register_native(core_ns, "str", native_str);
     register_native(core_ns, "symbol", native_symbol);
     register_native(core_ns, "keyword", native_keyword);
+    register_native(core_ns, "namespace", native_namespace);
     register_native(core_ns, "name", native_name);
     register_native(core_ns, "gensym", native_gensym);
     register_native(core_ns, "type", native_type);
@@ -3513,6 +3601,32 @@ static Value native_write_stream(VM* vm, int argc, Value* argv) {
     return VALUE_NIL;
 }
 
+/* write-bytes: (write-bytes stream buf) — write buf's bytes from position to
+ * limit and advance position to limit (NIO-style). Returns the byte count. */
+static Value native_write_bytes(VM* vm, int argc, Value* argv) {
+    if (argc != 2) {
+        vm_error(vm, "write-bytes: requires 2 arguments (stream, buffer)");
+        return VALUE_NIL;
+    }
+    if (!is_stream(argv[0])) {
+        vm_error(vm, "write-bytes: first argument must be a stream");
+        return VALUE_NIL;
+    }
+    if (!is_bytebuffer(argv[1])) {
+        vm_error(vm, "write-bytes: second argument must be a bytebuffer");
+        return VALUE_NIL;
+    }
+    Value buf = argv[1];
+    size_t pos = bytebuffer_position(buf);
+    size_t n = bytebuffer_limit(buf) - pos;
+    if (stream_write_string(argv[0], (const char*)bytebuffer_data(buf) + pos, n) < 0) {
+        vm_throw_error(vm, "write-bytes: write failed");
+        return VALUE_NIL;
+    }
+    bytebuffer_set_position(buf, pos + n);
+    return make_fixnum((int64_t)n);
+}
+
 /* flush: (flush stream) */
 static Value native_flush(VM* vm, int argc, Value* argv) {
     if (argc != 1) {
@@ -3598,6 +3712,7 @@ void core_register_streams(void) {
     register_native(core_ns, "read-line", native_read_line);
     register_native(core_ns, "read-bytes", native_read_bytes);
     register_native(core_ns, "write", native_write_stream);
+    register_native(core_ns, "write-bytes", native_write_bytes);
     register_native(core_ns, "flush", native_flush);
     register_native(core_ns, "slurp", native_slurp);
     register_native(core_ns, "spit", native_spit);
@@ -4152,7 +4267,7 @@ static Value native___print_doc(VM* vm, int argc, Value* argv) {
 
     Value name_str = argv[0];
     Value meta_map = argv[1];
-    Value out = stream_get_stdout();
+    Value out = current_out();
 
     stream_write_string(out, "-------------------------\n", 26);
 

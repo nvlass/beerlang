@@ -1234,7 +1234,74 @@ static void compile_defmacro(Compiler* c, Value form) {
  * Special Form: fn
  * ================================================================= */
 
+/* (fn name? [a [b c] & [d]] body...) => (fn name? [a p__1 & p__2] (let [[b c] p__1 [d] p__2] body...))
+ * Returns an owned rewritten form, or nil when no parameter is a vector
+ * pattern. Destructuring itself is the `let` macro's job. */
+static Value destructure_fn_params(Value form) {
+    static int counter = 0;
+    Value rest = cdr(form);
+    if (!is_cons(rest)) return VALUE_NIL;
+    Value name = VALUE_NIL;
+    if (is_pointer(car(rest)) && object_type(car(rest)) == TYPE_SYMBOL) {
+        name = car(rest);
+        rest = cdr(rest);
+        if (!is_cons(rest)) return VALUE_NIL;
+    }
+    Value params = car(rest);
+    Value body = cdr(rest);
+    if (!is_pointer(params) || object_type(params) != TYPE_VECTOR) return VALUE_NIL;
+
+    size_t n = vector_length(params);
+    bool any = false;
+    for (size_t i = 0; i < n; i++) {
+        if (is_vector(vector_get(params, i))) any = true;
+    }
+    if (!any) return VALUE_NIL;
+
+    Value new_params = vector_create(n);
+    Value bindings = vector_create(0);
+    for (size_t i = 0; i < n; i++) {
+        Value p = vector_get(params, i);
+        if (is_vector(p)) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "p__destr%d", counter++);
+            Value g = symbol_intern(buf);
+            vector_push(new_params, g);
+            vector_push(bindings, p);
+            vector_push(bindings, g);
+        } else {
+            vector_push(new_params, p);
+        }
+    }
+
+    Value tmp = cons(bindings, body);
+    Value let_form = cons(symbol_intern("let"), tmp);
+    object_release(tmp);
+    object_release(bindings);
+    Value new_body = cons(let_form, VALUE_NIL);
+    object_release(let_form);
+    Value result = cons(new_params, new_body);
+    object_release(new_body);
+    object_release(new_params);
+    if (!is_nil(name)) {
+        tmp = cons(name, result);
+        object_release(result);
+        result = tmp;
+    }
+    tmp = cons(car(form), result);
+    object_release(result);
+    return tmp;
+}
+
+static void compile_fn_form(Compiler* c, Value form);
+
 static void compile_fn(Compiler* c, Value form) {
+    Value rewritten = destructure_fn_params(form);
+    compile_fn_form(c, is_nil(rewritten) ? form : rewritten);
+    if (!is_nil(rewritten)) object_release(rewritten);
+}
+
+static void compile_fn_form(Compiler* c, Value form) {
     /* Parse: (fn [params] body...) or (fn name [params] body...) */
     Value rest = cdr(form);  /* Skip 'fn' symbol */
 

@@ -18,7 +18,7 @@
 /* ByteBuffer object structure (heap-allocated)
  * Layout:
  *   Object header (16 bytes)
- *     - size field contains capacity in bytes
+ *   uint32_t capacity
  *   uint32_t position
  *   uint32_t limit
  *   uint8_t data[] (NOT null-terminated, NOT UTF-8 validated, inline)

@@ -93,6 +93,9 @@ static void namespace_destructor(struct Object* obj) {
     if (!is_nil(ns->aliases)) {
         object_release(ns->aliases);
     }
+    if (!is_nil(ns->refers)) {
+        object_release(ns->refers);
+    }
 
     free((void*)ns->name);
 }
@@ -109,6 +112,7 @@ Namespace* namespace_new(const char* name) {
 
     ns->vars = hashmap_create_default();
     ns->aliases = hashmap_create_default();
+    ns->refers = hashmap_create_default();
     return ns;
 }
 
@@ -155,10 +159,16 @@ Var* namespace_lookup(Namespace* ns, Value symbol) {
 
     Value var_ptr_val = hashmap_get(ns->vars, symbol);
     if (is_nil(var_ptr_val)) {
-        return NULL;
+        var_ptr_val = hashmap_get(ns->refers, symbol);
+        if (is_nil(var_ptr_val)) return NULL;
     }
 
     return (Var*)untag_pointer(var_ptr_val);
+}
+
+void namespace_refer(Namespace* ns, Value symbol, Var* var) {
+    if (!ns || !var) return;
+    hashmap_set(ns->refers, symbol, tag_pointer(var));
 }
 
 void namespace_undefine(Namespace* ns, Value symbol) {

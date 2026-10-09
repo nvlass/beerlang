@@ -6,23 +6,28 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 498 (`bash tests/smoke_test.sh`)
-- **Last Updated:** 2026-10-09
+- REPL smoke tests: 544 (`bash tests/smoke_test.sh`)
+- **Last Updated:** 2026-10-10
 
 ## Open Items at a Glance
 
 Small / concrete:
-- `keyword` is 1-arity only; namespaced keywords don't print their
-  namespace (see "NVlass TODO" at the bottom)
-- `require` lacks `:refer` (only `:as`)
-- `range` with a negative step returns `()` (`(range 5 0 -1)`); it only
-  counts up
-- `fn` parameters don't destructure (`(fn [[a b]] ...)` is a compile
-  error); only `let` does
-- `write-bytes` missing; `print`/`println`/`prn` write to stdout, not `*out*`
-- Function arity lives in `header.size` (breaks byte accounting at exit),
-  no Makefile header dependencies, UBSan shift in `vm.c` — see the
-  refcount section's follow-ups
+- `::kw` isn't auto-resolved (reads as a keyword named `:kw`). Resolving
+  at read time needs `load`, the file runner and `beerc` to read
+  form-by-form instead of `reader_read_all` up front, or the file's
+  `(ns ...)` hasn't run yet
+- Maps aren't seqable: `seq`/`map`/`reduce`/`doseq` over a map fail
+  (`reduce-kv` works)
+- No `binding`: `*out*` is a plain var, redirected with `(def *out* s)`.
+  Task-local dynamic bindings need a design decision (tasks yield
+  inside a binding)
+- Destructuring is vectors only: no map destructuring (`{:keys [a]}`) in
+  `let` or `fn`; `loop` doesn't destructure
+- Freeing a very long list recurses once per cons cell
+  (`cons_destructor` → `object_release`): `(sort (reverse (range 20000)))`
+  overflows the C stack under ASAN
+- `make asan` races under `-j` (`asan: clean all` runs clean in parallel);
+  run it as `make asan -j1` or twice
 
 Bigger:
 - AOT: `require`/`load` don't use `.beerc` yet (format + compiler exist) — #6
@@ -197,13 +202,12 @@ The full smoke suite under ASAN now reports no memory errors.
 `MEMORY_MODEL.md` no longer documents the nonexistent
 `value_release`/`value_retain`.
 
-**Follow-ups found along the way (not fixed):**
-- `function_new_closure` stores the arity in `header.size`, which the free
-  path uses for byte accounting; that's why "Bytes still allocated" at REPL
-  exit is a huge underflowed number.
-- The Makefile has no header dependency tracking (`-MMD`): changing a
-  struct in a header leaves stale objects that segfault. Needs a clean build.
-- UBSan: signed left shift in `read_int64` (`src/vm/vm.c:215`).
+**Follow-ups found along the way (all fixed 2026-10-10):**
+- Functions and native functions stored their arity in `header.size`,
+  which the free path uses for byte accounting ("Bytes still allocated"
+  at exit underflowed). Arity now has its own field.
+- Makefile now tracks header dependencies (`-MMD -MP`).
+- UBSan: signed left shift in `read_int64` (`src/vm/vm.c`).
 
 ### Persistent Vectors — COMPLETE
 - Clojure-style 32-way bit-partitioned trie + tail (`src/types/vector.c`),
@@ -361,10 +365,10 @@ changes to user-facing code.
 - [x] `slurp` / `spit` convenience functions
 - [x] `with-open` macro in core.beer
 - [x] Standard streams: `*in*`, `*out*`, `*err*` as dynamic vars
-- [ ] Redirect `println`/`print`/`prn` to use `*out*` stream (they write to
-  stdout directly)
-- [ ] Binary read/write: `read-bytes` done; `write-bytes` missing
-  (`beer.bytes` ByteBuffers are the natural payload type for it now)
+- [x] `println`/`print`/`prn` write to `*out*` (resolved current ns →
+  `beer.core`, falls back to stdout); `binding` still missing
+- [x] Binary read/write: `read-bytes`; `(write-bytes stream buf)` writes a
+  ByteBuffer's position..limit and advances position (NIO-style)
 - [x] Socket support — as `beer.tcp` (`tcp/listen`, `tcp/accept`,
   `tcp/connect`), same Stream type, same `read-line`/`write`/`close`
 - [ ] `select` / `poll` for multiplexing — see #3
@@ -397,8 +401,9 @@ changes to user-facing code.
 - [x] Circular require detection (`requiring_stack` in `core.c`)
 - [x] `*ns*` dynamic var
 - [x] `BEERPATH` env var (see #4)
-- **Not yet implemented:**
-  - `:refer` in require (only `:as` supported)
+- [x] `:refer [syms]` / `:refer :all` in `require` and `ns` — referred
+  names share the source Var (kept in a separate `refers` map, so a local
+  `def` shadows instead of clobbering)
 
 ### 3. I/O System — Phase 2: Async Reactor — COMPLETE
 
@@ -602,5 +607,7 @@ no boundary at all. The two are complementary, not competing.
 
 ## NVlass TODO
 
-### Multi arity `keyword`
-Should also accept namespace (?) -- also namespace qualified keywords should be printed with namespaces
+### Multi arity `keyword` — DONE 2026-10-10
+`(keyword ns name)`, `(symbol ns name)`, `namespace`; qualified symbols and
+keywords print with their namespace; `(keyword "a/b")` interns the same
+object as the literal `:a/b`.

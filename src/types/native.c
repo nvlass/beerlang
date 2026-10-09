@@ -32,7 +32,7 @@ Value native_function_new(int arity, NativeFn fn_ptr, const char* name) {
         return VALUE_NIL;
     }
 
-    nf->header.size = arity;  /* Store arity in header.size */
+    nf->arity = arity;
     nf->fn_ptr = fn_ptr;
     nf->name = name ? strdup(name) : NULL;
 
@@ -43,7 +43,7 @@ Value native_function_new(int arity, NativeFn fn_ptr, const char* name) {
 int native_function_arity(Value fn) {
     assert(is_native_function(fn));
     NativeFunction* nf = (NativeFunction*)untag_pointer(fn);
-    return (int)nf->header.size;
+    return nf->arity;
 }
 
 /* Get native function pointer */

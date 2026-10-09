@@ -84,12 +84,14 @@ $(BIN_DIR)/beerlang: $(OBJS) $(VENDOR_OBJS)
 # Object files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 # Vendor library object files
 $(BUILD_DIR)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(OBJS:.o=.d) $(VENDOR_OBJS:.o=.d)
 
 # Static library for embedding
 LIB_OBJS = $(filter-out $(BUILD_DIR)/repl/main.o, $(OBJS)) $(VENDOR_OBJS)

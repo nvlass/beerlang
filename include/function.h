@@ -11,7 +11,8 @@
 
 /* Function object structure */
 typedef struct Function {
-    struct Object header;    /* header.size = arity (-1 for variadic) */
+    struct Object header;
+    int arity;               /* -1 for variadic */
     uint32_t code_offset;    /* Offset in bytecode where function starts */
     uint16_t n_locals;       /* Number of local variable slots */
     uint16_t n_closed;       /* Number of closed-over values */

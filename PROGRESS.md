@@ -1,6 +1,6 @@
 # Beerlang Implementation Progress
 
-**Last Updated:** 2026-10-09
+**Last Updated:** 2026-10-10
 
 ## Current Status
 
@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 61 unit tests
-- 445 REPL smoke tests
+- 544 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -156,6 +156,8 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - **Sorting**: `sort`, `sort-by` (merge sort)
 - **Exception**: `ex-info`
 - **Multi-arity dispatch**: `defn` supports multiple arities with `cond` dispatch on `(count args)`
+- **Destructuring**: nested vector patterns (`[a [b c] & rest :as all]`) in `let`, `fn` and `defn` params (rewritten to `let` by the compiler)
+- **Namespaces**: `require`/`ns` with `:as` and `:refer [syms]` / `:refer :all`; `keyword`/`symbol` take an optional namespace, `namespace`
 
 ## Key Design Decisions
 

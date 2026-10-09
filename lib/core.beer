@@ -103,6 +103,13 @@
     (if (= i n) v
       (recur (+ i 1) (list 'rest v)))))
 
+; Helper: flat let* binding pairs for binding `target` (a symbol or a
+; destructuring vector, possibly nested) to expr
+(defn __bind-pairs [target expr]
+  (if (vector? target)
+    (__expand-destructure target expr)
+    (list target expr)))
+
 ; Helper: expand a destructuring vector pattern into flat let* binding pairs
 (defn __expand-destructure [pattern expr]
   (let* [tmp (gensym "destr__")]
@@ -113,12 +120,12 @@
         bindings
         (let* [elem (first elems)]
           (if (= elem '&)
-            (concat bindings (list (first (rest elems))
-                                   (__nthrest-expr tmp i)))
+            (concat bindings (__bind-pairs (first (rest elems))
+                                           (__nthrest-expr tmp i)))
             (if (= elem :as)
               (concat bindings (list (first (rest elems)) tmp))
               (recur (+ i 1)
-                     (concat bindings (list elem (list 'nth tmp i)))
+                     (concat bindings (__bind-pairs elem (list 'nth tmp i nil)))
                      (rest elems)))))))))
 
 ; Helper: expand all bindings, handling destructuring vectors
@@ -270,9 +277,12 @@
 (defn range [& args]
   (let* [start (if (>= (count args) 2) (first args) 0)
          end   (if (>= (count args) 2) (second args) (first args))
-         step  (if (>= (count args) 3) (nth args 2) 1)]
+         step  (if (>= (count args) 3) (nth args 2) 1)
+         done? (cond (pos? step) (fn [i] (>= i end))
+                     (neg? step) (fn [i] (<= i end))
+                     :else (throw (ex-info "range: step must be non-zero" {:step step})))]
     (loop [i start acc '()]
-      (if (>= i end)
+      (if (done? i)
         (__rev acc)
         (recur (+ i step) (cons i acc))))))
 
@@ -487,15 +497,15 @@
 (defn ex-info [msg data] {:type :error :message msg :data data})
 
 ; --- Namespace support ---
-; ns macro: (ns foo.bar (:require [baz :as b] other))
-; Expands to: (do (in-ns 'foo.bar) (require 'baz :as 'b) (require 'other))
+; ns macro: (ns foo.bar (:require [baz :as b :refer [x]] other))
+; Expands to: (do (in-ns 'foo.bar) (require 'baz :as 'b :refer '[x]) (require 'other))
 (defn __ns-require-clause [clause]
   (if (vector? clause)
-    ; [foo.bar :as fb] => (require 'foo.bar :as 'fb)
-    (if (>= (count clause) 3)
-      (list 'require (list 'quote (first clause))
-            (nth clause 1) (list 'quote (nth clause 2)))
-      (list 'require (list 'quote (first clause))))
+    ; [foo.bar :as fb :refer [x]] => (require 'foo.bar :as 'fb :refer '[x])
+    (cons 'require
+          (cons (list 'quote (first clause))
+                (mapcat (fn [kv] (list (first kv) (list 'quote (second kv))))
+                        (partition 2 (rest clause)))))
     ; bare symbol => (require 'sym)
     (list 'require (list 'quote clause))))
 

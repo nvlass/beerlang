@@ -45,8 +45,7 @@ Value function_new_closure(int arity, uint32_t code_offset, uint16_t n_locals,
         return VALUE_NIL;
     }
 
-    /* Set header size to arity */
-    fn->header.size = (uint32_t)arity;
+    fn->arity = arity;
     fn->code_offset = code_offset;
     fn->n_locals = n_locals;
     fn->n_closed = n_closed;
@@ -78,7 +77,7 @@ Value function_new_closure(int arity, uint32_t code_offset, uint16_t n_locals,
 int function_arity(Value fn) {
     assert(is_function(fn));
     Function* f = (Function*)untag_pointer(fn);
-    return (int)f->header.size;
+    return f->arity;
 }
 
 /* Get function code offset */

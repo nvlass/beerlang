@@ -210,11 +210,11 @@ static int64_t read_int64(VM* vm) {
         return 0;
     }
 
-    int64_t value = 0;
+    uint64_t value = 0;
     for (int i = 0; i < 8; i++) {
-        value |= ((int64_t)vm->code[vm->pc++]) << (i * 8);
+        value |= ((uint64_t)vm->code[vm->pc++]) << (i * 8);
     }
-    return value;
+    return (int64_t)value;
 }
 
 /* Read uint32 from bytecode (4 bytes, little endian) */

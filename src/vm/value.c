@@ -47,11 +47,11 @@ void value_print(Value v) {
                 break;
 
             case TYPE_SYMBOL:
-                printf("%s", symbol_name(v));
+                printf("%s", symbol_str(v));
                 break;
 
             case TYPE_KEYWORD:
-                printf(":%s", keyword_name(v));
+                printf(":%s", keyword_str(v));
                 break;
 
             case TYPE_BIGINT:
@@ -187,10 +187,10 @@ void value_print_readable(Value v) {
                 break;
             }
             case TYPE_SYMBOL:
-                fprintf(PR_OUT, "%s", symbol_name(v));
+                fprintf(PR_OUT, "%s", symbol_str(v));
                 break;
             case TYPE_KEYWORD:
-                fprintf(PR_OUT, ":%s", keyword_name(v));
+                fprintf(PR_OUT, ":%s", keyword_str(v));
                 break;
             case TYPE_BIGINT:
                 bigint_print(v);
@@ -333,11 +333,11 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
         }
         switch (type) {
             case TYPE_SYMBOL:
-                s = symbol_name(v);
+                s = symbol_str(v);
                 slen = strlen(s);
                 break;
             case TYPE_KEYWORD:
-                slen = (size_t)snprintf(tmp, sizeof(tmp), ":%s", keyword_name(v));
+                slen = (size_t)snprintf(tmp, sizeof(tmp), ":%s", keyword_str(v));
                 s = tmp;
                 break;
             case TYPE_BIGINT:

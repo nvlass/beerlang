@@ -27,7 +27,8 @@ typedef Value (*NativeFn)(VM* vm, int argc, Value* argv);
 
 /* Native function object structure */
 typedef struct NativeFunction {
-    struct Object header;    /* header.size = arity (-1 for variadic) */
+    struct Object header;
+    int arity;              /* -1 for variadic */
     NativeFn fn_ptr;        /* C function pointer */
     const char* name;       /* Function name (for debugging/errors) */
 } NativeFunction;

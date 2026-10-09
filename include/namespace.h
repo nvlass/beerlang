@@ -42,6 +42,7 @@ struct Namespace {
     const char* name;        /* Namespace name (owned string) */
     Value vars;              /* HashMap: Symbol -> Var (as tagged pointer) */
     Value aliases;           /* HashMap: Symbol -> String (alias -> ns name) */
+    Value refers;            /* HashMap: Symbol -> Var owned by another ns */
 };
 
 /* Namespace API */
@@ -59,6 +60,10 @@ void namespace_undefine(Namespace* ns, Value symbol);
 
 /* Get all vars as a vector of vars */
 Value namespace_all_vars(Namespace* ns);
+
+/* Make `symbol` resolve to another namespace's var. Interned vars of the
+ * same name take precedence, so a later def shadows rather than clobbers. */
+void namespace_refer(Namespace* ns, Value symbol, Var* var);
 
 /* Namespace alias management */
 void namespace_add_alias(Namespace* ns, Value alias_sym, const char* target_ns_name);

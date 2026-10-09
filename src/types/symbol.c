@@ -133,6 +133,20 @@ static Value intern_value(uint8_t type, InternEntry*** table, size_t* table_size
                          const char* ns, const char* name) {
     symbol_init();
 
+    /* "a/b" without an explicit ns is qualified, so it interns as the same
+     * object the reader produces for a/b. Bare "/" and "a/" stay unqualified. */
+    char ns_buf[256];
+    if (!ns) {
+        const char* slash = strchr(name, '/');
+        if (slash && slash != name && slash[1] != '\0' &&
+            (size_t)(slash - name) < sizeof(ns_buf)) {
+            memcpy(ns_buf, name, (size_t)(slash - name));
+            ns_buf[slash - name] = '\0';
+            ns = ns_buf;
+            name = slash + 1;
+        }
+    }
+
     /* Build lookup key */
     char key[512];
     if (ns && *ns) {
