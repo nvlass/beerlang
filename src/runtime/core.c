@@ -572,6 +572,66 @@ static int compare_numbers(Value a, Value b) {
     return -2; /* type error */
 }
 
+static int sign_of(int64_t x) { return (x > 0) - (x < 0); }
+
+/* Three-way comparison with Clojure's ordering: nil sorts first, then
+ * values compare within their kind -- numbers across fixnum/float/bigint,
+ * false < true, chars by codepoint, strings/keywords/symbols
+ * lexicographically, vectors by length then element-wise. Returns false
+ * if a and b aren't comparable (e.g. a string and a number). */
+static bool compare_values(Value a, Value b, int* out) {
+    if (is_nil(a) || is_nil(b)) {
+        *out = is_nil(a) ? (is_nil(b) ? 0 : -1) : 1;
+        return true;
+    }
+    int n = compare_numbers(a, b);
+    if (n != -2) { *out = sign_of(n); return true; }
+
+    bool a_bool = is_true(a) || is_false(a);
+    bool b_bool = is_true(b) || is_false(b);
+    if (a_bool && b_bool) { *out = (int)is_true(a) - (int)is_true(b); return true; }
+    if (is_char(a) && is_char(b)) {
+        *out = sign_of((int64_t)untag_char(a) - (int64_t)untag_char(b));
+        return true;
+    }
+    if (!is_pointer(a) || !is_pointer(b) || object_type(a) != object_type(b)) return false;
+
+    switch (object_type(a)) {
+        case TYPE_STRING:  *out = sign_of(string_cmp(a, b)); return true;
+        case TYPE_KEYWORD: *out = sign_of(strcmp(keyword_name(a), keyword_name(b))); return true;
+        case TYPE_SYMBOL:  *out = sign_of(strcmp(symbol_name(a), symbol_name(b))); return true;
+        case TYPE_VECTOR: {
+            size_t la = vector_length(a), lb = vector_length(b);
+            if (la != lb) { *out = la < lb ? -1 : 1; return true; }
+            for (size_t i = 0; i < la; i++) {
+                if (!compare_values(vector_get(a, i), vector_get(b, i), out)) return false;
+                if (*out != 0) return true;
+            }
+            *out = 0;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+/* compare: (compare a b) => negative, zero or positive (-1/0/1) */
+static Value native_compare(VM* vm, int argc, Value* argv) {
+    if (argc != 2) {
+        vm_error(vm, "compare: requires exactly 2 arguments");
+        return VALUE_NIL;
+    }
+    int result;
+    if (!compare_values(argv[0], argv[1], &result)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "compare: cannot compare %s with %s",
+                 value_type_name(argv[0]), value_type_name(argv[1]));
+        vm_error(vm, msg);
+        return VALUE_NIL;
+    }
+    return make_fixnum(result);
+}
+
 /* Equality: (= a b ...) - true if all values are equal */
 static Value native_eq(VM* vm, int argc, Value* argv) {
     if (argc < 2) {
@@ -2948,6 +3008,8 @@ void core_register_comparison(void) {
     object_release(gt_fn);
     object_release(lte_fn);
     object_release(gte_fn);
+
+    register_native(core_ns, "compare", native_compare);
 }
 
 void core_register_collections(void) {

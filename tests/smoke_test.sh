@@ -270,6 +270,20 @@ check '(zipmap [:a :b] [1 2])'                     '{:b 2, :a 1}'
 check '(partition 2 [1 2 3 4])'                    '((1 2) (3 4))'
 check '(mapcat (fn [x] (list x x)) [1 2 3])'      '(1 1 2 2 3 3)'
 
+# --- compare / sort ---
+check '(compare "a" "b")'                          '-1'
+check '(compare [1 2] [1 3])'                      '-1'
+check '(compare nil 0)'                            '-1'
+check '(compare 2.5 2)'                            '1'
+check '(sort ["pear" "apple" "fig"])'              '("apple" "fig" "pear")'
+check '(sort [:b :a :c])'                          '(:a :b :c)'
+check '(sort > [3 1 2])'                           '(3 2 1)'
+check '(sort (fn [a b] (- b a)) [3 1 2])'          '(3 2 1)'
+check '(sort-by count ["ccc" "a" "bb"])'           '("a" "bb" "ccc")'
+check '(sort-by :age > [{:age 30} {:age 40}])'     '({:age 40} {:age 30})'
+check '(sort-by first [[2 :b] [1 :z] [2 :a] [1 :y]])' '([1 :z] [1 :y] [2 :b] [2 :a])'
+check '(count (sort (reverse (range 20000))))'     '20000'
+
 # --- Sets ---
 check '(count #{1 2 2})'                           '2'
 check '(contains? (conj #{1} 2) 2)'                'true'

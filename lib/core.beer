@@ -367,27 +367,57 @@
               acc))
           {} ks))
 
-; sort uses a simple merge sort
-(defn sort
-  ([coll] (sort (fn [a b] (< a b)) coll))
-  ([comp coll]
-    (let [merge-fn (fn merge-fn [a b]
-                     (cond
-                       (empty? a) b
-                       (empty? b) a
-                       (comp (first a) (first b))
-                         (cons (first a) (merge-fn (rest a) b))
-                       :else
-                         (cons (first b) (merge-fn a (rest b)))))
-          n (count coll)]
-      (if (<= n 1) coll
-        (let [mid (quot n 2)
-              left (take mid coll)
-              right (drop mid coll)]
-          (merge-fn (sort comp left) (sort comp right)))))))
+; --- Sorting ---
+; A comparator is either 3-way (negative/zero/positive, like `compare`) or a
+; boolean predicate "a comes before b" (like `<`). As in Clojure, a boolean
+; result is turned into 3-way by also asking (comp b a).
+(defn __comparator [comp]
+  (fn [a b]
+    (let* [r (comp a b)]
+      (cond (number? r) r
+            r -1
+            (comp b a) 1
+            :else 0))))
 
-(defn sort-by [keyfn coll]
-  (sort (fn [a b] (< (keyfn a) (keyfn b))) coll))
+; Prepend the reversed `rev` onto `tail` (O(len rev), no copying of tail)
+(defn __rev-onto [rev tail]
+  (loop [r rev out tail]
+    (if (empty? r)
+      out
+      (recur (rest r) (cons (first r) out)))))
+
+; Stable merge of two sorted lists. A loop with an accumulator, so the
+; depth doesn't grow with the input (cons-ing onto a recursive call did).
+(defn __merge [cmp a b]
+  (loop [a a b b acc '()]
+    (cond (empty? a) (__rev-onto acc b)
+          (empty? b) (__rev-onto acc a)
+          (<= (cmp (first a) (first b)) 0) (recur (rest a) b (cons (first a) acc))
+          :else (recur a (rest b) (cons (first b) acc)))))
+
+; Top-down merge sort on a list of known length (recursion depth is log n)
+(defn __sort-list [cmp lst n]
+  (if (<= n 1)
+    lst
+    (let* [mid (quot n 2)]
+      (__merge cmp
+               (__sort-list cmp (take mid lst) mid)
+               (__sort-list cmp (drop mid lst) (- n mid))))))
+
+(defn sort
+  "Sorted sequence of coll's elements, by `compare` or the given comparator
+  (3-way or boolean predicate). Stable."
+  ([coll] (sort compare coll))
+  ([comp coll]
+    (let* [s (__seq coll)]
+      (__sort-list (__comparator comp) s (count s)))))
+
+(defn sort-by
+  "Sort coll by (keyfn x), using `compare` or the given comparator."
+  ([keyfn coll] (sort-by keyfn compare coll))
+  ([keyfn comp coll]
+    (let* [cmp (__comparator comp)]
+      (sort (fn [a b] (cmp (keyfn a) (keyfn b))) coll))))
 
 ; --- Nested collection access ---
 (defn get-in [m ks]

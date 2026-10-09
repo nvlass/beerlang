@@ -15,7 +15,12 @@ Small / concrete:
 - `keyword` is 1-arity only; namespaced keywords don't print their
   namespace (see "NVlass TODO" at the bottom)
 - `require` lacks `:refer` (only `:as`)
-- `sort` compares with `<`, so it only sorts numbers (no `compare`)
+- `range` with a negative step returns `()` (`(range 5 0 -1)`); it only
+  counts up
+- `fn` parameters don't destructure (`(fn [[a b]] ...)` is a compile
+  error); only `let` does
+- Optional: native fast path for `(sort coll)` with the default `compare`
+  (100k elements take ~6.5s through the beerlang comparator closure)
 - `write-bytes` missing; `print`/`println`/`prn` write to stdout, not `*out*`
 - Function arity lives in `header.size` (breaks byte accounting at exit),
   no Makefile header dependencies, UBSan shift in `vm.c` — see the
@@ -243,6 +248,19 @@ The full smoke suite under ASAN now reports no memory errors.
   REPL shows them (`#<fn ...>`) instead of a bare type name.
 - `str` renders a collection argument readably, like Clojure:
   `(str ["a"])` → `"[\"a\"]"`; a top-level string or char stays raw.
+
+### `compare` and comparator-based `sort` — COMPLETE
+- Native 3-way `compare` with Clojure's ordering: nil first; numbers across
+  fixnum/float/bigint; false < true; chars by codepoint;
+  strings/keywords/symbols lexicographically; vectors by length then
+  element-wise. Incomparable types are an error.
+- `sort` and `sort-by` default to `compare` (strings, keywords etc. now
+  sort; before, `sort` used `<`, numbers only). A comparator may be 3-way
+  or a boolean predicate (`(sort > xs)` still works), as in Clojure. Added
+  `(sort-by keyfn comp coll)`. Stable.
+- The merge step cons'ed onto a recursive call, so its depth grew with the
+  input; it's now a loop with an accumulator (recursion depth is log n).
+  100k elements sort fine.
 
 ### Sets — COMPLETE
 - New `TYPE_SET = 0x23` (`src/types/set.c`, `include/set.h`), a persistent
