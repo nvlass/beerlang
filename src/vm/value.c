@@ -70,6 +70,10 @@ void value_print(Value v) {
                 hashmap_print(v);
                 break;
 
+            case TYPE_SET:
+                set_print(v);
+                break;
+
             case TYPE_FUNCTION:
                 printf("#<fn %s>", function_name(v));
                 break;
@@ -196,6 +200,9 @@ void value_print_readable(Value v) {
                 break;
             case TYPE_VECTOR:
                 vector_print_readable(v);
+                break;
+            case TYPE_SET:
+                set_print_readable(v);
                 break;
             case TYPE_HASHMAP:
                 hashmap_print_readable(v);
@@ -341,6 +348,7 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
             case TYPE_CONS:
             case TYPE_VECTOR:
             case TYPE_HASHMAP:
+            case TYPE_SET:
             case TYPE_FUNCTION:
             case TYPE_NATIVE_FN:
 #ifdef BEER_CFFI
@@ -487,6 +495,9 @@ bool value_equal(Value a, Value b) {
                 /* Compare hashmaps key-value wise */
                 return hashmap_equal(a, b);
 
+            case TYPE_SET:
+                return set_equal(a, b);
+
             case TYPE_BIGINT:
                 /* Compare bigint values */
                 return bigint_cmp(a, b) == 0;
@@ -518,6 +529,7 @@ const char* value_type_name(Value v) {
             case TYPE_CONS: return "cons";
             case TYPE_VECTOR: return "vector";
             case TYPE_HASHMAP: return "hashmap";
+            case TYPE_SET: return "set";
             case TYPE_FUNCTION: return "function";
             case TYPE_NATIVE_FN: return "native-fn";
             case TYPE_VAR: return "var";

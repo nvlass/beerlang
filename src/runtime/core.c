@@ -21,6 +21,7 @@
 #include "cons.h"
 #include "vector.h"
 #include "hashmap.h"
+#include "set.h"
 #include "function.h"
 #include "namespace.h"
 #include "symbol.h"
@@ -42,6 +43,7 @@ static Value native_eval(VM* vm, int argc, Value* argv);
 static Value native_macroexpand_1(VM* vm, int argc, Value* argv);
 static Value native_macroexpand(VM* vm, int argc, Value* argv);
 static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len);
+static size_t sprint_coll_display(Value v, char** buf, size_t* cap, size_t len);
 
 /* =================================================================
  * Arithmetic Operations
@@ -726,6 +728,14 @@ static Value native_first(VM* vm, int argc, Value* argv) {
         if (string_char_length(coll) == 0) return VALUE_NIL;
         return make_char(string_char_at(coll, 0));
     }
+    if (is_set(coll)) {
+        if (set_count(coll) == 0) return VALUE_NIL;
+        Value elems = set_elements(coll);
+        Value v = vector_get(elems, 0);
+        if (is_pointer(v)) object_retain(v);
+        object_release(elems);
+        return v;
+    }
     vm_error(vm, "first: argument must be a sequence");
     return VALUE_NIL;
 }
@@ -759,6 +769,16 @@ static Value native_rest(VM* vm, int argc, Value* argv) {
             result = new_result;
         }
         return result;
+    }
+    if (is_set(coll)) {
+        size_t len = set_count(coll);
+        if (len <= 1) return VALUE_NIL;
+        Value elems = set_elements(coll);
+        Value tail = vector_slice(elems, 1, len);
+        Value lst = vector_to_list(tail);
+        object_release(tail);
+        object_release(elems);
+        return lst;
     }
     vm_error(vm, "rest: argument must be a sequence");
     return VALUE_NIL;
@@ -816,6 +836,7 @@ static Value native_count(VM* vm, int argc, Value* argv) {
     if (is_cons(coll)) return make_fixnum(list_length(coll));
     if (is_vector(coll)) return make_fixnum((int64_t)vector_length(coll));
     if (is_hashmap(coll)) return make_fixnum((int64_t)hashmap_size(coll));
+    if (is_set(coll)) return make_fixnum((int64_t)set_count(coll));
     if (is_string(coll)) return make_fixnum((int64_t)string_char_length(coll));
     vm_error(vm, "count: argument must be a collection or nil");
     return VALUE_NIL;
@@ -878,6 +899,17 @@ static Value native_conj(VM* vm, int argc, Value* argv) {
         return result;
     }
 
+    if (is_set(coll)) {
+        Value result = coll;
+        object_retain(result);
+        for (int i = 1; i < argc; i++) {
+            Value next = set_conj(result, argv[i]);
+            object_release(result);
+            result = next;
+        }
+        return result;
+    }
+
     vm_error(vm, "conj: first argument must be a collection or nil");
     return VALUE_NIL;
 }
@@ -893,6 +925,7 @@ static Value native_empty_q(VM* vm, int argc, Value* argv) {
     if (is_cons(coll)) return VALUE_FALSE; /* a cons is never empty */
     if (is_vector(coll)) return vector_length(coll) == 0 ? VALUE_TRUE : VALUE_FALSE;
     if (is_hashmap(coll)) return hashmap_size(coll) == 0 ? VALUE_TRUE : VALUE_FALSE;
+    if (is_set(coll)) return set_count(coll) == 0 ? VALUE_TRUE : VALUE_FALSE;
     if (is_string(coll)) return string_char_length(coll) == 0 ? VALUE_TRUE : VALUE_FALSE;
     vm_error(vm, "empty?: argument must be a collection or nil");
     return VALUE_NIL;
@@ -912,6 +945,12 @@ static Value native_get(VM* vm, int argc, Value* argv) {
 
     if (is_hashmap(coll)) {
         Value v = hashmap_get_default(coll, key, default_val);
+        if (is_pointer(v)) object_retain(v);
+        return v;
+    }
+
+    if (is_set(coll)) {
+        Value v = set_contains(coll, key) ? set_get(coll, key) : default_val;
         if (is_pointer(v)) object_retain(v);
         return v;
     }
@@ -984,8 +1023,91 @@ static Value native_seq_internal(VM* vm, int argc, Value* argv) {
     }
     Value coll = argv[0];
     if (is_vector(coll)) return vector_to_list(coll);
+    if (is_set(coll)) {
+        Value elems = set_elements(coll);
+        Value lst = vector_to_list(elems);
+        object_release(elems);
+        return lst;
+    }
     if (is_pointer(coll)) object_retain(coll);
     return coll;
+}
+
+/* hash-set: (hash-set & xs) => set of the args (what #{...} reads as) */
+static Value native_hash_set(VM* vm, int argc, Value* argv) {
+    (void)vm;
+    return set_from_array(argv, (size_t)argc);
+}
+
+/* set: (set coll) => set of coll's elements (vector, list, set, string, nil) */
+static Value native_set(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "set: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    Value coll = argv[0];
+    if (is_nil(coll)) return set_create();
+    if (is_set(coll)) { object_retain(coll); return coll; }
+    if (is_vector(coll)) {
+        Value result = set_create();
+        size_t n = vector_length(coll);
+        for (size_t i = 0; i < n; i++) {
+            Value next = set_conj(result, vector_get(coll, i));
+            object_release(result);
+            result = next;
+        }
+        return result;
+    }
+    if (is_cons(coll)) {
+        Value result = set_create();
+        for (Value c = coll; is_cons(c); c = cdr(c)) {
+            Value next = set_conj(result, car(c));
+            object_release(result);
+            result = next;
+        }
+        return result;
+    }
+    if (is_string(coll)) {
+        Value result = set_create();
+        size_t n = string_char_length(coll);
+        for (size_t i = 0; i < n; i++) {
+            Value next = set_conj(result, make_char(string_char_at(coll, i)));
+            object_release(result);
+            result = next;
+        }
+        return result;
+    }
+    vm_error(vm, "set: argument must be a vector, list, set, string or nil");
+    return VALUE_NIL;
+}
+
+/* disj: (disj set & xs) => set without xs */
+static Value native_disj(VM* vm, int argc, Value* argv) {
+    if (argc < 1) {
+        vm_error(vm, "disj: requires a set");
+        return VALUE_NIL;
+    }
+    if (is_nil(argv[0])) return VALUE_NIL;
+    if (!is_set(argv[0])) {
+        vm_error(vm, "disj: first argument must be a set");
+        return VALUE_NIL;
+    }
+    Value result = argv[0];
+    object_retain(result);
+    for (int i = 1; i < argc; i++) {
+        Value next = set_disj(result, argv[i]);
+        object_release(result);
+        result = next;
+    }
+    return result;
+}
+
+static Value native_set_q(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "set?: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    return is_set(argv[0]) ? VALUE_TRUE : VALUE_FALSE;
 }
 
 /* peek: (peek coll) => last of a vector, first of a list, nil for nil */
@@ -1119,6 +1241,9 @@ static Value native_contains_q(VM* vm, int argc, Value* argv) {
     if (is_nil(coll)) return VALUE_FALSE;
     if (is_hashmap(coll)) {
         return hashmap_contains(coll, key) ? VALUE_TRUE : VALUE_FALSE;
+    }
+    if (is_set(coll)) {
+        return set_contains(coll, key) ? VALUE_TRUE : VALUE_FALSE;
     }
     /* Vectors: contains? checks if index is valid */
     if (is_vector(coll) && is_fixnum(key)) {
@@ -1273,11 +1398,14 @@ static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len) {
                 s = owned;
                 slen = strlen(owned);
                 break;
+            case TYPE_CONS:
+            case TYPE_VECTOR:
+            case TYPE_HASHMAP:
+            case TYPE_SET:
+                return sprint_coll_display(v, buf, cap, len);
             default:
-                /* For complex types, just use the type name */
-                s = value_type_name(v);
-                slen = strlen(s);
-                break;
+                /* Functions, atoms, tasks, ...: same as the REPL shows them */
+                return value_sprint_readable(v, buf, cap, len);
         }
     } else {
         s = "#<unknown>"; slen = 10;
@@ -1293,7 +1421,73 @@ static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len) {
     return len + slen;
 }
 
-/* str: (str & args) => concatenate string representations */
+static size_t sprint_lit(const char* s, char** buf, size_t* cap, size_t len) {
+    size_t slen = strlen(s);
+    while (len + slen + 1 > *cap) {
+        *cap = (*cap < 64) ? 64 : *cap * 2;
+        *buf = realloc(*buf, *cap);
+    }
+    memcpy(*buf + len, s, slen);
+    return len + slen;
+}
+
+/* Display-mode rendering of a collection (what print/println show):
+ * elements are rendered with value_sprint, so strings and chars inside
+ * appear raw, like Clojure's (println ["a" \b]) => [a b]. */
+static size_t sprint_coll_display(Value v, char** buf, size_t* cap, size_t len) {
+    uint8_t t = object_type(v);
+    if (t == TYPE_CONS) {
+        len = sprint_lit("(", buf, cap, len);
+        for (Value c = v; is_cons(c); c = cdr(c)) {
+            if (c.as.object != v.as.object) len = sprint_lit(" ", buf, cap, len);
+            len = value_sprint(car(c), buf, cap, len);
+        }
+        return sprint_lit(")", buf, cap, len);
+    }
+    if (t == TYPE_VECTOR) {
+        len = sprint_lit("[", buf, cap, len);
+        size_t n = vector_length(v);
+        for (size_t i = 0; i < n; i++) {
+            if (i > 0) len = sprint_lit(" ", buf, cap, len);
+            len = value_sprint(vector_get(v, i), buf, cap, len);
+        }
+        return sprint_lit("]", buf, cap, len);
+    }
+    if (t == TYPE_SET) {
+        Value elems = set_elements(v);
+        size_t n = vector_length(elems);
+        len = sprint_lit("#{", buf, cap, len);
+        for (size_t i = 0; i < n; i++) {
+            if (i > 0) len = sprint_lit(" ", buf, cap, len);
+            len = value_sprint(vector_get(elems, i), buf, cap, len);
+        }
+        object_release(elems);
+        return sprint_lit("}", buf, cap, len);
+    }
+    /* TYPE_HASHMAP */
+    Value keys = hashmap_keys(v);
+    size_t n = vector_length(keys);
+    len = sprint_lit("{", buf, cap, len);
+    for (size_t i = 0; i < n; i++) {
+        Value k = vector_get(keys, i);
+        if (i > 0) len = sprint_lit(", ", buf, cap, len);
+        len = value_sprint(k, buf, cap, len);
+        len = sprint_lit(" ", buf, cap, len);
+        len = value_sprint(hashmap_get(v, k), buf, cap, len);
+    }
+    object_release(keys);
+    return sprint_lit("}", buf, cap, len);
+}
+
+static bool is_collection(Value v) {
+    if (!is_pointer(v)) return false;
+    uint8_t t = object_type(v);
+    return t == TYPE_CONS || t == TYPE_VECTOR || t == TYPE_HASHMAP || t == TYPE_SET;
+}
+
+/* str: (str & args) => concatenate string representations.
+ * Like Clojure, a collection argument renders readably ((str ["a"]) is
+ * "[\"a\"]"); a top-level string or char is appended raw. */
 static Value native_str(VM* vm, int argc, Value* argv) {
     (void)vm;
     if (argc == 0) return string_from_cstr("");
@@ -1303,7 +1497,9 @@ static Value native_str(VM* vm, int argc, Value* argv) {
     size_t len = 0;
 
     for (int i = 0; i < argc; i++) {
-        len = value_sprint(argv[i], &buf, &cap, len);
+        len = is_collection(argv[i])
+            ? value_sprint_readable(argv[i], &buf, &cap, len)
+            : value_sprint(argv[i], &buf, &cap, len);
     }
     buf[len] = '\0';
 
@@ -1404,6 +1600,7 @@ static Value native_type(VM* vm, int argc, Value* argv) {
             case TYPE_CONS:      name = "list";      break;
             case TYPE_VECTOR:    name = "vector";    break;
             case TYPE_HASHMAP:   name = "map";       break;
+            case TYPE_SET:       name = "set";       break;
             case TYPE_FUNCTION:  name = "function";  break;
             case TYPE_NATIVE_FN: name = "function";  break;
             case TYPE_ATOM:      name = "atom";      break;
@@ -2774,6 +2971,10 @@ void core_register_collections(void) {
     register_native(core_ns, "assoc", native_assoc);
     register_native(core_ns, "dissoc", native_dissoc);
     register_native(core_ns, "__seq", native_seq_internal);
+    register_native(core_ns, "hash-set", native_hash_set);
+    register_native(core_ns, "set", native_set);
+    register_native(core_ns, "disj", native_disj);
+    register_native(core_ns, "set?", native_set_q);
     register_native(core_ns, "peek", native_peek);
     register_native(core_ns, "pop", native_pop);
     register_native(core_ns, "subvec", native_subvec);

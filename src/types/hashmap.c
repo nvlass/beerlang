@@ -125,6 +125,8 @@ uint32_t value_hash(Value v) {
             }
             return h;
         }
+        case TYPE_SET:
+            return set_hash(v);
         case TYPE_HASHMAP: {
             uint32_t h = 0;
             Value keys = hashmap_keys(v);

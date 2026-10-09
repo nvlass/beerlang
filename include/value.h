@@ -173,6 +173,7 @@ typedef enum {
     TYPE_CONS = 0x20,
     TYPE_VECTOR = 0x21,
     TYPE_HASHMAP = 0x22,
+    TYPE_SET = 0x23,
     TYPE_FUNCTION = 0x30,
     TYPE_NATIVE_FN = 0x31,
     TYPE_VAR = 0x40,

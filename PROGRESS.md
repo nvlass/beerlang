@@ -1,6 +1,6 @@
 # Beerlang Implementation Progress
 
-**Last Updated:** 2026-10-02
+**Last Updated:** 2026-10-09
 
 ## Current Status
 
@@ -40,6 +40,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - Phase 25: Distributed `beer.hive` — two-node TCP actor messaging with HMAC-SHA256 auth
 - Phase 26: `ByteBuffer` type — mutable binary buffer with NIO-style cursor, `beer.bytes` namespace
 - Phase 27: Persistent vectors — 32-way trie + tail, O(1) clone, `assoc`/`pop`/`peek`/`subvec` on vectors; `lib/core.beer` list builders O(n²) → O(n)
+- Phase 28: Sets (`#{...}`, `hash-set`, `set`, `disj`, callable sets) on the HAMT; `str`/`println` render collections like Clojure
 
 ## Completed Components
 
@@ -58,6 +59,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - **Cons/List**: Traditional pairs with rich API (map, filter, fold)
 - **Vector**: Persistent vector (Clojure-style 32-way trie + tail) with structural sharing; O(log32 N) persistent update, O(1) clone, amortized O(1) C-side building
 - **HashMap**: HAMT (Hash Array Mapped Trie) with structural sharing
+- **Set**: Persistent set wrapping the HAMT (element → itself); callable, order-independent equality and hashing
 - **Atom**: Mutable reference type with `swap!`, `reset!`, `compare-and-set!`
 - **ByteBuffer**: Mutable, non-UTF8-validated binary buffer with NIO-style position/limit cursor; endian-explicit u8-u64/i8-i64 accessors, bulk fill!/copy!/blit, DMA-friendly raw address access (`beer.bytes` namespace). Driven by beeros driver work — see `docs/beerlang-bytebuffer.md` in the beeros repo
 

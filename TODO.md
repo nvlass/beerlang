@@ -5,9 +5,38 @@
 ## Implementation Status Summary
 
 **All tests passing, 100% pass rate**
-- Unit tests: 61
-- REPL smoke tests: 445
-- **Last Updated:** 2026-04-15
+- Unit test suites: 26 (`make test`)
+- REPL smoke tests: 498 (`bash tests/smoke_test.sh`)
+- **Last Updated:** 2026-10-09
+
+## Open Items at a Glance
+
+Small / concrete:
+- `keyword` is 1-arity only; namespaced keywords don't print their
+  namespace (see "NVlass TODO" at the bottom)
+- `require` lacks `:refer` (only `:as`)
+- `sort` compares with `<`, so it only sorts numbers (no `compare`)
+- `write-bytes` missing; `print`/`println`/`prn` write to stdout, not `*out*`
+- Function arity lives in `header.size` (breaks byte accounting at exit),
+  no Makefile header dependencies, UBSan shift in `vm.c` — see the
+  refcount section's follow-ups
+
+Bigger:
+- AOT: `require`/`load` don't use `.beerc` yet (format + compiler exist) — #6
+- CFFI callbacks (C calling a beerlang fn) — #8
+- `beer.hive` Phase 4 (security) — #10
+- Tooling: line editing/history, debugger, profiler, doc generation,
+  CLI redesign phase 2 — #5
+- I/O: `with-timeout`, `select`/`alts` — #3
+- Vectors: transients, RRB trees, a vector seq type — persistent vectors section
+- `examples/embedded_http_prefork` (multi-core HTTP example, one process
+  per worker) — designed in `examples/embedded_http/README.md`
+- Pick a concurrency direction from
+  `docs/design/14_WORLD_ISOLATION_INVESTIGATION.md`; reconcile
+  `docs/design/08_MULTITASKING.md` with the scheduler as built
+
+Long-term: `clauj` (#11), C → beerlang (#12), the Doom rewrite (needs
+beeros filesystem + input driver; see the beeros roadmap)
 
 ## Completed Phases
 
@@ -187,9 +216,9 @@ The full smoke suite under ASAN now reports no memory errors.
 - Tests: trie depth boundaries, persistence, top-down sharing trap,
   pop-to-empty across depth-3, heap-element refcounts, differential fuzz;
   ASAN/UBSan clean
-- **Follow-ups:** sets on the HAMT (`#{}` reads as `(hash-set ...)` but
-  nothing defines it); RRB trees for O(log N) `subvec`/concat;
-  user-facing transients
+- **Follow-ups:** RRB trees for O(log N) `subvec`/concat; user-facing
+  transients; a vector seq type so `rest` on a vector doesn't copy (sets:
+  done, see "Sets")
 
 ### O(n) list builders in `lib/core.beer` — COMPLETE
 - `range`, `map`, `filter`, `take`, `take-while`, `butlast`, `repeat`,
@@ -206,12 +235,27 @@ The full smoke suite under ASAN now reports no memory errors.
 - Remaining: a real vector seq type would make `rest` on vectors O(1)
   without the up-front conversion.
 
-### `println`/`str` on collections print type names — TODO
-`(println [1 2 3])` prints `vector`, `(str {:a 1})` prints `hashmap` in
-script mode (REPL printing and `prn` are correct). Pre-existing, found
-while testing persistent vectors. The cause is `value_sprint` in
-`src/runtime/core.c` falling back to `value_type_name` for collections.
-(Bigints had the same stub there and in `value_sprint_readable`: fixed.)
+### `println`/`str` on collections — COMPLETE
+- `value_sprint` (`src/runtime/core.c`) fell back to the type name for
+  collections: `(println [1 2 3])` printed `vector`. It now renders lists,
+  vectors, maps and sets in display mode, recursively, matching Clojure:
+  `(println ["a" \b])` → `[a b]`. Functions, atoms, etc. render as the
+  REPL shows them (`#<fn ...>`) instead of a bare type name.
+- `str` renders a collection argument readably, like Clojure:
+  `(str ["a"])` → `"[\"a\"]"`; a top-level string or char stays raw.
+
+### Sets — COMPLETE
+- New `TYPE_SET = 0x23` (`src/types/set.c`, `include/set.h`), a persistent
+  set wrapping the HAMT hashmap (element → itself).
+- `#{...}` now works (the reader already produced `(hash-set ...)`).
+  Natives: `hash-set`, `set`, `disj`, `set?`; `conj`, `count`,
+  `contains?`, `get`, `empty?`, `first`, `rest` handle sets, and `__seq`
+  does too, so `reduce`/`map`/`filter`/`into` work on them.
+- Sets are callable (`(#{1 2} 1)` → `1`), compare order-independently,
+  hash order-independently (usable as map keys), print as `#{...}`, and
+  `(type #{})` is `:set`.
+- Tests: smoke checks, plus a leak/over-release probe in
+  `tests/runtime/test_refcount.c`.
 
 ### WASM build and 64-bit integers on wasm32 — COMPLETE
 - `wasm/Makefile.wasm` lists runtime sources explicitly, so the new
@@ -274,21 +318,20 @@ changes to user-facing code.
 - Reactor thread wakes tasks on I/O readiness
 
 **Phase 1 tasks (blocking):**
-- [ ] `Stream` heap object: `TYPE_STREAM`, fd, type tag, read/write buffers, flags
-- [ ] `stream_from_fd()` — wrap an existing fd
-- [ ] Buffered read/write (8KB default buffers)
-- [ ] File I/O natives: `open`, `close`, `read-line`, `write`, `flush`
-- [ ] `slurp` / `spit` convenience functions
-- [ ] `with-open` macro in core.beer (auto-close via try/catch, no `finally` needed)
-- [ ] Standard streams: `*in*`, `*out*`, `*err*` as dynamic vars
-- [ ] Redirect `println`/`print`/`prn` to use `*out*` stream
-- [ ] Binary read/write: `read-bytes`, `write-bytes` (needed for tar, network later)
-- [ ] Socket support: `connect`, `listen`, `accept`, `close` — same Stream type
-  - TCP client: `(def s (connect "host" port))` → Stream
-  - TCP server: `(def srv (listen port))`, `(accept srv)` → Stream
-  - Sockets are just fds — same `read-line`/`write`/`close` as files
-- [ ] `select` / `poll` wrapper for multiplexing (blocking `poll()` for now,
-  replaced by reactor later)
+- [x] `Stream` heap object: `TYPE_STREAM`, fd, type tag, read/write buffers, flags
+- [x] `stream_from_fd()` — wrap an existing fd
+- [x] Buffered read/write (8KB default buffers)
+- [x] File I/O natives: `open`, `close`, `read-line`, `write`, `flush`
+- [x] `slurp` / `spit` convenience functions
+- [x] `with-open` macro in core.beer
+- [x] Standard streams: `*in*`, `*out*`, `*err*` as dynamic vars
+- [ ] Redirect `println`/`print`/`prn` to use `*out*` stream (they write to
+  stdout directly)
+- [ ] Binary read/write: `read-bytes` done; `write-bytes` missing
+  (`beer.bytes` ByteBuffers are the natural payload type for it now)
+- [x] Socket support — as `beer.tcp` (`tcp/listen`, `tcp/accept`,
+  `tcp/connect`), same Stream type, same `read-line`/`write`/`close`
+- [ ] `select` / `poll` for multiplexing — see #3
 
 **Design decisions:**
 - Stream wraps a Unix fd. Files, sockets, pipes, stdin/stdout all use the same type.
@@ -315,11 +358,11 @@ changes to user-facing code.
 - [x] Path resolution: `my.ns.data` → `my/ns/data.beer`
 - [x] Functions store defining namespace (`ns_name` field) for correct var resolution
 - [x] `vm_error` now copies messages (safe for stack buffers)
+- [x] Circular require detection (`requiring_stack` in `core.c`)
+- [x] `*ns*` dynamic var
+- [x] `BEERPATH` env var (see #4)
 - **Not yet implemented:**
   - `:refer` in require (only `:as` supported)
-  - Circular require prevention
-  - `*ns*` dynamic var
-  - `BEERPATH` env var
 
 ### 3. I/O System — Phase 2: Async Reactor — COMPLETE
 
@@ -400,37 +443,37 @@ containing quotes or spaces. Possible solutions:
 
 Defer until dependency/alias support in `beer.edn` clarifies what arg shapes are needed.
 
-### 6. AOT Compilation
+### 6. AOT Compilation — PARTIALLY COMPLETE
 Ahead-of-time compilation to bytecode — skip the reader+compiler at runtime.
 
-- [ ] Serialize compiled bytecode to file (`.beerc` files)
-- [ ] Load pre-compiled bytecode directly (skip parse + compile)
-- [ ] Cache compiled files (recompile only if source changed, like Python's `.pyc`)
-- **Design questions:**
-  - Bytecode file format: header (magic, version, checksum) + constant pool + code bytes?
-  - How to handle macros? Macros must be available at compile time, so AOT needs
-    a two-pass approach or dependency ordering.
-  - Should AOT produce a single monolithic file or one `.beerc` per namespace?
-  - Worth doing before or after the tar-based distribution?
-    Tar bundles could contain `.beerc` files instead of `.beer` source.
-  - Native compilation (C codegen or LLVM) is a separate, much larger effort — punt to v2.0+
+- [x] Serialize compiled bytecode to `.beerc` files (`src/lib/aot.c`,
+  `lib/beer/beerc.beer`, `lib/beer/build.beer`; format: magic "BEER" +
+  version + source mtime + CRC32 + per-form bytecode and typed constants)
+- [x] `beer compile` / `beer check` — compile stale files, report stale/missing
+- [ ] **Load pre-compiled bytecode in `require`/`load`** when the `.beerc`
+  is fresh (skip parse + compile) — the remaining piece
+- Known limitation: `compile-file!` is compile-only, so macros defined in a
+  file are not available later in the same file.
+- Native compilation (C codegen or LLVM) is a separate, much larger effort.
 
-### 7. Embeddable C API
-- [ ] `BeerState*` opaque handle
-- [ ] `beer_eval(state, source)` — evaluate a string
-- [ ] `beer_register_native(state, name, fn)` — register C functions
-- [ ] `beer_call(state, fn, args)` — call a beerlang function from C
-- [ ] `beer_get/set` for values
+### 7. Embeddable C API — COMPLETE
+- [x] `include/beer.h` / `src/lib/beer.c` / `make libbeerlang` →
+  `build/libbeerlang.a`: `beer_open`/`beer_close`, `beer_do_string`,
+  `beer_do_file`, `beer_eval_expr`, `beer_lookup`, `beer_call`,
+  `beer_register`, value constructors/inspectors, `beer_length`/`beer_nth`/
+  `beer_get`
+- Examples: `examples/embed.c`, `examples/raylib_game`, `examples/embedded_http`
+- Gap: no map/vector constructors in `beer.h` (embedders reach into
+  `hashmap.h`/`vector.h`, see `examples/embedded_http/main.c`)
 
-### 8. CFFI (C Foreign Function Interface)
-- [ ] Call C shared libraries from beerlang (`dlopen`/`dlsym`)
-- [ ] Type marshalling: beerlang values ↔ C types (int, double, char*, structs)
-- [ ] Callback support (pass beerlang fn as C function pointer)
-- **Design questions:**
-  - Use libffi for calling conventions, or hand-roll for common platforms?
-  - How to describe C function signatures from beerlang? (Clojure-style type hints? Schema maps?)
-  - Thread safety: C calls may block — run on separate thread like `beer.shell/exec`?
-  - Memory management: who owns strings/buffers crossing the boundary?
+### 8. CFFI (C Foreign Function Interface) — PARTIALLY COMPLETE
+- [x] Call C shared libraries via libffi (`make CFFI=1`): `ffi/open`,
+  `ffi/sym`, `ffi/call`, `ffi/malloc`/`ffi/free`, `ffi/cget`/`ffi/cset!`
+- [x] Binding macros: `def-cfn`, `def-cstruct`, `def-cstruct-accessors`,
+  `load-bindings`; `scripts/beer-probe` generates multi-ABI bindings
+- [ ] Callback support (pass a beerlang fn as a C function pointer)
+- Open: blocking C calls still run on the VM thread (could dispatch to a
+  separate thread like `beer.shell/exec`)
 
 ### 9. `task-watch` — Task Completion Monitoring — COMPLETE
 - [x] `(task-watch task callback-fn)` — register a callback invoked when task finishes/crashes
@@ -438,7 +481,7 @@ Ahead-of-time compilation to bytecode — skip the reader+compiler at runtime.
 - [x] Callback is spawned as a new task (runs in scheduler, can do channel ops, spawn, etc.)
 - [x] Implementation: watcher list on Task struct, scheduler checks on TASK_DONE transition
 
-### 10. `beer.hive` — Distributed Actor Library — Phase 2 COMPLETE
+### 10. `beer.hive` — Distributed Actor Library — Phase 3 COMPLETE
 
 Erlang-inspired distributed computing for beerlang. Design goal: pure beerlang library with minimal VM changes.
 
@@ -459,8 +502,15 @@ Erlang-inspired distributed computing for beerlang. Design goal: pure beerlang l
 - [x] C runtime fix: `native_close` wakes blocked I/O tasks; `tcp/accept` handles closed fd
 - [x] Smoke tests: 9 two-node loopback tests (all passing, 445 total)
 
-**Remaining phases:**
-- **Phase 3 — Resilience:** monitoring, heartbeats, reconnection, cross-node supervisors
+**Phase 3 — Resilience: COMPLETE**
+- [x] Heartbeats (PING/PONG), automatic reconnection with exponential backoff
+- [x] `monitor`/`demonitor` with DOWN messages
+- [x] Cross-node supervisors
+- [x] Smoke tests: start/stop/restart, double-start, monitor/demonitor,
+  heartbeat keepalive (the two-node remote-ask tests are occasionally flaky
+  on timing)
+
+**Remaining:**
 - **Phase 4 — Security:** eval sandboxing, resource quotas
 
 **Security concerns:**
@@ -501,7 +551,12 @@ no boundary at all. The two are complementary, not competing.
 
 ## Known Issues
 
-- **Memory leak warnings at REPL shutdown** — expected (kept CompiledCode alive for fn pointers; intern tables not freed)
+- **Memory leak warning at REPL shutdown** — the live object count is
+  expected (compiled units are kept alive because functions hold raw
+  pointers into their bytecode). The huge "Bytes still allocated" number is
+  an accounting artefact: functions store their arity in `header.size`,
+  which the free path uses as the allocation size (see the refcount
+  section's follow-ups).
 
 ## Branch Notes
 

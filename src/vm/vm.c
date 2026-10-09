@@ -385,6 +385,18 @@ static bool vm_invoke_value(VM* vm, Value head, int n_args, Value* args, Value* 
         return true;
     }
 
+    /* Set as membership function: (#{1 2} 1) => 1, (#{1 2} 3) => nil */
+    if (is_set(head)) {
+        if (n_args < 1 || n_args > 2) {
+            vm_error(vm, "Set lookup expects 1 or 2 arguments");
+            return true;
+        }
+        Value def = (n_args == 2) ? args[1] : VALUE_NIL;
+        *result = set_contains(head, args[0]) ? set_get(head, args[0]) : def;
+        if (is_pointer(*result)) object_retain(*result);
+        return true;
+    }
+
     /* Vector as index function */
     if (is_vector(head)) {
         if (n_args != 1) {

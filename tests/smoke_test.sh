@@ -270,6 +270,25 @@ check '(zipmap [:a :b] [1 2])'                     '{:b 2, :a 1}'
 check '(partition 2 [1 2 3 4])'                    '((1 2) (3 4))'
 check '(mapcat (fn [x] (list x x)) [1 2 3])'      '(1 1 2 2 3 3)'
 
+# --- Sets ---
+check '(count #{1 2 2})'                           '2'
+check '(contains? (conj #{1} 2) 2)'                'true'
+check '(disj #{1 2} 1)'                            '#{2}'
+check '(#{:a :b} :a)'                              ':a'
+check '(#{:a :b} :z)'                              'nil'
+check '(= #{1 2 3} #{3 2 1})'                      'true'
+check '(get {#{1 2} :hit} #{2 1})'                 ':hit'
+check '(count (into #{} [1 1 2 3]))'               '3'
+check '(reduce + 0 #{1 2 3})'                      '6'
+check '(set? (set [1 2]))'                         'true'
+check '(type #{})'                                 ':set'
+
+# --- str/println on collections ---
+check '(println [1 "a" \b #{2}])'                  '[1 a b #{2}]'
+check '(println {:k "v"})'                         '{:k v}'
+check '(str [1 "a" \b])'                           '"[1 \"a\" \\b]"'
+check '(str "x" (list 1 2) "y")'                   '"x(1 2)y"'
+
 # --- Bigint printing and full-width overflow ---
 check '(pr-str 9223372036854775808)'               '"9223372036854775808"'
 check '(str "n=" (* 3037000500 3037000500))'       '"n=9223372037000250000"'

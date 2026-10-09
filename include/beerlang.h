@@ -33,6 +33,7 @@ typedef struct VM VM;
 #include "cons.h"
 #include "vector.h"
 #include "hashmap.h"
+#include "set.h"
 #include "function.h"
 #include "namespace.h"
 #include "vm.h"

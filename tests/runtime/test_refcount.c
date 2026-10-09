@@ -8,6 +8,7 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 #include "test.h"
 #include "beerlang.h"
 #include "beer.h"
@@ -23,7 +24,9 @@ static const char* SRC =
     "(defn g3 [a b c] (count (str a b c)))"
     "(defn tail-overlap [] (let [s \"xy\"] (g3 s \"p\" \"q\")))"
     "(defn emit-map [] (json/emit {:a 1 :b \"hi\" :c [1 2]}))"
-    "(defn spawn-capture [] (let [v [1 2 3]] (await (spawn (fn [] (count v))))))";
+    "(defn spawn-capture [] (let [v [1 2 3]] (await (spawn (fn [] (count v))))))"
+    "(defn set-ops [] (let [s (into #{} [\"a\" \"bb\" \"a\"]) t (disj (conj s \"ccc\") \"a\")]"
+    "  (str (count t) (contains? t \"bb\") (get {s 1} #{\"bb\" \"a\"}) (reduce + 0 (map count t)))))";
 
 static long delta_over(const char* fname, int iterations, BeerValue* last) {
     BeerValue f = beer_lookup(B, fname);
@@ -79,6 +82,17 @@ TEST(spawned_capturing_closure) {
     return NULL;
 }
 
+TEST(set_operations) {
+    BeerValue f = beer_lookup(B, "rc/set-ops");
+    BeerValue r = beer_call(B, f, 0, NULL);
+    ASSERT(beer_is_string(r) && strcmp(beer_to_cstring(r), "2true15") == 0,
+           "set ops give the expected result");
+    beer_release(r);
+    beer_release(f);
+    ASSERT_EQ(delta_over("rc/set-ops", 300, &r), 0, "no leak or over-release");
+    return NULL;
+}
+
 static const char* all_tests(void) {
     B = beer_open();
     beer_add_load_path(B, "lib");
@@ -91,6 +105,7 @@ static const char* all_tests(void) {
     RUN_TEST(tail_call_args_overlap_frame);
     RUN_TEST(json_emit_map_does_not_leak);
     RUN_TEST(spawned_capturing_closure);
+    RUN_TEST(set_operations);
     return NULL;
 }
 
