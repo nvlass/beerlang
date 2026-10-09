@@ -270,6 +270,13 @@ check '(zipmap [:a :b] [1 2])'                     '{:b 2, :a 1}'
 check '(partition 2 [1 2 3 4])'                    '((1 2) (3 4))'
 check '(mapcat (fn [x] (list x x)) [1 2 3])'      '(1 1 2 2 3 3)'
 
+# --- boolean / partition with step ---
+check '(map boolean [nil false 0 "" []])'          '(false false true true true)'
+check '(partition 2 1 [1 2 3 4])'                  '((1 2) (2 3) (3 4))'
+check '(partition 3 2 (range 8))'                  '((0 1 2) (2 3 4) (4 5 6))'
+check '(partition 2 3 [1 2 3 4 5 6 7])'            '((1 2) (4 5))'
+check '(try (partition 2 0 [1 2]) (catch e :err))' ':err'
+
 # --- compare / sort ---
 check '(compare "a" "b")'                          '-1'
 check '(compare [1 2] [1 3])'                      '-1'

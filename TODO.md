@@ -19,7 +19,6 @@ Small / concrete:
   counts up
 - `fn` parameters don't destructure (`(fn [[a b]] ...)` is a compile
   error); only `let` does
-- Missing `boolean`; `partition` has no step arity (`(partition 2 1 xs)`)
 - `write-bytes` missing; `print`/`println`/`prn` write to stdout, not `*out*`
 - Function arity lives in `header.size` (breaks byte accounting at exit),
   no Makefile header dependencies, UBSan shift in `vm.c` — see the

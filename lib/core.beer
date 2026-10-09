@@ -158,6 +158,7 @@
 
 ; --- Function utilities ---
 (defn identity [x] x)
+(defn boolean "true unless x is nil or false" [x] (if x true false))
 (defn constantly [x] (fn [& _] x))
 (defn complement [f] (fn [& args] (not (apply f args))))
 (defn comp [& fns]
@@ -253,15 +254,18 @@
         s
         (recur (rest s))))))
 
-(defn partition [n coll]
-  (loop [s (__seq coll) acc '()]
-    (if (empty? s)
-      (__rev acc)
-      (let* [chunk (take n s)
-             remaining (drop n s)]
-        (if (< (count chunk) n)
-          (__rev acc)
-          (recur remaining (cons chunk acc)))))))
+(defn partition
+  "Lists of n items each, starting a new one every step items (default n).
+  A final chunk with fewer than n items is dropped."
+  ([n coll] (partition n n coll))
+  ([n step coll]
+    (if (or (< n 1) (< step 1))
+      (throw (ex-info "partition: n and step must be positive" {:n n :step step}))
+      (loop [s (__seq coll) acc '()]
+        (let* [chunk (take n s)]
+          (if (< (count chunk) n)
+            (__rev acc)
+            (recur (drop step s) (cons chunk acc))))))))
 
 (defn range [& args]
   (let* [start (if (>= (count args) 2) (first args) 0)
