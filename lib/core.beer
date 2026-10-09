@@ -406,18 +406,25 @@
 
 (defn sort
   "Sorted sequence of coll's elements, by `compare` or the given comparator
-  (3-way or boolean predicate). Stable."
-  ([coll] (sort compare coll))
+  (3-way or boolean predicate). Stable. With `compare` (the default) the
+  sort runs natively; a custom comparator is called per comparison."
+  ([coll] (__sort-native coll))
   ([comp coll]
-    (let* [s (__seq coll)]
-      (__sort-list (__comparator comp) s (count s)))))
+    (if (= comp compare)
+      (__sort-native coll)
+      (let* [s (__seq coll)]
+        (__sort-list (__comparator comp) s (count s))))))
 
 (defn sort-by
-  "Sort coll by (keyfn x), using `compare` or the given comparator."
-  ([keyfn coll] (sort-by keyfn compare coll))
+  "Sort coll by (keyfn x), using `compare` or the given comparator. Stable.
+  With `compare` (the default) keyfn runs once per element and the sort
+  runs natively."
+  ([keyfn coll] (__sort-pairs-native (map (fn [x] [(keyfn x) x]) coll)))
   ([keyfn comp coll]
-    (let* [cmp (__comparator comp)]
-      (sort (fn [a b] (cmp (keyfn a) (keyfn b))) coll))))
+    (if (= comp compare)
+      (sort-by keyfn coll)
+      (let* [cmp (__comparator comp)]
+        (sort (fn [a b] (cmp (keyfn a) (keyfn b))) coll)))))
 
 ; --- Nested collection access ---
 (defn get-in [m ks]

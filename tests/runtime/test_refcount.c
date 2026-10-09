@@ -26,7 +26,9 @@ static const char* SRC =
     "(defn emit-map [] (json/emit {:a 1 :b \"hi\" :c [1 2]}))"
     "(defn spawn-capture [] (let [v [1 2 3]] (await (spawn (fn [] (count v))))))"
     "(defn set-ops [] (let [s (into #{} [\"a\" \"bb\" \"a\"]) t (disj (conj s \"ccc\") \"a\")]"
-    "  (str (count t) (contains? t \"bb\") (get {s 1} #{\"bb\" \"a\"}) (reduce + 0 (map count t)))))";
+    "  (str (count t) (contains? t \"bb\") (get {s 1} #{\"bb\" \"a\"}) (reduce + 0 (map count t)))))"
+    "(defn sort-ops [] (str (sort [\"pear\" \"apple\" \"fig\"]) (sort-by count [\"ccc\" \"a\" \"bb\"])"
+    "  (sort > [3 1 2]) (sort #{\"y\" \"x\"})))";
 
 static long delta_over(const char* fname, int iterations, BeerValue* last) {
     BeerValue f = beer_lookup(B, fname);
@@ -93,6 +95,19 @@ TEST(set_operations) {
     return NULL;
 }
 
+TEST(sort_native_and_comparator_paths) {
+    BeerValue f = beer_lookup(B, "rc/sort-ops");
+    BeerValue r = beer_call(B, f, 0, NULL);
+    ASSERT(beer_is_string(r) &&
+           strcmp(beer_to_cstring(r),
+                  "(\"apple\" \"fig\" \"pear\")(\"a\" \"bb\" \"ccc\")(3 2 1)(\"x\" \"y\")") == 0,
+           "native and comparator sorts give the expected result");
+    beer_release(r);
+    beer_release(f);
+    ASSERT_EQ(delta_over("rc/sort-ops", 300, &r), 0, "no leak or over-release");
+    return NULL;
+}
+
 static const char* all_tests(void) {
     B = beer_open();
     beer_add_load_path(B, "lib");
@@ -106,6 +121,7 @@ static const char* all_tests(void) {
     RUN_TEST(json_emit_map_does_not_leak);
     RUN_TEST(spawned_capturing_closure);
     RUN_TEST(set_operations);
+    RUN_TEST(sort_native_and_comparator_paths);
     return NULL;
 }
 

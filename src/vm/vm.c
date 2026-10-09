@@ -1040,9 +1040,9 @@ void vm_step(VM* vm) {
                 /* Rewrite stack: replace extra args with rest_list, move func */
                 /* Stack before: [... | arg0..arg_{req-1} | extra0..extraN | func] */
                 /* Stack after:  [... | arg0..arg_{req-1} | rest_list | func] */
+                /* The stack slot takes over rest_list's single reference
+                 * (from creating its head cell) -- no extra retain. */
                 vm->stack[args_base + required] = rest_list;
-                /* Retain for stack ownership (rest_list has refcount=1 from cons creation) */
-                if (is_pointer(rest_list)) object_retain(rest_list);
                 Value fn_val = vm->stack[vm->stack_pointer - 1];
                 vm->stack[args_base + required + 1] = fn_val;
                 vm->stack_pointer = args_base + required + 2;
@@ -1218,10 +1218,9 @@ void vm_step(VM* vm) {
                     if (is_pointer(arg)) object_release(arg);
                 }
 
-                /* Rewrite stack: replace extra args with rest_list, move func */
+                /* Rewrite stack: replace extra args with rest_list, move func.
+                 * The stack slot takes over rest_list's single reference. */
                 vm->stack[args_base + required] = rest_list;
-                /* Retain for stack ownership (rest_list has refcount=1 from cons creation) */
-                if (is_pointer(rest_list)) object_retain(rest_list);
                 Value fn_val = vm->stack[vm->stack_pointer - 1];
                 vm->stack[args_base + required + 1] = fn_val;
                 vm->stack_pointer = args_base + required + 2;

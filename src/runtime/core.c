@@ -632,6 +632,146 @@ static Value native_compare(VM* vm, int argc, Value* argv) {
     return make_fixnum(result);
 }
 
+/* ----------------------------------------------------------------
+ * Native sort fast path: stable bottom-up merge sort with
+ * compare_values. Same order, stability and errors as the beerlang
+ * sort with `compare`, without a closure call per comparison.
+ * ---------------------------------------------------------------- */
+
+typedef struct { Value key; Value val; } SortItem;
+typedef struct { bool failed; Value a, b; } SortCtx;
+
+static int sort_cmp(SortCtx* ctx, Value a, Value b) {
+    int r = 0;
+    if (!ctx->failed && !compare_values(a, b, &r)) {
+        ctx->failed = true;
+        ctx->a = a;
+        ctx->b = b;
+    }
+    return r;
+}
+
+static void merge_sort_items(SortItem* items, size_t n, SortCtx* ctx) {
+    if (n < 2) return;
+    SortItem* tmp = malloc(n * sizeof(SortItem));
+    for (size_t width = 1; width < n && !ctx->failed; width *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * width) {
+            size_t mid = lo + width < n ? lo + width : n;
+            size_t hi = lo + 2 * width < n ? lo + 2 * width : n;
+            size_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) {
+                /* Take from the right only if strictly smaller: stable */
+                tmp[k++] = sort_cmp(ctx, items[j].key, items[i].key) < 0 ? items[j++] : items[i++];
+            }
+            while (i < mid) tmp[k++] = items[i++];
+            while (j < hi) tmp[k++] = items[j++];
+        }
+        memcpy(items, tmp, n * sizeof(SortItem));
+    }
+    free(tmp);
+}
+
+/* Elements of coll as SortItems (key = val = element). Values are borrowed
+ * from coll, which the caller keeps alive. Sets *ok = false on an
+ * unsupported collection. */
+static SortItem* sort_items_from(Value coll, size_t* n, bool* ok) {
+    *n = 0;
+    *ok = true;
+    if (is_nil(coll)) return NULL;
+    SortItem* items = NULL;
+    if (is_vector(coll) || is_set(coll)) {
+        Value vec = is_set(coll) ? set_elements(coll) : coll;
+        *n = vector_length(vec);
+        items = malloc((*n ? *n : 1) * sizeof(SortItem));
+        for (size_t i = 0; i < *n; i++) {
+            items[i].key = items[i].val = vector_get(vec, i);
+        }
+        if (is_set(coll)) object_release(vec);   /* elements live in the set */
+    } else if (is_cons(coll)) {
+        *n = (size_t)list_length(coll);
+        items = malloc((*n ? *n : 1) * sizeof(SortItem));
+        size_t i = 0;
+        for (Value c = coll; is_cons(c); c = cdr(c), i++) {
+            items[i].key = items[i].val = car(c);
+        }
+    } else if (is_string(coll)) {
+        *n = string_char_length(coll);
+        items = malloc((*n ? *n : 1) * sizeof(SortItem));
+        for (size_t i = 0; i < *n; i++) {
+            items[i].key = items[i].val = make_char(string_char_at(coll, i));
+        }
+    } else {
+        *ok = false;
+    }
+    return items;
+}
+
+/* Sort items and return a list of their vals, or report a compare error. */
+static Value sort_items_to_list(VM* vm, SortItem* items, size_t n) {
+    SortCtx ctx = { false, VALUE_NIL, VALUE_NIL };
+    merge_sort_items(items, n, &ctx);
+    if (ctx.failed) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "compare: cannot compare %s with %s",
+                 value_type_name(ctx.a), value_type_name(ctx.b));
+        vm_error(vm, msg);
+        return VALUE_NIL;
+    }
+    Value* vals = malloc((n ? n : 1) * sizeof(Value));
+    for (size_t i = 0; i < n; i++) vals[i] = items[i].val;
+    Value result = list_from_array(vals, n);
+    free(vals);
+    return result;
+}
+
+/* __sort-native: (__sort-native coll) => coll's elements sorted by compare */
+static Value native_sort_native(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "sort: requires exactly 1 collection");
+        return VALUE_NIL;
+    }
+    size_t n;
+    bool ok;
+    SortItem* items = sort_items_from(argv[0], &n, &ok);
+    if (!ok) {
+        vm_error(vm, "sort: argument must be a vector, list, set, string or nil");
+        return VALUE_NIL;
+    }
+    Value result = sort_items_to_list(vm, items, n);
+    free(items);
+    return result;
+}
+
+/* __sort-pairs-native: (__sort-pairs-native pairs) where each pair is
+ * [key x] => the x's, ordered by compare on their keys. sort-by builds
+ * the pairs so keyfn runs once per element. */
+static Value native_sort_pairs_native(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "sort-by: requires exactly 1 collection of pairs");
+        return VALUE_NIL;
+    }
+    size_t n;
+    bool ok;
+    SortItem* items = sort_items_from(argv[0], &n, &ok);
+    if (!ok) {
+        vm_error(vm, "sort-by: argument must be a vector, list, set or nil");
+        return VALUE_NIL;
+    }
+    for (size_t i = 0; i < n; i++) {
+        Value pair = items[i].val;
+        if (!is_vector(pair) || vector_length(pair) != 2) {
+            free(items);
+            vm_error(vm, "sort-by: internal error, expected [key value] pairs");
+            return VALUE_NIL;
+        }
+        items[i].key = vector_get(pair, 0);
+        items[i].val = vector_get(pair, 1);
+    }
+    Value result = sort_items_to_list(vm, items, n);
+    free(items);
+    return result;
+}
+
 /* Equality: (= a b ...) - true if all values are equal */
 static Value native_eq(VM* vm, int argc, Value* argv) {
     if (argc < 2) {
@@ -3010,6 +3150,8 @@ void core_register_comparison(void) {
     object_release(gte_fn);
 
     register_native(core_ns, "compare", native_compare);
+    register_native(core_ns, "__sort-native", native_sort_native);
+    register_native(core_ns, "__sort-pairs-native", native_sort_pairs_native);
 }
 
 void core_register_collections(void) {

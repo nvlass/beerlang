@@ -19,8 +19,7 @@ Small / concrete:
   counts up
 - `fn` parameters don't destructure (`(fn [[a b]] ...)` is a compile
   error); only `let` does
-- Optional: native fast path for `(sort coll)` with the default `compare`
-  (100k elements take ~6.5s through the beerlang comparator closure)
+- Missing `boolean`; `partition` has no step arity (`(partition 2 1 xs)`)
 - `write-bytes` missing; `print`/`println`/`prn` write to stdout, not `*out*`
 - Function arity lives in `header.size` (breaks byte accounting at exit),
   no Makefile header dependencies, UBSan shift in `vm.c` — see the
@@ -314,6 +313,26 @@ The full smoke suite under ASAN now reports no memory errors.
 ---
 
 ## Near-term TODO (priority order)
+
+### 0. Native fast path for `sort` — COMPLETE
+Sorting 100k elements took ~6.5s: every comparison went through the
+beerlang `__comparator` closure into the native `compare`.
+
+- [x] When the comparator is `compare` — `(sort coll)` or
+  `(sort compare coll)` — `__sort-native` sorts in C: elements into an
+  array, stable bottom-up merge sort with `compare_values`, back to a list.
+  Same result, order and errors as the beerlang path.
+- [x] `(sort-by keyfn coll)`: beerlang builds `[key x]` pairs (keyfn once
+  per element), `__sort-pairs-native` sorts by key and strips them.
+- 100k-element sorts now take a fraction of a second (a whole benchmark
+  script with two 100k sorts and a 50k sort-by runs in 0.87s).
+- Found while testing: variadic functions leaked their rest-argument list
+  (`OP_CALL`/`OP_TAIL_CALL` retained it again after storing it in the
+  stack slot), so every call to a multi-arity `defn` — `sort`, `sort-by`,
+  ... — leaked its arguments. Fixed; covered by `test_refcount.c`.
+- Left for later: a separately named sort (`nsort`/`fsort`) — only worth it
+  if it trades something for speed (unstable, numbers-only or in-place on
+  a vector/ByteBuffer), with a docstring spelling that out.
 
 ### 1. I/O System — Phase 1: Blocking fd-based Streams — COMPLETE
 
