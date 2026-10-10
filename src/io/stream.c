@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <poll.h>
+#include <signal.h>
 #include "stream.h"
 #include "memory.h"
 #include "bstring.h"
@@ -36,6 +38,9 @@ static void stream_destructor(struct Object* obj) {
 
 void stream_init(void) {
     object_register_destructor(TYPE_STREAM, stream_destructor);
+    /* A write to a socket whose peer hung up must fail with EPIPE, not
+     * kill the process */
+    signal(SIGPIPE, SIG_IGN);
 }
 
 Value stream_from_fd(int fd, bool readable, bool writable, bool owns_fd, StreamKind kind) {
@@ -54,8 +59,8 @@ Value stream_from_fd(int fd, bool readable, bool writable, bool owns_fd, StreamK
     s->write_buf = writable ? malloc(STREAM_BUF_SIZE) : NULL;
     s->write_len = 0;
     s->write_flush_pos = 0;
+    s->write_cap = writable ? STREAM_BUF_SIZE : 0;
     s->line_buffered = (kind == STREAM_STDOUT || kind == STREAM_STDERR);
-    s->blocked_task = NULL;
     return v;
 }
 
@@ -272,39 +277,43 @@ Value stream_read_bytes_nb(Value stream, size_t n, bool* would_block) {
     return result;
 }
 
-int stream_write_string(Value stream, const char* str, size_t len) {
+int stream_append(Value stream, const char* data, size_t len) {
     Stream* s = (Stream*)untag_pointer(stream);
     if (s->closed || !s->writable) return -1;
+    if (s->write_len + len > s->write_cap) {
+        size_t cap = s->write_cap;
+        while (cap < s->write_len + len) cap *= 2;
+        uint8_t* grown = realloc(s->write_buf, cap);
+        if (!grown) return -1;
+        s->write_buf = grown;
+        s->write_cap = cap;
+    }
+    memcpy(s->write_buf + s->write_len, data, len);
+    s->write_len += len;
+    return 0;
+}
 
-    for (size_t i = 0; i < len; i++) {
-        if (s->write_len >= STREAM_BUF_SIZE) {
-            if (stream_flush(stream) != 0) return -1;
-        }
-        s->write_buf[s->write_len++] = (uint8_t)str[i];
-
-        /* Line-buffered: flush on newline */
-        if (s->line_buffered && str[i] == '\n') {
-            if (stream_flush(stream) != 0) return -1;
-        }
+int stream_write_string(Value stream, const char* str, size_t len) {
+    Stream* s = (Stream*)untag_pointer(stream);
+    if (stream_append(stream, str, len) != 0) return -1;
+    if (s->write_len >= STREAM_BUF_SIZE ||
+        (s->line_buffered && memchr(str, '\n', len))) {
+        return stream_flush(stream);
     }
     return 0;
 }
 
+/* Blocking flush: on a non-blocking fd, waits for writability in poll(),
+ * stalling the thread. Natives running in a task use stream_flush_nb and
+ * park the task instead. */
 int stream_flush(Value stream) {
     Stream* s = (Stream*)untag_pointer(stream);
-    if (s->closed || !s->writable || s->write_len == 0) return 0;
-
-    size_t written = 0;
-    while (written < s->write_len) {
-        ssize_t n = write(s->fd, s->write_buf + written, s->write_len - written);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        written += (size_t)n;
+    for (;;) {
+        int rc = stream_flush_nb(stream);
+        if (rc != STREAM_WOULDBLOCK) return rc == STREAM_OK ? 0 : -1;
+        struct pollfd pfd = { .fd = s->fd, .events = POLLOUT };
+        if (poll(&pfd, 1, -1) < 0 && errno != EINTR) return -1;
     }
-    s->write_len = 0;
-    return 0;
 }
 
 int stream_flush_nb(Value stream) {
@@ -316,7 +325,7 @@ int stream_flush_nb(Value stream) {
                           s->write_len - s->write_flush_pos);
         if (n < 0) {
             if (errno == EINTR) continue;
-            if (s->nonblocking && (errno == EAGAIN || errno == EWOULDBLOCK))
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
                 return STREAM_WOULDBLOCK;
             return STREAM_ERROR;
         }

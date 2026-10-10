@@ -124,6 +124,9 @@ typedef struct VM {
     bool yielded;               /* Set by OP_YIELD or countdown expiry */
     bool native_blocked;        /* Set by native fn that needs I/O retry */
     int64_t sleep_wake_at;      /* CLOCK_MONOTONIC ns deadline for (sleep ms) — 0 = not sleeping */
+    bool write_resumed;         /* Retrying a write native whose data is already buffered */
+    int pending_fd;             /* fd of a tcp/connect in progress, -1 if none */
+    int64_t pending_deadline;   /* CLOCK_MONOTONIC ns timeout for pending_fd */
     struct Scheduler* scheduler; /* Back-pointer (NULL for standalone VMs) */
 
     /* State */

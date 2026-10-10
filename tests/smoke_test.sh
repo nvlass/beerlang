@@ -1828,6 +1828,26 @@ check_multi "(def f (open \"$TMPOUT\" :write))
 [n (beer.bytes/position b) (slurp \"$TMPOUT\")]" '[5 11 "world"]' 'write-bytes writes position..limit'
 rm -f "$TMPOUT"
 
+# --- Single-threaded reactor: writes and connect park the task ---
+check_script '(require (quote beer.tcp) :as (quote tcp))
+(def done (atom false))
+(def ticks (atom 0))
+(def srv (tcp/listen 0))
+(def port (tcp/local-port srv))
+(def chunk (apply str (repeat 1024 "x")))
+(def reader (spawn (fn [] (let [c (tcp/accept srv)] (sleep 200)
+  (loop [total 0] (let [s (read-bytes c 65536)]
+    (if (or (nil? s) (= 0 (count s))) (do (close c) total) (recur (+ total (count s))))))))))
+(def writer (spawn (fn [] (let [c (tcp/connect "127.0.0.1" port)]
+  (loop [i 0] (when (< i 2048) (write c chunk) (recur (inc i))))
+  (close c) (reset! done true) :sent))))
+(spawn (fn [] (loop [] (when (not @done) (swap! ticks inc) (yield) (recur)))))
+(await writer)
+(println (await reader) (> @ticks 100))' '2097152 true' 'large socket write parks writer, bytes arrive once'
+TMPW=$(mktemp /tmp/beer_w_XXXXXX)
+check "(let [f (open \"$TMPW\" :write)] (close f) (try (write f \"x\") (catch e (:message e))))" '"write: stream is closed"'
+rm -f "$TMPW"
+
 echo ""
 echo "===================="
 echo "Passed: $PASS"

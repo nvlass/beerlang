@@ -42,7 +42,13 @@ typedef struct Scheduler {
 
     /* Configuration */
     int quota;          /* Instructions per quantum */
+
+    unsigned ticks;     /* Quanta run, for spacing out I/O checks */
 } Scheduler;
+
+/* Check fds for readiness every this many ticks while tasks are ready
+ * (power of two) */
+#define IO_CHECK_EVERY 16
 
 /* Create a new scheduler */
 Scheduler* scheduler_new(int quota);
@@ -54,13 +60,18 @@ void scheduler_free(Scheduler* sched);
 Value scheduler_spawn(Scheduler* sched, Value fn, int argc, Value* argv);
 
 /* Run all tasks until ready queue AND blocked queue are empty (blocks forever
- * if persistent background tasks like nREPL accept-loops are running). */
+ * if persistent background tasks like nREPL accept-loops are running).
+ * Waits in kevent/epoll_wait when nothing is ready — no busy polling. */
 void scheduler_run_until_done(Scheduler* sched);
 
-/* Non-blocking variant: poll I/O reactor once, drain all currently-ready
- * tasks, then return.  Safe to call from a game/render loop — never hangs
- * waiting for blocked I/O tasks. */
+/* Non-blocking variant: wake tasks whose I/O or timers are ready, drain all
+ * currently-ready tasks, then return.  Safe to call from a game/render
+ * loop — never hangs waiting for blocked I/O tasks. */
 void scheduler_run_ready(Scheduler* sched);
+
+/* Run tasks until fd (e.g. stdin) is readable. Ready tasks keep running
+ * while waiting, and fd is checked between batches of ticks. */
+void scheduler_run_until_readable(Scheduler* sched, int fd);
 
 /* Run a specific task to completion (may run other tasks too).
  * Saves/restores sched->current for safe re-entrant use from natives. */
@@ -84,6 +95,19 @@ void scheduler_fire_watchers(Scheduler* sched, Task* task);
 
 /* Sleep: block task until wake_at_ns (CLOCK_MONOTONIC nanoseconds) */
 void scheduler_sleep(Scheduler* sched, Task* task, int64_t wake_at_ns);
+
+/* For natives: true when running in a task that can be parked. */
+bool scheduler_can_park(struct VM* vm);
+
+/* For natives: block the current task until fd is readable (or writable if
+ * `write`); the VM retries the native call when the task wakes. The native
+ * must return right after calling this. */
+void scheduler_park_native(struct VM* vm, int fd, bool write);
+
+/* Wake task (scheduler_wake_io) at wake_at_ns without blocking it; used to
+ * put a deadline on an fd wait. scheduler_cancel_timer drops its timers. */
+void scheduler_add_timer(Scheduler* sched, Task* task, int64_t wake_at_ns);
+void scheduler_cancel_timer(Scheduler* sched, Task* task);
 
 /* Global scheduler instance */
 extern Scheduler* global_scheduler;

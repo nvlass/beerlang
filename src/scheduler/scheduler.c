@@ -30,6 +30,7 @@ Scheduler* scheduler_new(int quota) {
     sched->blocked_count = 0;
     sched->sleep_list = NULL;
     sched->quota = quota > 0 ? quota : DEFAULT_TASK_QUOTA;
+    sched->ticks = 0;
 
     return sched;
 }
@@ -128,29 +129,63 @@ void scheduler_wake_io(Scheduler* sched, Task* task) {
     object_release(task_val);
 }
 
-/* Block a task until wake_at_ns (CLOCK_MONOTONIC nanoseconds) */
-void scheduler_sleep(Scheduler* sched, Task* task, int64_t wake_at_ns) {
+static int64_t now_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+}
+
+void scheduler_add_timer(Scheduler* sched, Task* task, int64_t wake_at_ns) {
     SleepEntry* entry = malloc(sizeof(SleepEntry));
     if (!entry) return;
     entry->task      = task;
     entry->wake_at_ns = wake_at_ns;
     entry->next      = sched->sleep_list;
     sched->sleep_list = entry;
+}
+
+void scheduler_cancel_timer(Scheduler* sched, Task* task) {
+    SleepEntry** pp = &sched->sleep_list;
+    while (*pp) {
+        SleepEntry* e = *pp;
+        if (e->task == task) {
+            *pp = e->next;
+            free(e);
+        } else {
+            pp = &e->next;
+        }
+    }
+}
+
+/* Block a task until wake_at_ns (CLOCK_MONOTONIC nanoseconds) */
+void scheduler_sleep(Scheduler* sched, Task* task, int64_t wake_at_ns) {
+    scheduler_add_timer(sched, task, wake_at_ns);
     /* Block with IO tracking so blocked_count is correct and task stays alive */
     scheduler_block_io(sched, task);
+}
+
+/* Milliseconds until the earliest timer (rounded up), or -1 if none */
+static int next_timer_ms(Scheduler* sched) {
+    if (!sched->sleep_list) return -1;
+    int64_t earliest = sched->sleep_list->wake_at_ns;
+    for (SleepEntry* e = sched->sleep_list->next; e; e = e->next) {
+        if (e->wake_at_ns < earliest) earliest = e->wake_at_ns;
+    }
+    int64_t delta = earliest - now_ns();
+    if (delta <= 0) return 0;
+    int64_t ms = (delta + 999999) / 1000000;
+    return ms > 1000000 ? 1000000 : (int)ms;
 }
 
 /* Wake any sleep entries whose deadline has passed */
 static void scheduler_check_timers(Scheduler* sched) {
     if (!sched->sleep_list) return;
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    int64_t now_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+    int64_t now_ns_v = now_ns();
 
     SleepEntry** pp = &sched->sleep_list;
     while (*pp) {
         SleepEntry* e = *pp;
-        if (now_ns >= e->wake_at_ns) {
+        if (now_ns_v >= e->wake_at_ns) {
             *pp = e->next;
             scheduler_wake_io(sched, e->task);
             free(e);
@@ -173,14 +208,37 @@ bool scheduler_has_ready(Scheduler* sched) {
     return sched->ready_count > 0;
 }
 
-/* Drain I/O reactor completions, waking blocked tasks */
-static void scheduler_drain_io(Scheduler* sched) {
-    if (!sched->io_reactor) return;
-    Task* woken[32];
-    int n = io_reactor_drain(sched->io_reactor, woken, 32);
-    for (int i = 0; i < n; i++) {
-        scheduler_wake_io(sched, woken[i]);
+bool scheduler_can_park(VM* vm) {
+    return vm->scheduler && vm->scheduler->current && vm->scheduler->io_reactor;
+}
+
+void scheduler_park_native(VM* vm, int fd, bool write) {
+    Task* task = vm->scheduler->current;
+    scheduler_block_io(vm->scheduler, task);
+    io_reactor_wait(vm->scheduler->io_reactor, fd, write, task);
+    vm->native_blocked = true;
+    vm->yielded = true;
+}
+
+/* Wake tasks whose fds are ready, without waiting */
+static void scheduler_check_io(Scheduler* sched) {
+    if (sched->io_reactor && io_reactor_waiting(sched->io_reactor) > 0) {
+        io_reactor_poll(sched->io_reactor, sched, 0, -1, NULL);
     }
+}
+
+/* Nothing is ready: block in the platform wait until an fd is ready or the
+ * next timer is due (or watch_fd is readable, if >= 0). */
+static bool scheduler_wait(Scheduler* sched, int watch_fd) {
+    int timeout = next_timer_ms(sched);
+    if (timeout < 0 && watch_fd < 0 && io_reactor_waiting(sched->io_reactor) == 0) {
+        /* Blocked tasks with no fd and no timer can't be woken here */
+        timeout = 100;
+    }
+    bool watch_ready = false;
+    io_reactor_poll(sched->io_reactor, sched, timeout, watch_fd, &watch_ready);
+    scheduler_check_timers(sched);
+    return watch_ready;
 }
 
 /* Fire watcher callbacks for a completed task */
@@ -222,7 +280,10 @@ void scheduler_fire_watchers(Scheduler* sched, Task* task) {
 /* Run one task for one quantum */
 bool scheduler_run_one_tick(Scheduler* sched) {
     scheduler_check_timers(sched);
-    scheduler_drain_io(sched);
+    /* A kevent/epoll_wait per tick would be a syscall every quantum */
+    if ((++sched->ticks & (IO_CHECK_EVERY - 1)) == 0 || !scheduler_has_ready(sched)) {
+        scheduler_check_io(sched);
+    }
 
     Task* task = scheduler_dequeue(sched);
     if (!task) return false;
@@ -253,67 +314,45 @@ bool scheduler_run_one_tick(Scheduler* sched) {
 void scheduler_run_task_to_completion(Scheduler* sched, Task* target) {
     Task* saved_current = sched->current;
     scheduler_enqueue(sched, target);
-    int iters = 0;
-    while (target->state != TASK_DONE && iters < 1000000) {
-        bool ran = scheduler_run_one_tick(sched);
-        if (!ran) {
-            if (sched->blocked_count > 0) {
-                usleep(1000);
-            } else {
-                break;
-            }
-        }
-        iters++;
+    while (target->state != TASK_DONE) {
+        if (scheduler_run_one_tick(sched)) continue;
+        if (sched->blocked_count == 0) break;  /* deadlocked on channels */
+        scheduler_wait(sched, -1);
     }
     sched->current = saved_current;
 }
 
-/* Run all tasks until ready queue and blocked queue are empty */
-/* Non-blocking counterpart to scheduler_run_until_done.
- *
- * scheduler_run_until_done loops while (ready || blocked_count > 0).
- * blocked_count is incremented by scheduler_block_io, which is called when
- * a task blocks on I/O (e.g. tcp/accept in a nREPL server accept-loop).
- * A persistent background task that blocks on I/O will keep blocked_count
- * > 0 indefinitely, causing scheduler_run_until_done to spin for up to
- * 1M × 1ms ≈ 16 minutes before its safety limit fires — effectively
- * hanging the caller (e.g. beer_do_file) before InitWindow is ever reached.
- *
- * scheduler_run_ready avoids this: it polls the reactor ring once (to wake
- * any tasks whose I/O just completed) then drains whatever is currently
- * ready, and returns.  Background tasks that remain blocked are left alone;
- * the next call (e.g. on the next game frame) will pick them up if they
- * have since been woken by the reactor thread. */
+/* Non-blocking counterpart to scheduler_run_until_done: wakes tasks whose
+ * I/O is ready, runs whatever is ready, and returns without waiting on the
+ * tasks that stay blocked. Safe to call once per frame from a game loop. */
 void scheduler_run_ready(Scheduler* sched) {
-    scheduler_drain_io(sched);
+    scheduler_check_timers(sched);
+    scheduler_check_io(sched);
     while (scheduler_has_ready(sched)) {
         scheduler_run_one_tick(sched);
-        scheduler_drain_io(sched);
     }
 }
 
+/* Run until no task is ready or blocked on I/O or a timer. Runs forever
+ * while a background task (e.g. a server's accept loop) is waiting. */
 void scheduler_run_until_done(Scheduler* sched) {
-    int iterations = 0;
     while (scheduler_has_ready(sched) || sched->blocked_count > 0) {
-        if (!scheduler_has_ready(sched) && sched->blocked_count > 0) {
-            /* Only blocked tasks remain — drain I/O and brief sleep */
-            scheduler_drain_io(sched);
-            if (!scheduler_has_ready(sched)) {
-                usleep(1000);  /* 1ms to avoid busy-spin */
-            }
-            iterations++;
-            if (iterations > 1000000) {
-                fprintf(stderr, "scheduler: iteration limit reached, blocked=%d\n",
-                        sched->blocked_count);
-                break;
-            }
-            continue;
+        if (!scheduler_run_one_tick(sched)) scheduler_wait(sched, -1);
+    }
+}
+
+void scheduler_run_until_readable(Scheduler* sched, int fd) {
+    for (;;) {
+        bool ready = false;
+        if (scheduler_has_ready(sched)) {
+            io_reactor_poll(sched->io_reactor, sched, 0, fd, &ready);
+            scheduler_check_timers(sched);
+        } else {
+            ready = scheduler_wait(sched, fd);
         }
-        scheduler_run_one_tick(sched);
-        iterations++;
-        if (iterations > 1000000) {
-            fprintf(stderr, "scheduler: iteration limit reached, ready_count=%d\n", sched->ready_count);
-            break;
+        if (ready) return;
+        for (int i = 0; i < IO_CHECK_EVERY && scheduler_has_ready(sched); i++) {
+            scheduler_run_one_tick(sched);
         }
     }
 }

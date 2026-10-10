@@ -45,9 +45,8 @@ typedef struct {
     uint8_t* write_buf;
     size_t write_len;
     size_t write_flush_pos; /* partial flush progress */
+    size_t write_cap;
     bool line_buffered;    /* flush on newline (stdout/stderr) */
-    /* I/O reactor blocking — track which task is waiting on this stream */
-    struct Task* blocked_task; /* non-NULL if a task is blocked on I/O */
 } Stream;
 
 /* Type check */
@@ -77,6 +76,9 @@ Value stream_read_bytes(Value stream, size_t n);
 /* Non-blocking read up to n bytes. Sets *would_block = true on EAGAIN with
  * no data accumulated. */
 Value stream_read_bytes_nb(Value stream, size_t n, bool* would_block);
+
+/* Append bytes to the write buffer without flushing (grows as needed). */
+int stream_append(Value stream, const char* data, size_t len);
 
 /* Write a string to the stream (buffered). */
 int stream_write_string(Value stream, const char* s, size_t len);

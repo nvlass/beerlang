@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 61 unit tests
-- 544 REPL smoke tests
+- 546 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -113,11 +113,13 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - `task-watch` for monitoring task completion with callbacks
 
 ### Async I/O
-- Reactor thread with kqueue (macOS) / epoll (Linux)
+- Single-threaded reactor polled by the scheduler: per-fd reader/writer wait
+  lists over kqueue (macOS) / epoll (Linux); idle scheduler blocks until the
+  next fd event or timer
 - Non-blocking streams with `O_NONBLOCK` on file fds
 - `native_blocked` flag with `OP_CALL`/`OP_TAIL_CALL` retry logic
-- Tasks block on I/O and wake when data is available
-- Guard against concurrent stream access from multiple tasks
+- Reads, writes/flush/close, `tcp/accept`, `tcp/connect`, `udp/recv` park the
+  task instead of blocking the thread
 - Standalone VMs (no scheduler) fall back to blocking I/O
 
 ### Networking

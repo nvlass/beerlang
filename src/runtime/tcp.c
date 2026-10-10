@@ -8,6 +8,8 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <poll.h>
+#include <time.h>
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -112,19 +114,8 @@ static Value native_tcp_accept(VM* vm, int argc, Value* argv) {
     int client_fd = accept(lst->fd, (struct sockaddr*)&client_addr, &addr_len);
 
     if (client_fd < 0) {
-        if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
-            vm->scheduler && vm->scheduler->current) {
-            Task* task = vm->scheduler->current;
-            if (lst->blocked_task && lst->blocked_task != task) {
-                vm_error(vm, "tcp/accept: stream already in use by another task");
-                return VALUE_NIL;
-            }
-            lst->blocked_task = task;
-            io_reactor_register(vm->scheduler->io_reactor,
-                                lst->fd, true, false, task);
-            scheduler_block_io(vm->scheduler, task);
-            vm->native_blocked = true;
-            vm->yielded = true;
+        if ((errno == EAGAIN || errno == EWOULDBLOCK) && scheduler_can_park(vm)) {
+            scheduler_park_native(vm, lst->fd, false);
             return VALUE_NIL;
         }
         char buf[128];
@@ -132,9 +123,6 @@ static Value native_tcp_accept(VM* vm, int argc, Value* argv) {
         vm_throw_error(vm, buf);
         return VALUE_NIL;
     }
-
-    /* Clear blocked_task on success (retry path) */
-    lst->blocked_task = NULL;
 
     /* Set client fd non-blocking */
     int fl = fcntl(client_fd, F_GETFL);
@@ -148,6 +136,37 @@ static Value native_tcp_accept(VM* vm, int argc, Value* argv) {
 
 /* (tcp-connect host port) or (tcp-connect host port timeout-ms) — connect to remote host.
  * timeout-ms defaults to 10000 (10 s). Throws a catchable error on failure or timeout. */
+static int64_t monotonic_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+}
+
+/* Park until fd is writable (connect finished) or the connect deadline */
+static void park_connect(VM* vm, int fd) {
+    scheduler_park_native(vm, fd, true);
+    scheduler_add_timer(vm->scheduler, vm->scheduler->current, vm->pending_deadline);
+}
+
+/* fd's connect has finished: check its outcome and wrap it in a stream */
+static Value connect_result(VM* vm, int fd) {
+    int sockerr = 0;
+    socklen_t len = sizeof(sockerr);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockerr, &len);
+    if (sockerr != 0) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "tcp/connect: connect() failed: %s", strerror(sockerr));
+        close(fd);
+        vm_throw_error(vm, buf);
+        return VALUE_NIL;
+    }
+    /* Socket is connected; keep non-blocking */
+    Value v = stream_from_fd(fd, true, true, true, STREAM_SOCKET);
+    Stream* s = (Stream*)untag_pointer(v);
+    s->nonblocking = true;
+    return v;
+}
+
 static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
     if (argc < 2 || argc > 3) {
         vm_error(vm, "tcp/connect: requires 2 or 3 arguments (host port [timeout-ms])");
@@ -172,6 +191,29 @@ static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
             vm_error(vm, "tcp/connect: timeout-ms must be positive");
             return VALUE_NIL;
         }
+    }
+
+    /* Retry after parking: the connect started earlier is in pending_fd */
+    if (vm->pending_fd >= 0) {
+        int fd = vm->pending_fd;
+        Task* task = vm->scheduler->current;
+        io_reactor_forget(vm->scheduler->io_reactor, task);
+        scheduler_cancel_timer(vm->scheduler, task);
+        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+        if (poll(&pfd, 1, 0) == 0) {
+            if (monotonic_ns() < vm->pending_deadline) {
+                park_connect(vm, fd);
+                return VALUE_NIL;
+            }
+            vm->pending_fd = -1;
+            close(fd);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "tcp/connect: connection timed out after %d ms", timeout_ms);
+            vm_throw_error(vm, buf);
+            return VALUE_NIL;
+        }
+        vm->pending_fd = -1;
+        return connect_result(vm, fd);
     }
 
     const char* host = string_cstr(argv[0]);
@@ -217,7 +259,14 @@ static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
     }
 
     if (rc != 0) {
-        /* EINPROGRESS — wait for socket to become writable (connected or failed) */
+        /* EINPROGRESS. In a task, park until writable or the deadline. */
+        if (scheduler_can_park(vm)) {
+            vm->pending_fd = fd;
+            vm->pending_deadline = monotonic_ns() + (int64_t)timeout_ms * 1000000;
+            park_connect(vm, fd);
+            return VALUE_NIL;
+        }
+        /* No task to park: wait here, blocking the thread */
         fd_set wfds, efds;
         FD_ZERO(&wfds);
         FD_ZERO(&efds);
@@ -242,24 +291,9 @@ static Value native_tcp_connect(VM* vm, int argc, Value* argv) {
             vm_throw_error(vm, buf);
             return VALUE_NIL;
         }
-        /* Check for async connect error via SO_ERROR */
-        int sockerr = 0;
-        socklen_t len = sizeof(sockerr);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockerr, &len);
-        if (sockerr != 0) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "tcp/connect: connect() failed: %s", strerror(sockerr));
-            close(fd);
-            vm_throw_error(vm, buf);
-            return VALUE_NIL;
-        }
     }
 
-    /* Socket is connected; keep non-blocking */
-    Value v = stream_from_fd(fd, true, true, true, STREAM_SOCKET);
-    Stream* s = (Stream*)untag_pointer(v);
-    s->nonblocking = true;
-    return v;
+    return connect_result(vm, fd);
 }
 
 /* (tcp-local-port stream) — get local port of a socket */

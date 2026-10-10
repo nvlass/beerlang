@@ -45,6 +45,7 @@ static Value native_macroexpand_1(VM* vm, int argc, Value* argv);
 static Value native_macroexpand(VM* vm, int argc, Value* argv);
 static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len);
 static size_t sprint_coll_display(Value v, char** buf, size_t* cap, size_t len);
+static size_t sprint_lit(const char* s, char** buf, size_t* cap, size_t len);
 
 /* =================================================================
  * Arithmetic Operations
@@ -501,27 +502,6 @@ static Value native_int(VM* vm, int argc, Value* argv) {
  * I/O Functions
  * ================================================================= */
 
-/* Helper: write a value's display representation to a stream */
-static void stream_write_value(Value out, Value v, bool readable) {
-    char* buf = NULL;
-    size_t cap = 0;
-    size_t len = 0;
-
-    if (readable) {
-        cap = 64;
-        buf = malloc(cap);
-        len = value_sprint_readable(v, &buf, &cap, 0);
-    } else {
-        cap = 64;
-        buf = malloc(cap);
-        len = value_sprint(v, &buf, &cap, 0);
-    }
-
-    stream_write_string(out, buf, len);
-    free(buf);
-}
-
-/* Print: (print arg1 arg2 ...) - prints values separated by spaces */
 /* Stream bound to *out*, resolved like any unqualified symbol: current
  * namespace first, then beer.core. Falls back to stdout. */
 static Value current_out(void) {
@@ -532,28 +512,74 @@ static Value current_out(void) {
     return is_stream(out) ? out : stream_get_stdout();
 }
 
-static Value native_print(VM* vm, int argc, Value* argv) {
-    (void)vm;
-    Value out = current_out();
-    for (int i = 0; i < argc; i++) {
-        if (i > 0) stream_write_string(out, " ", 1);
-        stream_write_value(out, argv[i], false);
+/* Write data to a stream from a native. Inside a task, a non-blocking stream
+ * never stalls the thread: when the kernel buffer is full the task parks
+ * until the fd is writable and the native is retried, with its data already
+ * buffered (vm->write_resumed) so it isn't written twice. Flushes when
+ * `drain` is set, a full buffer is pending, or a line-buffered stream gets a
+ * newline. Returns false when the native must return at once (parked, or an
+ * error was thrown). */
+static bool native_stream_write(VM* vm, const char* who, Value stream,
+                                const char* data, size_t len, bool drain) {
+    Stream* st = (Stream*)untag_pointer(stream);
+    bool resumed = vm->write_resumed;
+    vm->write_resumed = false;
+    char msg[160];
+    if (st->closed || !st->writable) {
+        snprintf(msg, sizeof(msg), "%s: stream is %s", who, st->closed ? "closed" : "not writable");
+        vm_throw_error(vm, msg);
+        return false;
     }
-    stream_flush(out);
+    if (!resumed && stream_append(stream, data, len) != 0) {
+        snprintf(msg, sizeof(msg), "%s: out of memory", who);
+        vm_throw_error(vm, msg);
+        return false;
+    }
+    drain = drain || st->write_len >= STREAM_BUF_SIZE ||
+            (st->line_buffered && len > 0 && memchr(data, '\n', len));
+    if (!drain) return true;
+
+    int rc;
+    if (st->nonblocking && scheduler_can_park(vm)) {
+        rc = stream_flush_nb(stream);
+        if (rc == STREAM_WOULDBLOCK) {
+            vm->write_resumed = true;
+            scheduler_park_native(vm, st->fd, true);
+            return false;
+        }
+    } else {
+        rc = stream_flush(stream) == 0 ? STREAM_OK : STREAM_ERROR;
+    }
+    if (rc == STREAM_OK) return true;
+    snprintf(msg, sizeof(msg), "%s: write failed: %s", who, strerror(errno));
+    vm_throw_error(vm, msg);
+    return false;
+}
+
+/* print/println/prn: render all args, then write them in one go so a parked
+ * write retries the whole call cleanly */
+static Value print_args(VM* vm, const char* who, int argc, Value* argv,
+                        bool readable, bool newline) {
+    size_t cap = 64, len = 0;
+    char* buf = malloc(cap);
+    for (int i = 0; i < argc; i++) {
+        if (i > 0) len = sprint_lit(" ", &buf, &cap, len);
+        len = readable ? value_sprint_readable(argv[i], &buf, &cap, len)
+                       : value_sprint(argv[i], &buf, &cap, len);
+    }
+    if (newline) len = sprint_lit("\n", &buf, &cap, len);
+    native_stream_write(vm, who, current_out(), buf, len, true);
+    free(buf);
     return VALUE_NIL;
+}
+
+static Value native_print(VM* vm, int argc, Value* argv) {
+    return print_args(vm, "print", argc, argv, false, false);
 }
 
 /* Println: (println arg1 arg2 ...) - prints values with newline */
 static Value native_println(VM* vm, int argc, Value* argv) {
-    (void)vm;
-    Value out = current_out();
-    for (int i = 0; i < argc; i++) {
-        if (i > 0) stream_write_string(out, " ", 1);
-        stream_write_value(out, argv[i], false);
-    }
-    stream_write_string(out, "\n", 1);
-    stream_flush(out);
-    return VALUE_NIL;
+    return print_args(vm, "println", argc, argv, false, true);
 }
 
 /* =================================================================
@@ -2398,15 +2424,7 @@ static Value native_pr_str(VM* vm, int argc, Value* argv) {
 
 /* prn: (prn & args) => print readable, then newline, return nil */
 static Value native_prn(VM* vm, int argc, Value* argv) {
-    (void)vm;
-    Value out = current_out();
-    for (int i = 0; i < argc; i++) {
-        if (i > 0) stream_write_string(out, " ", 1);
-        stream_write_value(out, argv[i], true);
-    }
-    stream_write_string(out, "\n", 1);
-    stream_flush(out);
-    return VALUE_NIL;
+    return print_args(vm, "prn", argc, argv, true, true);
 }
 
 /* read-string: (read-string s) => parse one form from a string */
@@ -3472,12 +3490,18 @@ static Value native_close(VM* vm, int argc, Value* argv) {
         return VALUE_NIL;
     }
     Stream* st = (Stream*)untag_pointer(argv[0]);
-    /* Wake any task blocked on this stream before closing the fd,
-     * so it can retry and get a clean nil/EOF rather than hanging. */
-    if (st->blocked_task && vm->scheduler) {
-        Task* blocked = st->blocked_task;
-        st->blocked_task = NULL;
-        scheduler_wake_io(vm->scheduler, blocked);
+    if (st->closed) return VALUE_NIL;
+    /* Drain buffered output first; this may park the task. On a write
+     * error the stream is still closed and the error propagates. */
+    if (st->writable && st->write_len > 0 &&
+        !native_stream_write(vm, "close", argv[0], NULL, 0, true) &&
+        vm->native_blocked) {
+        return VALUE_NIL;
+    }
+    /* Wake tasks waiting on this fd before closing it, so they retry and
+     * get a clean nil/EOF rather than hanging */
+    if (vm->scheduler && vm->scheduler->io_reactor) {
+        io_reactor_cancel_fd(vm->scheduler->io_reactor, vm->scheduler, st->fd);
     }
     stream_close(argv[0]);
     return VALUE_NIL;
@@ -3510,24 +3534,10 @@ static Value native_read_line(VM* vm, int argc, Value* argv) {
 
     /* Non-blocking path for streams with O_NONBLOCK set */
     Stream* st = (Stream*)untag_pointer(s);
-    if (st->nonblocking && vm->scheduler && vm->scheduler->current) {
+    if (st->nonblocking && scheduler_can_park(vm)) {
         bool would_block = false;
         Value result = stream_read_line_nb(s, &would_block);
-        if (would_block) {
-            Task* task = vm->scheduler->current;
-            if (st->blocked_task && st->blocked_task != task) {
-                vm_error(vm, "read-line: stream is already in use by another task");
-                return VALUE_NIL;
-            }
-            st->blocked_task = task;
-            io_reactor_register(vm->scheduler->io_reactor,
-                                st->fd, true, false, task);
-            scheduler_block_io(vm->scheduler, task);
-            vm->native_blocked = true;
-            vm->yielded = true;
-            return VALUE_NIL;
-        }
-        st->blocked_task = NULL;
+        if (would_block) scheduler_park_native(vm, st->fd, false);
         return result;
     }
 
@@ -3558,24 +3568,10 @@ static Value native_read_bytes(VM* vm, int argc, Value* argv) {
     Stream* st = (Stream*)untag_pointer(s);
 
     /* Non-blocking path for streams with O_NONBLOCK set */
-    if (st->nonblocking && vm->scheduler && vm->scheduler->current) {
+    if (st->nonblocking && scheduler_can_park(vm)) {
         bool would_block = false;
         Value result = stream_read_bytes_nb(s, (size_t)n, &would_block);
-        if (would_block) {
-            Task* task = vm->scheduler->current;
-            if (st->blocked_task && st->blocked_task != task) {
-                vm_error(vm, "read-bytes: stream is already in use by another task");
-                return VALUE_NIL;
-            }
-            st->blocked_task = task;
-            io_reactor_register(vm->scheduler->io_reactor,
-                                st->fd, true, false, task);
-            scheduler_block_io(vm->scheduler, task);
-            vm->native_blocked = true;
-            vm->yielded = true;
-            return VALUE_NIL;
-        }
-        st->blocked_task = NULL;
+        if (would_block) scheduler_park_native(vm, st->fd, false);
         return result;
     }
 
@@ -3597,7 +3593,8 @@ static Value native_write_stream(VM* vm, int argc, Value* argv) {
         vm_error(vm, "write: second argument must be a string");
         return VALUE_NIL;
     }
-    stream_write_string(argv[0], string_cstr(argv[1]), string_byte_length(argv[1]));
+    native_stream_write(vm, "write", argv[0], string_cstr(argv[1]),
+                        string_byte_length(argv[1]), false);
     return VALUE_NIL;
 }
 
@@ -3619,8 +3616,8 @@ static Value native_write_bytes(VM* vm, int argc, Value* argv) {
     Value buf = argv[1];
     size_t pos = bytebuffer_position(buf);
     size_t n = bytebuffer_limit(buf) - pos;
-    if (stream_write_string(argv[0], (const char*)bytebuffer_data(buf) + pos, n) < 0) {
-        vm_throw_error(vm, "write-bytes: write failed");
+    if (!native_stream_write(vm, "write-bytes", argv[0],
+                             (const char*)bytebuffer_data(buf) + pos, n, false)) {
         return VALUE_NIL;
     }
     bytebuffer_set_position(buf, pos + n);
@@ -3637,7 +3634,7 @@ static Value native_flush(VM* vm, int argc, Value* argv) {
         vm_error(vm, "flush: argument must be a stream");
         return VALUE_NIL;
     }
-    stream_flush(argv[0]);
+    native_stream_write(vm, "flush", argv[0], NULL, 0, true);
     return VALUE_NIL;
 }
 

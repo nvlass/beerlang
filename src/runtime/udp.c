@@ -224,20 +224,9 @@ static Value native_udp_recv(VM* vm, int argc, Value* argv) {
                          (struct sockaddr*)&peer, &peer_len);
 
     if (n < 0) {
-        if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
-            vm->scheduler && vm->scheduler->current) {
+        if ((errno == EAGAIN || errno == EWOULDBLOCK) && scheduler_can_park(vm)) {
             free(buf);
-            Task* task = vm->scheduler->current;
-            if (s->blocked_task && s->blocked_task != task) {
-                vm_error(vm, "udp/recv: socket already in use by another task");
-                return VALUE_NIL;
-            }
-            s->blocked_task = task;
-            io_reactor_register(vm->scheduler->io_reactor,
-                                s->fd, true, false, task);
-            scheduler_block_io(vm->scheduler, task);
-            vm->native_blocked = true;
-            vm->yielded = true;
+            scheduler_park_native(vm, s->fd, false);
             return VALUE_NIL;
         }
         free(buf);
@@ -246,9 +235,6 @@ static Value native_udp_recv(VM* vm, int argc, Value* argv) {
         vm_throw_error(vm, errbuf);
         return VALUE_NIL;
     }
-
-    /* Clear blocked_task on successful recv (retry path) */
-    s->blocked_task = NULL;
 
     /* Build result map {:data "..." :host "x.x.x.x" :port N} */
     Value data_str = string_from_buffer(buf, (size_t)n);

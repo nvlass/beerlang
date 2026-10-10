@@ -6,7 +6,7 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 544 (`bash tests/smoke_test.sh`)
+- REPL smoke tests: 546 (`bash tests/smoke_test.sh`)
 - **Last Updated:** 2026-10-10
 
 ## Open Items at a Glance
@@ -28,6 +28,8 @@ Small / concrete:
   overflows the C stack under ASAN
 - `make asan` races under `-j` (`asan: clean all` runs clean in parallel);
   run it as `make asan -j1` or twice
+- stdin/stdout/stderr stay blocking fds: `(read-line *in*)` inside a task
+  still blocks the thread
 
 Bigger:
 - AOT: `require`/`load` don't use `.beerc` yet (format + compiler exist) — #6
@@ -407,13 +409,26 @@ changes to user-facing code.
 
 ### 3. I/O System — Phase 2: Async Reactor — COMPLETE
 
-- [x] Reactor thread with kqueue (macOS) / epoll (Linux)
-- [x] Completion queue for reactor → scheduler communication
+- [x] kqueue (macOS) / epoll (Linux) backend behind `reactor.h`
 - [x] Non-blocking streams with `O_NONBLOCK` on file fds
 - [x] `native_blocked` flag with `OP_CALL`/`OP_TAIL_CALL` retry logic
 - [x] Tasks block on I/O and wake when data is available
-- [x] Guard against concurrent stream access from multiple tasks
 - [x] Standalone VMs (no scheduler) fall back to blocking I/O
+- [x] (2026-10-10) Reactor folded into the scheduler loop: no reactor
+  thread, mutex or completion ring (which dropped tasks past 256). Per-fd
+  reader/writer wait lists, so one task can read a socket while others
+  write it. The idle scheduler blocks in kevent/epoll_wait until the next
+  fd event or timer instead of polling every 1 ms, and the 1M-iteration
+  limits (a server stopped after ~16 idle minutes) are gone. The REPL
+  waits on stdin through the same poll, so background tasks run at full
+  speed at the prompt (was 1 tick per 10 ms)
+- [x] (2026-10-10) Writes park: `write`/`write-bytes`/`flush`/`close`/
+  `print`/`println`/`prn` park on a full socket buffer (the retry skips
+  re-buffering via `vm->write_resumed`); write errors throw instead of
+  being ignored; the blocking flush no longer resends bytes after a
+  partial write; SIGPIPE is ignored so a dead peer gives EPIPE
+- [x] (2026-10-10) `tcp/connect` parks on writability plus a timer for its
+  timeout instead of `select()` blocking the thread
 - **Not yet implemented:**
   - `with-timeout` for I/O operations
   - `select` for multiplexed I/O

@@ -85,6 +85,10 @@ VM* vm_new(int stack_size) {
     vm->yield_countdown = 0;  /* Disabled by default for standalone VMs */
     vm->yielded = false;
     vm->native_blocked = false;
+    vm->sleep_wake_at = 0;
+    vm->write_resumed = false;
+    vm->pending_fd = -1;
+    vm->pending_deadline = 0;
     vm->native_throw = false;
     vm->thrown_exception = VALUE_NIL;
     vm->scheduler = NULL;

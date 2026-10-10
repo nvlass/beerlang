@@ -387,6 +387,9 @@ static int cmd_check(const char* path) {
 
 static int run_repl(void) {
     char input[INPUT_BUFFER_SIZE];
+    /* Unbuffered, so stdio never holds lines the fd-readiness wait below
+     * can't see (pasted input), nor input meant for *in* */
+    setvbuf(stdin, NULL, _IONBF, 0);
     char accum[ACCUM_BUFFER_SIZE];
     size_t accum_len = 0;
     accum[0] = '\0';
@@ -408,31 +411,14 @@ static int run_repl(void) {
         }
         fflush(stdout);
 
-        /* Poll stdin with a short timeout so background tasks (accept-loop,
-         * connection readers, actors) get CPU time while we wait for input.
-         * Without this, spawned tasks are frozen between REPL prompts. */
-        {
-            bool got_input = false;
-            while (!got_input) {
-                fd_set rfds;
-                FD_ZERO(&rfds);
-                FD_SET(STDIN_FILENO, &rfds);
-                struct timeval tv = {0, 10000};  /* 10 ms */
-                int r = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
-                if (r > 0) {
-                    if (!fgets(input, INPUT_BUFFER_SIZE, stdin)) {
-                        printf("\n");
-                        goto repl_exit;
-                    }
-                    got_input = true;
-                } else if (r == 0) {
-                    /* Timeout — run one scheduler tick so background tasks make progress */
-                    if (global_scheduler) {
-                        scheduler_run_one_tick(global_scheduler);
-                    }
-                }
-                /* r < 0: EINTR or other error — just retry */
-            }
+        /* Background tasks (accept-loops, connection readers, actors) keep
+         * running while we wait for input */
+        if (global_scheduler) {
+            scheduler_run_until_readable(global_scheduler, STDIN_FILENO);
+        }
+        if (!fgets(input, INPUT_BUFFER_SIZE, stdin)) {
+            printf("\n");
+            goto repl_exit;
         }
 
         /* When not mid-form, check for exit commands and skip blank lines */
