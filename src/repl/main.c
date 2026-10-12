@@ -139,6 +139,11 @@ static int eval_form(const char* source, const char* filename) {
                               code->bytecode, (int)code->code_size,
                               constants, n_constants);
             object_make_immortal(constants[i]);
+            /* Home namespace, for resolving the function's free symbols */
+            {
+                Namespace* cur = namespace_registry_current(global_namespace_registry);
+                if (cur) function_set_ns_name(constants[i], cur->name);
+            }
         }
     }
 
@@ -211,6 +216,11 @@ static int cmd_eval_exprs(const char** exprs, int n) {
                     function_set_code(constants[i], code->bytecode, (int)code->code_size,
                                       constants, n_constants);
                     object_make_immortal(constants[i]);
+                    /* Home namespace, for resolving the function's free symbols */
+                    {
+                        Namespace* cur = namespace_registry_current(global_namespace_registry);
+                        if (cur) function_set_ns_name(constants[i], cur->name);
+                    }
                 }
             }
             Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
@@ -492,6 +502,11 @@ static int run_repl(void) {
                                       code->bytecode, (int)code->code_size,
                                       constants, n_constants);
                     object_make_immortal(constants[i]);
+                    /* Home namespace, for resolving the function's free symbols */
+                    {
+                        Namespace* cur = namespace_registry_current(global_namespace_registry);
+                        if (cur) function_set_ns_name(constants[i], cur->name);
+                    }
                 }
             }
 

@@ -1355,6 +1355,20 @@ void vm_step(VM* vm) {
                 return;
             }
 
+            /* Resolve against the namespace the running code was written in:
+             * the function's home ns, or the current ns for top-level code.
+             * Never the caller's current ns, or redefining + in user would
+             * change what beer.core/inc calls. */
+            Namespace* home = ns;
+            if (vm->frame_count > 0) {
+                Value fn_val = vm->frames[vm->frame_count - 1].function;
+                if (is_function(fn_val) && function_ns_name(fn_val)) {
+                    Namespace* fn_home = namespace_registry_get(global_namespace_registry,
+                                                                function_ns_name(fn_val));
+                    if (fn_home) home = fn_home;
+                }
+            }
+
             Var* var = NULL;
 
             if (symbol_has_namespace(symbol)) {
@@ -1374,21 +1388,8 @@ void vm_step(VM* vm) {
                 memcpy(ns_name, ns_part, ns_len);
                 ns_name[ns_len] = '\0';
 
-                /* Check aliases: current ns first, then function's home ns */
                 Value alias_sym = symbol_intern(ns_name);
-                const char* resolved = namespace_resolve_alias(ns, alias_sym);
-                if (!resolved && vm->frame_count > 0) {
-                    Value fn_val = vm->frames[vm->frame_count - 1].function;
-                    if (is_function(fn_val)) {
-                        const char* fn_ns = function_ns_name(fn_val);
-                        if (fn_ns) {
-                            Namespace* fn_home = namespace_registry_get(global_namespace_registry, fn_ns);
-                            if (fn_home && fn_home != ns) {
-                                resolved = namespace_resolve_alias(fn_home, alias_sym);
-                            }
-                        }
-                    }
-                }
+                const char* resolved = namespace_resolve_alias(home, alias_sym);
                 const char* target_name = resolved ? resolved : ns_name;
 
                 Namespace* target_ns = namespace_registry_get(global_namespace_registry, target_name);
@@ -1410,24 +1411,11 @@ void vm_step(VM* vm) {
                     return;
                 }
             } else {
-                /* Unqualified: try current ns, then function's home ns, then beer.core */
-                var = namespace_lookup(ns, symbol);
-                if (!var && vm->frame_count > 0) {
-                    /* Try function's defining namespace */
-                    Value fn_val = vm->frames[vm->frame_count - 1].function;
-                    if (is_function(fn_val)) {
-                        const char* fn_ns = function_ns_name(fn_val);
-                        if (fn_ns) {
-                            Namespace* fn_home = namespace_registry_get(global_namespace_registry, fn_ns);
-                            if (fn_home && fn_home != ns) {
-                                var = namespace_lookup(fn_home, symbol);
-                            }
-                        }
-                    }
-                }
+                /* Unqualified: home ns, then beer.core */
+                var = namespace_lookup(home, symbol);
                 if (!var) {
                     Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
-                    if (core_ns && core_ns != ns) {
+                    if (core_ns && core_ns != home) {
                         var = namespace_lookup(core_ns, symbol);
                     }
                 }
@@ -1715,14 +1703,18 @@ void vm_step(VM* vm) {
             function_set_code(closure, vm->code, vm->code_size,
                               vm->constants, vm->num_constants);
 
-            /* Inherit ns_name from enclosing function (if any) */
+            /* Home ns: the enclosing function's, or the current ns for a
+             * closure made by top-level code */
+            const char* home_ns = NULL;
             if (vm->frame_count > 0) {
                 Value enc_fn = vm->frames[vm->frame_count - 1].function;
-                if (is_function(enc_fn)) {
-                    const char* enc_ns = function_ns_name(enc_fn);
-                    if (enc_ns) function_set_ns_name(closure, enc_ns);
-                }
+                if (is_function(enc_fn)) home_ns = function_ns_name(enc_fn);
             }
+            if (!home_ns && global_namespace_registry) {
+                Namespace* cur = namespace_registry_current(global_namespace_registry);
+                if (cur) home_ns = cur->name;
+            }
+            if (home_ns) function_set_ns_name(closure, home_ns);
 
             /* vm_push retains; the stack now holds the only reference */
             vm_push(vm, closure);

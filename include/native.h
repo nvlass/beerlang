@@ -39,6 +39,8 @@ typedef struct NativeFunction {
  *   arity  - Number of arguments (-1 for variadic)
  *   fn_ptr - C function pointer
  *   name   - Function name (will be copied)
+ *
+ * The result is immortal (never freed; retain/release are no-ops).
  */
 Value native_function_new(int arity, NativeFn fn_ptr, const char* name);
 

@@ -36,7 +36,11 @@ Value native_function_new(int arity, NativeFn fn_ptr, const char* name) {
     nf->fn_ptr = fn_ptr;
     nf->name = name ? strdup(name) : NULL;
 
-    return tag_pointer(nf);
+    /* Natives are registered once and live for the whole run. Immortal, so
+     * calling + doesn't write its refcount on every call. */
+    Value v = tag_pointer(nf);
+    object_make_immortal(v);
+    return v;
 }
 
 /* Get native function arity */

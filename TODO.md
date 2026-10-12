@@ -6,8 +6,8 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 546 (`bash tests/smoke_test.sh`)
-- **Last Updated:** 2026-10-10
+- REPL smoke tests: 551 (`bash tests/smoke_test.sh`)
+- **Last Updated:** 2026-10-12
 
 ## Open Items at a Glance
 
@@ -403,6 +403,10 @@ changes to user-facing code.
 - [x] Circular require detection (`requiring_stack` in `core.c`)
 - [x] `*ns*` dynamic var
 - [x] `BEERPATH` env var (see #4)
+- [x] (2026-10-12) Unqualified symbols resolve in the running function's home
+  ns, then `beer.core` — not the caller's current ns, which made a `user/+`
+  redefinition change what `beer.core/inc` called. Closures made by
+  top-level code and REPL-defined functions now record their home ns too
 - [x] `:refer [syms]` / `:refer :all` in `require` and `ns` — referred
   names share the source Var (kept in a separate `refers` map, so a local
   `def` shadows instead of clobbering)

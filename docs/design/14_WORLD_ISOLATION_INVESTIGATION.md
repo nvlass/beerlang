@@ -1,6 +1,9 @@
 # World Isolation Investigation
 
 Status: **investigation / discussion — no decision made yet.**
+Inventory re-checked against the code on 2026-10-10 (after the I/O reactor
+was folded into the scheduler loop); see "What can be shared between
+Worlds" and "Suggested order" for the refined Path A.
 
 This is not scoped to any one example. It's a general question about what
 beerlang's concurrency architecture should be, long-term, as a language —
@@ -24,20 +27,22 @@ deliberately rather than drifting into by accident.
 
 ## Current state: an accidental singleton, not a designed one
 
-Full inventory of mutable global state in the runtime today:
+Full inventory of mutable global state in the runtime, taken from the
+data/BSS symbols of the object files (2026-10-10):
 
-| State | Location | Per-thread-unsafe? |
-|---|---|---|
-| Symbol/keyword intern tables | `src/types/symbol.c` | **Yes** — concurrent interning corrupts the hash table |
-| `NamespaceRegistry` | `src/runtime/namespace.c` | **Yes** — concurrent def/lookup races |
-| `Scheduler` (ready queues etc.) | `src/scheduler/scheduler.c` | **Yes** — not lock-free |
-| IO reactor (1 pthread + kqueue/epoll fd) | `src/io/io_reactor.c` | **Yes** — and not cloneable, only recreatable |
-| `gensym_counter`, `requiring_depth` | `src/runtime/core.c` | Yes, but trivial (two ints) |
-| `load_units`/`asm_units` (retained compiled code, fixed-size arrays, `MAX_LOAD_UNITS=4096`) | `src/runtime/core.c` | Yes |
-| `g_stdin/stdout/stderr_stream` | `src/io/stream.c` | Mostly cosmetic — underlying fds are process-wide anyway |
-| `g_destructors` (type→fn table) | `src/memory/alloc.c` | No — immutable after init |
-| `g_stats` (alloc counters) | `src/memory/alloc.c` | No — bookkeeping only |
-| `global_tar_index` | `src/io/tarindex.c` | No — built once from `BEERPATH`, read-only after |
+| State                                                                                      | Location                                           | Per-thread-unsafe?                                                                                                                                                               |
+|--------------------------------------------------------------------------------------------|----------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Symbol/keyword intern tables                                                               | `src/types/symbol.c`                               | **Yes** — concurrent interning corrupts the hash table. The interned objects themselves are immortal, so sharing them is safe (see below)                                        |
+| `NamespaceRegistry` (`global_namespace_registry`) and its Vars                             | `src/runtime/namespace.c`                          | **Yes** — concurrent def/lookup races                                                                                                                                            |
+| `Scheduler` (`global_scheduler`), incl. its I/O reactor                                    | `src/scheduler/scheduler.c`, `src/io/io_reactor.c` | **Yes** — but per-instance already: the reactor belongs to its scheduler and is just one kqueue/epoll fd plus wait lists, no thread                                              |
+| `gensym_counter`, `requiring_stack`/`requiring_depth`, `destructure_fn_params` counter     | `src/runtime/core.c`, `src/compiler/compiler.c`    | Yes, but trivial                                                                                                                                                                 |
+| `load_units`/`load_constants`, `asm_units` (retained compiled code, `MAX_LOAD_UNITS=4096`) | `src/runtime/core.c`                               | Yes                                                                                                                                                                              |
+| REPL `compiled_units`                                                                      | `src/repl/main.c`                                  | Yes (REPL only)                                                                                                                                                                  |
+| `g_stdin/stdout/stderr_stream`, `g_value_pr_out` (printer `FILE*`)                         | `src/io/stream.c`, `src/vm/value.c`                | Mostly cosmetic — the fds are process-wide anyway                                                                                                                                |
+| `g_stats` (alloc counters)                                                                 | `src/memory/alloc.c`                               | **Yes** — incremented on every alloc/free; a data race under threads (make per-World, atomic, or compile out)                                                                    |
+| `g_destructors` (type→fn table)                                                            | `src/memory/alloc.c`                               | **Yes, as written** — not immutable after init: some constructors re-register on every call (`function_new_closure`). Same value each time, but a race; register once at startup |
+| `crc32_table` (lazily built)                                                               | `src/lib/aot.c`                                    | Race on first use only; build eagerly                                                                                                                                            |
+| `global_tar_index`                                                                         | `src/io/tarindex.c`                                | No — built once from `BEERPATH`, read-only after                                                                                                                                 |
 
 Object reference counting itself (`object_retain`/`object_release`) needs no
 change under any path discussed here, **as long as no single `Value` is ever
@@ -60,10 +65,12 @@ with a documented worker-thread loop (`worker_thread()`) locking that
 shared scheduler and pulling tasks off shared ready queues. That's a
 shared-heap, multi-OS-thread design — much closer to "Path B" below than to
 what actually got built. What's running today is simpler: one cooperative
-scheduler, driven by one OS thread at a time (`scheduler_run_one_tick`
-called inline from the REPL/embedding loop), with blocking native calls
-(FFI, `beer.shell/exec`) dispatched to a separate thread pool rather than
-the task scheduler itself being multi-threaded. The global singletons
+scheduler on one OS thread, which also polls the I/O reactor itself (no
+reactor thread since 2026-10-10). There is no thread pool: nothing in the
+runtime creates a thread. Blocking natives that don't go through the
+reactor — `beer.shell/exec` (fork + blocking `read`/`waitpid`), FFI calls,
+stdin/stdout/stderr — run inline and stall the whole scheduler while they
+block. The global singletons
 catalogued above are safe *only* because of that simplification. Worth
 being explicit: the current state isn't a deliberate "Path A" choice
 either — it's what's left over from not yet building the thread-pool
@@ -90,9 +97,9 @@ macros — and can be shared by pointer, reusing the project's existing
 **Immortal Function Templates** mechanism (`REFCOUNT_IMMORTAL`; functions
 without captures already share one template object forever). What can't be
 shared:
-- the IO reactor — not cloneable, only recreatable (one `pthread_create` +
-  one `kqueue`/`epoll_create`, the same cost paid once today at startup);
-- the scheduler — needs a fresh, empty instance (cheap, just queues);
+- the scheduler and its I/O reactor — a fresh instance per World (cheap:
+  queues plus one `kqueue`/`epoll_create`; no thread since the reactor
+  moved into the scheduler loop);
 - genuinely mutable top-level state (atoms, defs holding mutable
   aggregates) — **must** get independent copies per clone, or cloning has
   recreated the exact race Worlds exist to prevent.
@@ -120,6 +127,64 @@ close to free.
   tasks on one scheduler, which channels already mostly cover), never
   across the OS-thread/process boundary. That's a real narrowing of what
   "beerlang concurrency" means, not a detail to gloss over.
+
+### What can be shared between Worlds (2026-10-10)
+
+The "N× memory" cost above is smaller than it looks, because two of the
+biggest pieces don't have to be per-World:
+
+1. **Symbols and keywords: one table, locked.** Interned objects are
+   already immortal, and `object_retain`/`object_release` return without
+   writing for immortal objects (`src/memory/alloc.c`). So sharing the
+   objects is already safe for refcounts; only the intern table needs a
+   lock. Interning happens when reading, compiling, or calling
+   `keyword`/`symbol` — never in the inner loop. Bonus: a value copied
+   between Worlds needs no re-interning; `:foo` is the same object
+   everywhere.
+2. **Compiled code: one copy, World-agnostic.** `OP_LOAD_VAR` resolves its
+   symbol through the current namespace registry every time it runs
+   (`src/vm/vm.c`); no Var pointer is baked into bytecode. One copy of
+   `core.beer`'s compiled code can serve every World, each with its own
+   Vars. The catch: function templates are immortal, but the constants in
+   their pools (string literals, quoted lists) are not, so pushing one
+   writes its refcount. Making each loaded unit's constants immortal, all
+   the way down, fixes that — they already live forever, since load units
+   are never freed.
+
+So a World's own state is its namespaces/Vars, its scheduler + reactor, and
+whatever heap the program builds. Creating one means a fresh registry
+populated by re-running core's top-level forms from the shared bytecode —
+no re-parse or recompile.
+
+This also matters for caches: data that every core reads but nobody writes
+can sit in all cores' private caches at once with no coherence traffic.
+Immortal symbols and constants keep the shared part unwritten.
+
+**Between Worlds:**
+- **A doorbell per scheduler.** An idle scheduler sleeps in
+  `reactor_poll`, so another thread needs a way to wake it:
+  `EVFILT_USER` (kqueue) or an `eventfd` (epoll), behind `reactor.h`.
+- **Copied messages.** Values can't be shared (refcounts aren't atomic), so
+  a message is copied into the receiving World's heap. `beer.hive` already
+  does this between nodes by serialising; a same-process transport (ring +
+  doorbell) would make cross-World messages look like any other hive
+  message.
+- **Shared resources** such as a listening socket: `SO_REUSEPORT` (one
+  socket per World), or one World accepts and passes fds on.
+
+### Suggested order (Path A)
+
+Each step is useful by itself:
+1. Small fixes: register destructors once at startup, build the CRC32
+   table eagerly, make `g_stats` per-World / atomic / compiled out.
+2. A lock around symbol interning.
+3. Make loaded constants deeply immortal.
+4. A `world` pointer on `VM`/`Reader`/`Compiler`, with the per-World state
+   above moved behind it — the big mechanical step.
+5. Doorbell + cross-World message ring; a second World on a second thread.
+
+Separately, blocking natives (`shell/exec`, FFI, stdin) should eventually
+go through the reactor too, so that one doesn't stall its World.
 
 ## Path B — Shared heap, thread-safe runtime
 
@@ -188,14 +253,14 @@ than a rewrite of the existing single-threaded runtime.
 
 ## Comparison
 
-| | Path A: isolated Worlds | Path B: shared heap | Path C: opt-in shared |
-|---|---|---|---|
-| Hot-path overhead | None | Atomics everywhere | Atomics only on opted-in values |
-| Engineering risk | Moderate, bounded (symbol.c, namespace.c, scheduler.c, io_reactor.c) | High (concurrent data structures, GC redesign) | Moderate (new type + Path A's isolation) |
-| Matches original `08_MULTITASKING.md` design | No | Yes | Partially |
-| Refs/STM/Agents meaningful across OS threads | No (only within one World) | Yes | Yes, for opted-in values |
-| Memory per worker | N× (duplicated symbol/ns tables, mitigated by immortal-template sharing) | 1× | ~1× for shared state, N× for isolated state |
-| What it generalizes | `examples/embedded_http_prefork`'s process-per-worker, in-process | A real M:N scheduler (as originally designed) | Both, selectively |
+|                                              | Path A: isolated Worlds                                                         | Path B: shared heap                            | Path C: opt-in shared                       |
+|----------------------------------------------|---------------------------------------------------------------------------------|------------------------------------------------|---------------------------------------------|
+| Hot-path overhead                            | None                                                                            | Atomics everywhere                             | Atomics only on opted-in values             |
+| Engineering risk                             | Moderate, bounded (symbol.c, namespace.c, scheduler.c, core.c load bookkeeping) | High (concurrent data structures, GC redesign) | Moderate (new type + Path A's isolation)    |
+| Matches original `08_MULTITASKING.md` design | No                                                                              | Yes                                            | Partially                                   |
+| Refs/STM/Agents meaningful across OS threads | No (only within one World)                                                      | Yes                                            | Yes, for opted-in values                    |
+| Memory per worker                            | Namespaces/Vars + scheduler + program heap; symbols and compiled code shared    | 1×                                             | ~1× for shared state, N× for isolated state |
+| What it generalizes                          | `examples/embedded_http_prefork`'s process-per-worker, in-process               | A real M:N scheduler (as originally designed)  | Both, selectively                           |
 
 ## Open questions
 

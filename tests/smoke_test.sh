@@ -1848,6 +1848,32 @@ TMPW=$(mktemp /tmp/beer_w_XXXXXX)
 check "(let [f (open \"$TMPW\" :write)] (close f) (try (write f \"x\") (catch e (:message e))))" '"write: stream is closed"'
 rm -f "$TMPW"
 
+# --- Var resolution by home namespace (not the caller's current ns) ---
+check_multi '(def old+ +)
+(def hits (atom 0))
+(defn + [& args] (swap! hits (fn [h] (old+ h 1))) (apply old+ args))
+(inc 41)
+(count (range 5))
+@hits' '0' 'redefining + in user does not leak into beer.core fns'
+check_multi '(ns res.a)
+(def x :a)
+(defn getx [] x)
+(ns res.b)
+(def x :b)
+(res.a/getx)' ':a' 'fn resolves free vars in its home ns'
+check_multi '(ns res.c)
+(def y :c)
+(let [k 1] (defn gety [] y))
+(ns res.d)
+(def y :d)
+(res.c/gety)' ':c' 'top-level closure resolves in its home ns'
+check_multi '(def old+ +)
+(defmulti + (fn [& args] (if (string? (first args)) :str :num)))
+(defmethod + :str [& args] (apply str args))
+(defmethod + :num [& args] (apply old+ args))
+[(+ 1 2) (+ "a" "b") (inc 41) (reduce beer.core/+ [1 2 3])]' '[3 "ab" 42 6]' 'multimethod + in user ns'
+check '[(reduce + [1 2 3]) (reduce + 10 [1 2 3]) (reduce + []) (reduce max [3 9 2]) (reduce + [5])]' '[6 16 0 9 5]'
+
 echo ""
 echo "===================="
 echo "Passed: $PASS"

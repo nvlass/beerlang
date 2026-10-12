@@ -87,6 +87,11 @@ static int beer_run_source(BeerState* B, const char* src,
                 function_set_code(constants[i], code->bytecode,
                                   (int)code->code_size, constants, n_constants);
                 object_make_immortal(constants[i]);
+                /* Home namespace, for resolving the function's free symbols */
+                {
+                    Namespace* cur = namespace_registry_current(global_namespace_registry);
+                    if (cur) function_set_ns_name(constants[i], cur->name);
+                }
             }
         }
 
