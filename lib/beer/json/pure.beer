@@ -1,0 +1,290 @@
+(ns beer.json.pure
+  "Pure-beerlang reference implementation of beer.json.
+
+  Same API and semantics as the C natives (src/runtime/json.c): use it as
+  the spec and test oracle, and as the fallback wherever those natives
+  aren't available. It is much slower than beer.json.
+
+  Known differences from the natives:
+    - floats are rendered with (str x), which uses %g (6 significant
+      digits) until the core printer is fixed
+    - error offsets are character indices (the natives report bytes);
+      they agree on ASCII input
+    - no nesting limit (the natives stop at 512 levels)
+    - non-ASCII documents parse in O(n^2): nth on a string is only O(1)
+      when the string is pure ASCII"
+  (:require [beer.string :as str]))
+
+;; ============================================================
+;; Parser — each parse-* fn takes (s i len), returns [value next-i]
+;; ============================================================
+
+(defn fail [msg i]
+  (throw (ex-info (str "json/parse: " msg " at offset " i) {})))
+
+(defn at [s i len]
+  (if (< i len) (nth s i) nil))
+
+(defn ws? [c]
+  (or (= c \space) (= c \newline) (= c \tab) (= c \return)))
+
+(defn skip-ws [s i len]
+  (if (and (< i len) (ws? (nth s i))) (recur s (+ i 1) len) i))
+
+(defn digit? [c]
+  (and (char? c) (>= (int c) 48) (<= (int c) 57)))
+
+(defn skip-digits [s i len]
+  (if (digit? (at s i len)) (recur s (+ i 1) len) i))
+
+(defn hex-val [c]
+  (if (char? c)
+    (let [n (int c)]
+      (cond (and (>= n 48) (<= n 57))  (- n 48)
+            (and (>= n 97) (<= n 102)) (- n 87)
+            (and (>= n 65) (<= n 70))  (- n 55)
+            :else nil))
+    nil))
+
+;; Four hex digits at i, or nil
+(defn hex4 [s i len]
+  (if (> (+ i 4) len)
+    nil
+    (let [a (hex-val (nth s i))       b (hex-val (nth s (+ i 1)))
+          c (hex-val (nth s (+ i 2))) d (hex-val (nth s (+ i 3)))]
+      (if (and a b c d)
+        (+ (* a 4096) (* b 256) (* c 16) d)
+        nil))))
+
+;; i points just past "\u"; returns [code-point next-i]
+(defn parse-u [s i len]
+  (when (> (+ i 4) len) (fail "truncated \\u escape" i))
+  (let [cp (hex4 s i len)
+        j  (+ i 4)]
+    (when (nil? cp) (fail "bad \\u escape" i))
+    (cond
+      (and (>= cp 55296) (<= cp 56319))
+        (let [lo (if (and (= (at s j len) \\) (= (at s (+ j 1) len) \u))
+                   (hex4 s (+ j 2) len)
+                   nil)]
+          (if (and lo (>= lo 56320) (<= lo 57343))
+            [(+ 65536 (* (- cp 55296) 1024) (- lo 56320)) (+ j 6)]
+            [65533 j]))
+      (and (>= cp 56320) (<= cp 57343)) [65533 j]
+      :else [cp j])))
+
+(def escapes
+  {\" "\"" \\ "\\" \/ "/" \b (str (char 8)) \f (str (char 12))
+   \n "\n" \r "\r" \t "\t"})
+
+;; Slow path once a backslash is seen at j; i is the opening quote
+(defn parse-string-escaped [s i j len]
+  (let [b (str/builder (subs s (+ i 1) j))]
+    (loop [j j]
+      (let [c (at s j len)]
+        (cond
+          (nil? c) (fail "unterminated string" j)
+          (= c \") [(str b) (+ j 1)]
+          (< (int c) 32) (fail "control character in string" j)
+          (not (= c \\)) (do (str/append! b c) (recur (+ j 1)))
+          :else
+            (let [e (at s (+ j 1) len)]
+              (cond
+                (nil? e) (fail "unterminated string" j)
+                (= e \u) (let [r (parse-u s (+ j 2) len)]
+                           (str/append! b (char (nth r 0)))
+                           (recur (nth r 1)))
+                :else (let [r (get escapes e)]
+                        (if r
+                          (do (str/append! b r) (recur (+ j 2)))
+                          (fail "bad escape" (+ j 1)))))))))))
+
+;; i points at the opening quote
+(defn parse-string [s i len]
+  (loop [j (+ i 1)]
+    (let [c (at s j len)]
+      (cond
+        (nil? c) (fail "unterminated string" j)
+        (= c \") [(subs s (+ i 1) j) (+ j 1)]
+        (= c \\) (parse-string-escaped s i j len)
+        (< (int c) 32) (fail "control character in string" j)
+        :else (recur (+ j 1))))))
+
+(defn parse-number [s i len]
+  (let [j (if (= (at s i len) \-) (+ i 1) i)]
+    (when (not (digit? (at s j len))) (fail "bad number" i))
+    (let [j (if (= (at s j len) \0) (+ j 1) (skip-digits s j len))
+          frac? (= (at s j len) \.)
+          j (if frac?
+              (do (when (not (digit? (at s (+ j 1) len))) (fail "bad number" (+ j 1)))
+                  (skip-digits s (+ j 1) len))
+              j)
+          exp? (or (= (at s j len) \e) (= (at s j len) \E))
+          j (if exp?
+              (let [k (if (or (= (at s (+ j 1) len) \+) (= (at s (+ j 1) len) \-)) (+ j 2) (+ j 1))]
+                (when (not (digit? (at s k len))) (fail "bad number" k))
+                (skip-digits s k len))
+              j)
+          v (read-string (subs s i j))]
+      [(if (or frac? exp?) (float v) v) j])))
+
+(defn parse-array [s i len]
+  (let [j (skip-ws s (+ i 1) len)]
+    (if (= (at s j len) \])
+      [[] (+ j 1)]
+      (loop [j j acc []]
+        (let [r (parse-value s j len)
+              acc (conj acc (nth r 0))
+              j (skip-ws s (nth r 1) len)
+              c (at s j len)]
+          (cond
+            (nil? c) (fail "unterminated array" j)
+            (= c \,) (recur (+ j 1) acc)
+            (= c \]) [acc (+ j 1)]
+            :else (fail "expected , or ] in array" j)))))))
+
+(defn parse-object [s i len]
+  (let [j (skip-ws s (+ i 1) len)]
+    (if (= (at s j len) \})
+      [{} (+ j 1)]
+      (loop [j j acc {}]
+        (let [j (skip-ws s j len)]
+          (when (not (= (at s j len) \")) (fail "expected string key in object" j))
+          (let [kr (parse-string s j len)
+                j (skip-ws s (nth kr 1) len)]
+            (when (not (= (at s j len) \:)) (fail "expected : in object" j))
+            (let [vr (parse-value s (+ j 1) len)
+                  acc (assoc acc (nth kr 0) (nth vr 0))
+                  j (skip-ws s (nth vr 1) len)
+                  c (at s j len)]
+              (cond
+                (nil? c) (fail "unterminated object" j)
+                (= c \,) (recur (+ j 1) acc)
+                (= c \}) [acc (+ j 1)]
+                :else (fail "expected , or } in object" j)))))))))
+
+(defn literal [s i len word v]
+  (if (= (subs s i (if (< (+ i (count word)) len) (+ i (count word)) len)) word)
+    [v (+ i (count word))]
+    (fail "unexpected token" i)))
+
+(defn parse-value [s i len]
+  (let [i (skip-ws s i len)
+        c (at s i len)]
+    (cond
+      (nil? c)  (fail "unexpected end of input" i)
+      (= c \")  (parse-string s i len)
+      (= c \{)  (parse-object s i len)
+      (= c \[)  (parse-array s i len)
+      (= c \t)  (literal s i len "true" true)
+      (= c \f)  (literal s i len "false" false)
+      (= c \n)  (literal s i len "null" nil)
+      (or (= c \-) (digit? c)) (parse-number s i len)
+      :else (fail "unexpected character" i))))
+
+(defn parse
+  "Parse a JSON string. Objects → maps with string keys, arrays → vectors."
+  [s]
+  (when (not (string? s)) (throw (ex-info "json/parse: requires a string" {})))
+  (let [len (count s)
+        r (parse-value s 0 len)
+        j (skip-ws s (nth r 1) len)]
+    (when (< j len) (fail "trailing characters" j))
+    (nth r 0)))
+
+;; ============================================================
+;; Emitter — everything is appended to one string builder
+;; ============================================================
+
+(defn emit-fail [msg]
+  (throw (ex-info (str "json/emit: " msg) {})))
+
+(def hex-digits "0123456789abcdef")
+
+;; Escape text for code points 0-31
+(def control-escapes
+  (vec (map (fn [n]
+              (cond (= n 8) "\\b" (= n 9) "\\t" (= n 10) "\\n"
+                    (= n 12) "\\f" (= n 13) "\\r"
+                    :else (str "\\u00" (nth hex-digits (bit-shift-right n 4))
+                               (nth hex-digits (bit-and n 15)))))
+            (range 32))))
+
+(defn escape-for [c]
+  (cond (= c \") "\\\""
+        (= c \\) "\\\\"
+        (< (int c) 32) (nth control-escapes (int c))
+        :else nil))
+
+;; Append s quoted; unescaped runs are copied with one subs each
+(defn emit-string [b s]
+  (str/append! b "\"")
+  (let [len (count s)]
+    (loop [i 0 run 0]
+      (if (>= i len)
+        (str/append! b (subs s run len) "\"")
+        (let [e (escape-for (nth s i))]
+          (if e
+            (do (str/append! b (subs s run i) e) (recur (+ i 1) (+ i 1)))
+            (recur (+ i 1) run)))))))
+
+(defn float-text [x]
+  (let [s (str x)]
+    (when (or (= s "inf") (= s "-inf") (= s "nan") (= s "-nan"))
+      (emit-fail "cannot encode NaN or Infinity"))
+    (if (or (str/includes? s ".") (str/includes? s "e"))
+      s
+      (str s ".0"))))
+
+(defn qualified-name [x]
+  (if (namespace x) (str (namespace x) "/" (name x)) (name x)))
+
+(defn emit-key [b k]
+  (cond
+    (string? k) (emit-string b k)
+    (or (keyword? k) (symbol? k)) (emit-string b (qualified-name k))
+    (float? k) (emit-string b (float-text k))
+    (or (number? k) (char? k)) (emit-string b (str k))
+    (= k true) (emit-string b "true")
+    (= k false) (emit-string b "false")
+    :else (emit-fail (str "cannot encode map key of type " (name (type k))))))
+
+(defn emit-value [b x]
+  (cond
+    (nil? x)   (str/append! b "null")
+    (= x true) (str/append! b "true")
+    (= x false) (str/append! b "false")
+    (string? x) (emit-string b x)
+    (or (keyword? x) (symbol? x)) (emit-string b (qualified-name x))
+    (char? x)  (emit-string b (str x))
+    (float? x) (str/append! b (float-text x))
+    (number? x) (str/append! b x)
+    (or (vector? x) (list? x) (set? x))
+      (let [v (if (vector? x) x (vec x))
+            n (count v)]
+        (str/append! b "[")
+        (loop [i 0]
+          (when (< i n)
+            (when (> i 0) (str/append! b ","))
+            (emit-value b (nth v i))
+            (recur (+ i 1))))
+        (str/append! b "]"))
+    (map? x)
+      (do
+        (str/append! b "{")
+        (loop [ks (keys x) first? true]
+          (when (not (empty? ks))
+            (when (not first?) (str/append! b ","))
+            (emit-key b (first ks))
+            (str/append! b ":")
+            (emit-value b (get x (first ks)))
+            (recur (rest ks) false)))
+        (str/append! b "}"))
+    :else (emit-fail (str "cannot encode value of type " (name (type x))))))
+
+(defn emit
+  "Serialize x to a JSON string."
+  [x]
+  (let [b (str/builder)]
+    (emit-value b x)
+    (str b)))

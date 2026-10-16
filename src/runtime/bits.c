@@ -161,6 +161,11 @@ static Value native_char_from_code(VM* vm, int argc, Value* argv) {
         vm_error(vm, "char: code point out of range (0–0x10FFFF)");
         return VALUE_NIL;
     }
+    if (n >= 0xD800 && n <= 0xDFFF) {
+        /* Surrogates have no UTF-8 encoding; (str c) would come back nil */
+        vm_error(vm, "char: surrogate code point");
+        return VALUE_NIL;
+    }
     return make_char((uint32_t)n);
 }
 

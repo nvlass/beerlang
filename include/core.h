@@ -61,6 +61,7 @@ void core_register_bits(void);
 /* Register crypto primitives (sha256, hmac-sha256, constant-time-eq?, random-bytes)
  * in beer.crypto namespace */
 void core_register_crypto(void);
+void core_register_json(void);
 
 /* Register beer.bytes namespace (mutable ByteBuffer: alloc, cursor ops,
  * endian-aware accessors, bulk copy/blit, hex dump) */

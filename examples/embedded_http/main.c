@@ -162,7 +162,7 @@ static void send_response(struct mg_connection *conn, BeerValue resp) {
                 if (strcasecmp(name, "content-type") == 0) have_content_type = 1;
             }
         }
-        object_release(keys);
+        beer_release(keys);
     }
     if (!have_content_type) {
         mg_printf(conn, "Content-Type: text/plain\r\n");
@@ -184,7 +184,7 @@ static int request_handler(struct mg_connection *conn, void *cbdata) {
 
     Value req = build_request_map(conn);
     BeerValue resp = beer_call(g_beer, g_handler, 1, &req);
-    object_release(req);
+    beer_release(req);
 
     send_response(conn, resp);
     beer_release(resp);

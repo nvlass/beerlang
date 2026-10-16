@@ -257,6 +257,7 @@ uint32_t string_char_at(Value str, size_t index) {
     if (index >= s->char_count) {
         return 0;  /* Out of bounds */
     }
+    if (s->byte_len == s->char_count) return (unsigned char)s->data[index];
 
     /* Walk through UTF-8 characters */
     const char* p = s->data;
@@ -376,6 +377,7 @@ int64_t string_char_to_byte_offset(Value str, size_t char_idx) {
     String* s = (String*)untag_pointer(str);
     if (char_idx > s->char_count) return -1;
     if (char_idx == 0) return 0;
+    if (s->byte_len == s->char_count) return (int64_t)char_idx;
 
     const char* p = s->data;
     for (size_t i = 0; i < char_idx; i++) {

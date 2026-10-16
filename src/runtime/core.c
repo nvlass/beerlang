@@ -35,6 +35,7 @@
 #include "io_reactor.h"
 #include "tarindex.h"
 #include "disasm.h"
+#include "strbuilder.h"
 #include <fcntl.h>
 
 /* Forward declarations */
@@ -488,13 +489,14 @@ static Value native_int(VM* vm, int argc, Value* argv) {
     Value v = argv[0];
     if (is_fixnum(v)) return v;
     if (is_float(v)) return make_fixnum((int64_t)untag_float(v));
+    if (is_char(v)) return make_fixnum((int64_t)untag_char(v));
     if (is_bigint(v)) {
         int64_t n;
         if (bigint_to_int64(v, &n)) return make_fixnum(n);
         vm_error(vm, "int: bigint too large for fixnum");
         return VALUE_NIL;
     }
-    vm_error(vm, "int: argument must be a number");
+    vm_error(vm, "int: argument must be a number or char");
     return VALUE_NIL;
 }
 
@@ -1630,6 +1632,10 @@ static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len) {
                 s = owned;
                 slen = strlen(owned);
                 break;
+            case TYPE_STRBUILDER:
+                s = ((StringBuilder*)untag_pointer(v))->data;
+                slen = ((StringBuilder*)untag_pointer(v))->len;
+                break;
             case TYPE_CONS:
             case TYPE_VECTOR:
             case TYPE_HASHMAP:
@@ -1777,7 +1783,7 @@ static Value native_name(VM* vm, int argc, Value* argv) {
         return VALUE_NIL;
     }
     Value x = argv[0];
-    if (is_string(x)) return x;  /* strings return themselves */
+    if (is_string(x)) { object_retain(x); return x; }  /* strings return themselves */
     if (is_pointer(x)) {
         uint8_t t = object_type(x);
         if (t == TYPE_SYMBOL)
@@ -1872,6 +1878,7 @@ static Value native_type(VM* vm, int argc, Value* argv) {
             case TYPE_FUNCTION:  name = "function";  break;
             case TYPE_NATIVE_FN: name = "function";  break;
             case TYPE_ATOM:      name = "atom";      break;
+            case TYPE_STRBUILDER: name = "string-builder"; break;
             default:             name = "unknown";   break;
         }
     } else {
@@ -3094,6 +3101,57 @@ static Value native_str_split(VM* vm, int argc, Value* argv) {
     return string_split(argv[0], argv[1]);
 }
 
+/* Append each x to sb the way str renders it */
+static void sb_append_values(Value sbv, int argc, Value* argv) {
+    StringBuilder* sb = (StringBuilder*)untag_pointer(sbv);
+    for (int i = 0; i < argc; i++) {
+        Value x = argv[i];
+        if (is_string(x)) {
+            strbuilder_append(sbv, string_cstr(x), string_byte_length(x));
+        } else if (value_identical(x, sbv)) {
+            /* value_sprint would read from the buffer it reallocates */
+            char* copy = malloc(sb->len + 1);
+            size_t n = sb->len;
+            memcpy(copy, sb->data, n);
+            strbuilder_append(sbv, copy, n);
+            free(copy);
+        } else {
+            sb->len = is_collection(x)
+                ? value_sprint_readable(x, &sb->data, &sb->cap, sb->len)
+                : value_sprint(x, &sb->data, &sb->cap, sb->len);
+            strbuilder_append(sbv, "", 0);   /* restore the NUL */
+        }
+    }
+}
+
+/* (str/builder & xs): new string builder, optionally seeded like (str xs...) */
+static Value native_str_builder(VM* vm, int argc, Value* argv) {
+    (void)vm;
+    Value sb = strbuilder_new(64);
+    sb_append_values(sb, argc, argv);
+    return sb;
+}
+
+/* (str/append! sb & xs): append xs as str would, return sb */
+static Value native_str_append(VM* vm, int argc, Value* argv) {
+    if (argc < 1 || !is_strbuilder(argv[0])) {
+        vm_error(vm, "append!: first argument must be a string builder");
+        return VALUE_NIL;
+    }
+    sb_append_values(argv[0], argc - 1, argv + 1);
+    object_retain(argv[0]);
+    return argv[0];
+}
+
+/* byte-count: UTF-8 byte length of a string (count is characters) */
+static Value native_str_byte_count(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_string(argv[0])) {
+        vm_error(vm, "byte-count: requires a string");
+        return VALUE_NIL;
+    }
+    return make_fixnum((int64_t)string_byte_length(argv[0]));
+}
+
 static Value native_str_includes(VM* vm, int argc, Value* argv) {
     if (argc != 2 || !is_string(argv[0]) || !is_string(argv[1])) {
         vm_error(vm, "includes?: requires 2 string arguments");
@@ -3439,6 +3497,9 @@ void core_register_string(void) {
     register_native(str_ns, "ends-with?",   native_str_ends_with);
     register_native(str_ns, "replace",      native_str_replace);
     register_native(str_ns, "subs",         native_subs);
+    register_native(str_ns, "byte-count",   native_str_byte_count);
+    register_native(str_ns, "builder",      native_str_builder);
+    register_native(str_ns, "append!",      native_str_append);
 }
 
 /* =================================================================
@@ -3507,6 +3568,57 @@ static Value native_close(VM* vm, int argc, Value* argv) {
     return VALUE_NIL;
 }
 
+static int64_t read_now_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+}
+
+/* Retrying a timed read: the task may have been woken by the fd or by the
+ * timer, so drop whichever wait is still registered. */
+static void read_resume(VM* vm) {
+    if (vm->read_deadline == 0) return;
+    Task* task = vm->scheduler->current;
+    io_reactor_forget(vm->scheduler->io_reactor, task);
+    scheduler_cancel_timer(vm->scheduler, task);
+}
+
+/* A nonblocking read would block: park on the fd, with a timer when the
+ * stream has a read timeout. Past the deadline, throw instead. */
+static void read_wait(VM* vm, Stream* st, const char* who) {
+    if (st->read_timeout_ms <= 0) {
+        scheduler_park_native(vm, st->fd, false);
+        return;
+    }
+    int64_t now = read_now_ns();
+    if (vm->read_deadline == 0) {
+        vm->read_deadline = now + (int64_t)st->read_timeout_ms * 1000000;
+    } else if (now >= vm->read_deadline) {
+        vm->read_deadline = 0;
+        char buf[96];
+        snprintf(buf, sizeof(buf), "%s: timed out after %d ms", who, st->read_timeout_ms);
+        vm_throw_error(vm, buf);
+        return;
+    }
+    scheduler_park_native(vm, st->fd, false);
+    scheduler_add_timer(vm->scheduler, vm->scheduler->current, vm->read_deadline);
+}
+
+/* set-read-timeout!: (set-read-timeout! stream ms) — 0 or nil disables */
+static Value native_set_read_timeout(VM* vm, int argc, Value* argv) {
+    if (argc != 2 || !is_stream(argv[0]) || !(is_fixnum(argv[1]) || is_nil(argv[1]))) {
+        vm_error(vm, "set-read-timeout!: requires a stream and a timeout in ms (or nil)");
+        return VALUE_NIL;
+    }
+    int64_t ms = is_nil(argv[1]) ? 0 : untag_fixnum(argv[1]);
+    if (ms < 0 || ms > INT32_MAX) {
+        vm_error(vm, "set-read-timeout!: timeout out of range");
+        return VALUE_NIL;
+    }
+    ((Stream*)untag_pointer(argv[0]))->read_timeout_ms = (int)ms;
+    return VALUE_NIL;
+}
+
 /* read-line: (read-line) or (read-line stream) */
 static Value native_read_line(VM* vm, int argc, Value* argv) {
     if (argc > 1) {
@@ -3535,9 +3647,11 @@ static Value native_read_line(VM* vm, int argc, Value* argv) {
     /* Non-blocking path for streams with O_NONBLOCK set */
     Stream* st = (Stream*)untag_pointer(s);
     if (st->nonblocking && scheduler_can_park(vm)) {
+        read_resume(vm);
         bool would_block = false;
         Value result = stream_read_line_nb(s, &would_block);
-        if (would_block) scheduler_park_native(vm, st->fd, false);
+        if (would_block) read_wait(vm, st, "read-line");
+        else vm->read_deadline = 0;
         return result;
     }
 
@@ -3569,9 +3683,11 @@ static Value native_read_bytes(VM* vm, int argc, Value* argv) {
 
     /* Non-blocking path for streams with O_NONBLOCK set */
     if (st->nonblocking && scheduler_can_park(vm)) {
+        read_resume(vm);
         bool would_block = false;
         Value result = stream_read_bytes_nb(s, (size_t)n, &would_block);
-        if (would_block) scheduler_park_native(vm, st->fd, false);
+        if (would_block) read_wait(vm, st, "read-bytes");
+        else vm->read_deadline = 0;
         return result;
     }
 
@@ -3708,6 +3824,7 @@ void core_register_streams(void) {
     register_native(core_ns, "close", native_close);
     register_native(core_ns, "read-line", native_read_line);
     register_native(core_ns, "read-bytes", native_read_bytes);
+    register_native(core_ns, "set-read-timeout!", native_set_read_timeout);
     register_native(core_ns, "write", native_write_stream);
     register_native(core_ns, "write-bytes", native_write_bytes);
     register_native(core_ns, "flush", native_flush);
@@ -3883,6 +4000,25 @@ void core_register_tar(void) {
 }
 
 /* (sleep ms) — suspend current task for ms milliseconds */
+/* nano-time: monotonic nanoseconds, for measuring intervals (like
+ * System/nanoTime: the origin is arbitrary) */
+static Value native_nano_time(VM* vm, int argc, Value* argv) {
+    (void)argv;
+    if (argc != 0) { vm_error(vm, "nano-time: takes no arguments"); return VALUE_NIL; }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return make_fixnum((int64_t)now.tv_sec * 1000000000LL + now.tv_nsec);
+}
+
+/* current-time-millis: wall-clock milliseconds since the Unix epoch */
+static Value native_current_time_millis(VM* vm, int argc, Value* argv) {
+    (void)argv;
+    if (argc != 0) { vm_error(vm, "current-time-millis: takes no arguments"); return VALUE_NIL; }
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    return make_fixnum((int64_t)now.tv_sec * 1000LL + now.tv_nsec / 1000000);
+}
+
 static Value native_sleep(VM* vm, int argc, Value* argv) {
     /* Retry path: deadline was already set; check if it has passed */
     if (vm->sleep_wake_at != 0) {
@@ -3978,6 +4114,8 @@ void core_register_concurrency(void) {
     register_native(core_ns, "task?", native_task_q);
     register_native(core_ns, "task-watch", native_task_watch);
     register_native(core_ns, "sleep", native_sleep);
+    register_native(core_ns, "nano-time", native_nano_time);
+    register_native(core_ns, "current-time-millis", native_current_time_millis);
 }
 
 /* =================================================================

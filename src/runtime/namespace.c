@@ -14,6 +14,7 @@
 #include "task.h"
 #include "channel.h"
 #include "atom.h"
+#include "strbuilder.h"
 #include "scheduler.h"
 #include "core.h"
 #include "aot.h"
@@ -57,11 +58,6 @@ void var_free(Var* var) {
     if (!var) return;
     Value v = tag_pointer(var);
     object_release(v);
-}
-
-Value var_get_value(Var* var) {
-    if (!var) return VALUE_NIL;
-    return var->value;
 }
 
 void var_set_value(Var* var, Value value) {
@@ -122,6 +118,11 @@ void namespace_free(Namespace* ns) {
     object_release(v);
 }
 
+/* Bumped whenever symbol resolution could change (a var, refer or alias
+ * appears or disappears) so the VM's LOAD_VAR cache knows to re-resolve.
+ * Starts at 1 so zeroed cache entries never match. */
+uint32_t namespace_generation = 1;
+
 Var* namespace_define(Namespace* ns, Value symbol, Value value) {
     if (!ns || !is_pointer(symbol) || object_type(symbol) != TYPE_SYMBOL) {
         return NULL;
@@ -141,6 +142,7 @@ Var* namespace_define(Namespace* ns, Value symbol, Value value) {
         hashmap_set(ns->vars, symbol, tagged_var);
         /* hashmap_set retains; var_new returned refcount=1; release our ref */
         object_release(tagged_var);
+        namespace_generation++;
     } else {
         /* Update existing var */
         var = (Var*)untag_pointer(var_ptr_val);
@@ -169,6 +171,7 @@ Var* namespace_lookup(Namespace* ns, Value symbol) {
 void namespace_refer(Namespace* ns, Value symbol, Var* var) {
     if (!ns || !var) return;
     hashmap_set(ns->refers, symbol, tag_pointer(var));
+    namespace_generation++;
 }
 
 void namespace_undefine(Namespace* ns, Value symbol) {
@@ -178,6 +181,7 @@ void namespace_undefine(Namespace* ns, Value symbol) {
 
     /* hashmap_remove releases the Var value automatically */
     hashmap_remove(ns->vars, symbol);
+    namespace_generation++;
 }
 
 Value namespace_all_vars(Namespace* ns) {
@@ -206,6 +210,7 @@ void namespace_add_alias(Namespace* ns, Value alias_sym, const char* target_ns_n
     if (!ns) return;
     Value name_str = string_from_cstr(target_ns_name);
     hashmap_set(ns->aliases, alias_sym, name_str);
+    namespace_generation++;
     object_release(name_str);
 }
 
@@ -226,6 +231,7 @@ NamespaceRegistry* namespace_registry_new(void) {
 
     reg->namespaces = hashmap_create_default();
     reg->current = NULL;
+    reg->core = NULL;
 
     return reg;
 }
@@ -304,13 +310,10 @@ void namespace_registry_set_current(NamespaceRegistry* reg, Namespace* ns) {
     reg->current = ns;
 }
 
-Namespace* namespace_registry_current(NamespaceRegistry* reg) {
-    if (!reg) return NULL;
-    return reg->current;
-}
-
 Namespace* namespace_registry_get_core(NamespaceRegistry* reg) {
-    return namespace_registry_get(reg, "beer.core");
+    if (!reg) return NULL;
+    if (!reg->core) reg->core = namespace_registry_get(reg, "beer.core");
+    return reg->core;
 }
 
 /* =================================================================
@@ -360,6 +363,7 @@ void namespace_init(void) {
 
     /* Initialize atom type and register atom natives */
     atom_init();
+    strbuilder_init();
     core_register_atoms();
     core_register_metadata();
     core_register_tar();
@@ -369,6 +373,7 @@ void namespace_init(void) {
     core_register_udp();
     core_register_bits();
     core_register_crypto();
+    core_register_json();
     core_register_aot();
 
 #ifdef BEER_CFFI
@@ -392,4 +397,5 @@ void namespace_shutdown(void) {
         namespace_registry_free(global_namespace_registry);
         global_namespace_registry = NULL;
     }
+    namespace_generation++;
 }

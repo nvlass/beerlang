@@ -25,6 +25,7 @@ LIB_SRCS     = $(ROOT)/src/lib/beer.c  # embed API (no aot.c)
 RUNTIME_SRCS = $(ROOT)/src/runtime/core.c \
                $(ROOT)/src/runtime/bits.c \
                $(ROOT)/src/runtime/bytes.c \
+               $(ROOT)/src/runtime/json.c \
                $(ROOT)/src/runtime/namespace.c
 
 # IO: stream.c + tarindex.c; reactor replaced by stub

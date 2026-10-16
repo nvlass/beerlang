@@ -1,7 +1,8 @@
 /* Scheduler - Cooperative task scheduler
  *
  * Maintains a ready queue of tasks and runs them round-robin.
- * Each task gets a configurable instruction quota before yielding.
+ * Each task gets a configurable quota of safe points (jumps and fn entries)
+ * before yielding.
  */
 
 #ifndef BEERLANG_SCHEDULER_H
@@ -14,7 +15,7 @@
 /* Forward declarations */
 typedef struct IOReactor IOReactor;
 
-/* Default instruction quota per task quantum */
+/* Default quota per task quantum, counted at safe points (jumps and fn entries) */
 #define DEFAULT_TASK_QUOTA 1000
 
 /* Timer entry — for sleep/after-delay */
@@ -41,7 +42,7 @@ typedef struct Scheduler {
     SleepEntry* sleep_list;
 
     /* Configuration */
-    int quota;          /* Instructions per quantum */
+    int quota;          /* Safe points per quantum */
 
     unsigned ticks;     /* Quanta run, for spacing out I/O checks */
 } Scheduler;

@@ -45,12 +45,18 @@ typedef struct NativeFunction {
 Value native_function_new(int arity, NativeFn fn_ptr, const char* name);
 
 /* Get native function properties */
-int native_function_arity(Value fn);
-NativeFn native_function_ptr(Value fn);
+static inline int native_function_arity(Value fn) {
+    return ((NativeFunction*)untag_pointer(fn))->arity;
+}
+static inline NativeFn native_function_ptr(Value fn) {
+    return ((NativeFunction*)untag_pointer(fn))->fn_ptr;
+}
 const char* native_function_name(Value fn);
 
 /* Type check */
-bool is_native_function(Value v);
+static inline bool is_native_function(Value v) {
+    return is_pointer(v) && object_type(v) == TYPE_NATIVE_FN;
+}
 
 /* Initialize native function type (register destructor) */
 void native_function_init(void);

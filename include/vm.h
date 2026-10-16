@@ -127,6 +127,7 @@ typedef struct VM {
     bool write_resumed;         /* Retrying a write native whose data is already buffered */
     int pending_fd;             /* fd of a tcp/connect in progress, -1 if none */
     int64_t pending_deadline;   /* CLOCK_MONOTONIC ns timeout for pending_fd */
+    int64_t read_deadline;      /* CLOCK_MONOTONIC ns deadline of a parked timed read — 0 = none */
     struct Scheduler* scheduler; /* Back-pointer (NULL for standalone VMs) */
 
     /* State */

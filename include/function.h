@@ -23,6 +23,7 @@ typedef struct Function {
     int num_constants;       /* Number of constants */
     char* name;              /* Function name (owned, always non-NULL) */
     char* ns_name;           /* Defining namespace name (owned, NULL = current) */
+    struct Namespace* home_ns; /* ns_name resolved lazily; namespaces are never removed */
     Value    meta;           /* Metadata map (or nil) */
     Value    closed[];       /* Flexible array: closure environment */
 } Function;
@@ -44,7 +45,9 @@ void function_set_code(Value fn, uint8_t* code, int code_size,
 
 /* Get function properties */
 int function_arity(Value fn);
-uint32_t function_code_offset(Value fn);
+static inline uint32_t function_code_offset(Value fn) {
+    return ((Function*)untag_pointer(fn))->code_offset;
+}
 uint16_t function_n_locals(Value fn);
 uint16_t function_n_closed(Value fn);
 Value function_get_closed(Value fn, uint16_t idx);
@@ -59,7 +62,9 @@ int function_get_num_constants(Value fn);
 const char* function_name(Value fn);
 
 /* Get/set defining namespace */
-const char* function_ns_name(Value fn);
+static inline const char* function_ns_name(Value fn) {
+    return ((Function*)untag_pointer(fn))->ns_name;
+}
 void function_set_ns_name(Value fn, const char* ns_name);
 
 /* Get/set metadata */
@@ -67,6 +72,8 @@ Value function_get_meta(Value fn);
 void function_set_meta(Value fn, Value meta);
 
 /* Type check */
-bool is_function(Value v);
+static inline bool is_function(Value v) {
+    return is_pointer(v) && object_type(v) == TYPE_FUNCTION;
+}
 
 #endif /* BEERLANG_FUNCTION_H */

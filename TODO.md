@@ -30,6 +30,53 @@ Small / concrete:
   run it as `make asan -j1` or twice
 - stdin/stdout/stderr stay blocking fds: `(read-line *in*)` inside a task
   still blocks the thread
+- Floats print with `%g` (6 significant digits) in `str`/`pr-str`/REPL:
+  `(str 3.14159265)` → `"3.14159"`, `-250.0` prints as `-250`. `json/emit`
+  uses shortest round-trip formatting; the core printer should too
+- String literals don't support `\uXXXX` escapes in the reader
+- `(str coll)` / `pr-str` of collections go through `open_memstream` +
+  `value_print_readable` (`value_sprint_readable` in value.c): a stream
+  per call. Fine for now; worth a direct buffer printer if it shows up
+- `apply`, and natives that call back into beerlang (`swap!`, `reduce-kv`,
+  sort comparators, ...), run the fn in a temp VM: inside it I/O can't park
+  (it would park the *outer* task while apply returns) and nothing yields.
+  Multi-arity `defn` no longer goes through apply; a real fix needs a
+  re-entrant call path in the VM (native asks the VM to call a fn and
+  resume it with the result)
+- `beer.http` gaps: no `Date` header (`current-time-millis` exists now; needs
+  HTTP-date formatting, e.g. a `gmtime`-based native), no limit on
+  request-line / header-line length (`read-line` is unbounded), no chunked
+  request bodies (501), request bodies must be UTF-8 text
+
+Performance — investigate / optimize:
+- VM dispatch, done 2026-10-17 (macOS empty-loop 173 -> 101 ns, fib 20
+  6.9 -> 4.0 ms; Linux empty-loop 108 -> 42 ns): inline retain/release,
+  operand reads, push/pop and hot accessors; step() inlined into vm_run's
+  loop; yield countdown at safe points (jumps, fn entry).
+- Tried and reverted (65d019f): one dispatch function where every opcode
+  ends in NEXT (fetch + dispatch), with optional computed goto. Neutral on
+  Apple Silicon + clang; on Linux + GCC 20-30% slower with the switch and
+  still slower with computed goto on closures, atoms, tasks and pure JSON
+  (`make bench REF=8d9f304` vs `REF=65d019f [EXTRA_CFLAGS=-DVM_THREADED_DISPATCH]`).
+  Untested guess: GCC stops inlining helpers into the much larger function
+- [investigate] keep `pc`/`sp`/`code` in locals in the dispatch loop; write
+  back only around calls into C, yields and errors. Measure on both
+  platforms (the dispatch rewrite above was a regression on one)
+- multi-arity calls are ~2x a plain call (args packed into a list, counted,
+  pulled back out with nth); dispatch on argc inside the fn instead
+- [investigate] Inline core fns at compile time: `OP_ADD`/`OP_LT`/… exist in
+  the VM but the compiler never emits them, so `(+ k 1)` is LOAD_VAR + CALL
+  of a native. Clojure inlines via `:inline` metadata on core vars
+  (arithmetic, comparisons, `inc`/`dec`, `zero?`/`pos?`/`neg?`, `nth`,
+  `get`, `count`, bit ops, casts, `aget`/`alength`, …), and with direct
+  linking compiled call sites don't see later redefinitions. Decide whether
+  beerlang takes the same trade (today's lookup is fully late-bound;
+  see the LOAD_VAR cache smoke tests)
+- [discuss] Branches / "jump misses": the 6–8 conditional checks per opcode
+  before real work, and a single shared `switch` dispatch point that
+  predicts badly. Plus bytecode-level waste seen in `disasm` of a `loop`:
+  a dead `JUMP :L2` right after `JUMP :L0`, and `JUMP_IF_FALSE` that
+  doesn't pop, so both branches start with `POP`
 
 Bigger:
 - AOT: `require`/`load` don't use `.beerc` yet (format + compiler exist) — #6

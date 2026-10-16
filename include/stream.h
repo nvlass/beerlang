@@ -41,6 +41,8 @@ typedef struct {
     uint8_t* read_buf;
     size_t read_pos;
     size_t read_len;       /* valid bytes in read_buf */
+    size_t read_cap;       /* allocated size of read_buf (grows on unread) */
+    int read_timeout_ms;   /* nonblocking reads give up after this; 0 = never */
     /* Write buffer */
     uint8_t* write_buf;
     size_t write_len;

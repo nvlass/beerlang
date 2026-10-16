@@ -1,0 +1,86 @@
+;; Beerlang micro-benchmarks — run with `make bench`.
+;;
+;; Each :f runs its operation n times inside its own loop, so every number
+;; includes one loop iteration (compare with empty-loop). Results go to
+;; .bench/latest.edn; the previous run is kept as .bench/prev.edn and the
+;; "vs prev" column is the change in min ns/op against it.
+
+(ns bench.run
+  (:require [beer.bench :as bench]
+            [beer.json :as json]
+            [beer.json.pure :as pure]
+            [beer.string :as str]))
+
+(defn id [x] x)
+(defn multi ([x] x) ([x y] y))
+(defn variadic [& xs] xs)
+(defn fib [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+
+(def v1024 (vec (range 1024)))
+(def m1024 (reduce (fn [m i] (assoc m i i)) {} (range 1024)))
+(def doc {:id 42 :name "widget" :price 9.99 :ok true :tags ["a" "b"]})
+(def doc-json (json/emit doc))
+
+(def benches
+  [;; --- VM core ---
+   {:name "empty-loop"
+    :f (fn [n] (loop [i 0] (when (< i n) (recur (+ i 1)))))}
+   {:name "arith"
+    :f (fn [n] (loop [i 0 acc 0] (if (< i n) (recur (+ i 1) (+ acc (- (* i 3) i))) acc)))}
+   {:name "fn-call"
+    :f (fn [n] (loop [i 0] (when (< i n) (id i) (recur (+ i 1)))))}
+   {:name "closure-call"
+    :f (fn [n] (let [k 5 g (fn [x] (+ x k))]
+                 (loop [i 0] (when (< i n) (g i) (recur (+ i 1))))))}
+   {:name "multi-arity-call"
+    :f (fn [n] (loop [i 0] (when (< i n) (multi i) (recur (+ i 1)))))}
+   {:name "variadic-call"
+    :f (fn [n] (loop [i 0] (when (< i n) (variadic i i) (recur (+ i 1)))))}
+   {:name "apply"
+    :f (fn [n] (loop [i 0] (when (< i n) (apply id [i]) (recur (+ i 1)))))}
+   {:name "native-call (count)"
+    :f (fn [n] (loop [i 0] (when (< i n) (count v1024) (recur (+ i 1)))))}
+   {:name "let-destructure"
+    :f (fn [n] (loop [i 0] (when (< i n) (let [[a b] v1024] (+ a b)) (recur (+ i 1)))))}
+   {:name "fib 20"
+    :f (fn [n] (loop [i 0] (when (< i n) (fib 20) (recur (+ i 1)))))}
+
+   ;; --- collections ---
+   {:name "vector-conj"
+    :f (fn [n] (loop [i 0 v []] (if (< i n) (recur (+ i 1) (conj v i)) v)))}
+   {:name "vector-nth"
+    :f (fn [n] (loop [i 0] (when (< i n) (nth v1024 (bit-and i 1023)) (recur (+ i 1)))))}
+   {:name "map-assoc"
+    :f (fn [n] (loop [i 0 m m1024] (if (< i n) (recur (+ i 1) (assoc m (bit-and i 1023) i)) m)))}
+   {:name "map-get"
+    :f (fn [n] (loop [i 0] (when (< i n) (get m1024 (bit-and i 1023)) (recur (+ i 1)))))}
+
+   ;; --- strings ---
+   {:name "str (small)"
+    :f (fn [n] (loop [i 0] (when (< i n) (str "item-" i) (recur (+ i 1)))))}
+   {:name "builder-append"
+    :f (fn [n] (let [b (str/builder)]
+                 (loop [i 0] (when (< i n) (str/append! b i) (recur (+ i 1))))))}
+   {:name "json emit (native)"
+    :f (fn [n] (loop [i 0] (when (< i n) (json/emit doc) (recur (+ i 1)))))}
+   {:name "json parse (native)"
+    :f (fn [n] (loop [i 0] (when (< i n) (json/parse doc-json) (recur (+ i 1)))))}
+   {:name "json emit (pure)"
+    :f (fn [n] (loop [i 0] (when (< i n) (pure/emit doc) (recur (+ i 1)))))}
+   {:name "json parse (pure)"
+    :f (fn [n] (loop [i 0] (when (< i n) (pure/parse doc-json) (recur (+ i 1)))))}
+
+   ;; --- state and tasks ---
+   {:name "atom swap!"
+    :f (fn [n] (let [a (atom 0)] (loop [i 0] (when (< i n) (swap! a inc) (recur (+ i 1))))))}
+   {:name "spawn+await"
+    :f (fn [n] (loop [i 0] (when (< i n) (await (spawn (fn [] i))) (recur (+ i 1)))))}
+   {:name "channel put+take"
+    :f (fn [n] (let [ch (chan 1)] (loop [i 0] (when (< i n) (>! ch i) (<! ch) (recur (+ i 1))))))}])
+
+(def latest ".bench/latest.edn")
+(def prev (bench/load-results latest))
+(when prev (spit ".bench/prev.edn" (slurp latest)))
+(def results (bench/run-all benches {} prev))
+(bench/save-results latest results)
+(println (str "\nSaved to " latest (if prev " (previous run in .bench/prev.edn)" "")))

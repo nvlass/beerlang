@@ -2,103 +2,272 @@
   (:require [beer.tcp    :as tcp]
             [beer.string :as str]))
 
+;; HTTP/1.1 server (RFC 9110 semantics, RFC 9112 message syntax).
+;; Connections persist by default (HTTP/1.1, or HTTP/1.0 with
+;; "Connection: keep-alive") and are closed after an idle timeout, after
+;; :max-requests requests, on "Connection: close", or after any error.
+;; Request bodies need Content-Length; Transfer-Encoding gets a 501.
+
 ;; ============================================================
 ;; Status text table
 ;; ============================================================
 
 (def status-text
-  {200 "OK" 201 "Created" 204 "No Content"
-   301 "Moved Permanently" 302 "Found" 304 "Not Modified"
-   400 "Bad Request" 401 "Unauthorized" 403 "Forbidden"
-   404 "Not Found" 405 "Method Not Allowed"
-   500 "Internal Server Error" 502 "Bad Gateway" 503 "Service Unavailable"})
+  {100 "Continue"
+   200 "OK" 201 "Created" 202 "Accepted" 204 "No Content"
+   301 "Moved Permanently" 302 "Found" 303 "See Other" 304 "Not Modified"
+   307 "Temporary Redirect" 308 "Permanent Redirect"
+   400 "Bad Request" 401 "Unauthorized" 403 "Forbidden" 404 "Not Found"
+   405 "Method Not Allowed" 408 "Request Timeout" 411 "Length Required"
+   413 "Content Too Large" 417 "Expectation Failed"
+   431 "Request Header Fields Too Large"
+   500 "Internal Server Error" 501 "Not Implemented" 502 "Bad Gateway"
+   503 "Service Unavailable" 505 "HTTP Version Not Supported"})
+
+(def default-opts
+  {:port 8080
+   :keep-alive true
+   :keep-alive-timeout 5000     ; ms; also bounds each read inside a request
+   :max-requests 1000           ; per connection
+   :max-headers 100
+   :max-body 10485760})         ; bytes
+
+;; ============================================================
+;; Errors: (fail status msg) aborts the request with that status;
+;; (closed) means the client went away mid-request
+;; ============================================================
+
+(defn fail [status msg]
+  (throw (ex-info msg {:status status})))
+
+(defn closed []
+  (throw (ex-info "connection closed" {:closed true})))
+
+(defn timeout? [e]
+  (and (string? (:message e)) (str/includes? (:message e) "timed out")))
 
 ;; ============================================================
 ;; Request parsing
 ;; ============================================================
 
+(defn chomp [line]
+  (if (str/ends-with? line "\r") (subs line 0 (- (count line) 1)) line))
+
 (defn parse-method [s]
   (keyword (str/lower-case s)))
 
 (defn parse-request-line [line]
-  (let [parts (str/split (str/trim line) " ")]
-    {:method (parse-method (first parts))
-     :uri (nth parts 1)
-     :protocol (nth parts 2)}))
+  (let [parts (str/split line " ")]
+    (when (not (= (count parts) 3)) (fail 400 "malformed request line"))
+    (let [proto (nth parts 2)]
+      (cond
+        (str/starts-with? proto "HTTP/1.") nil
+        (str/starts-with? proto "HTTP/") (fail 505 "unsupported HTTP version")
+        :else (fail 400 "malformed request line"))
+      {:method (parse-method (first parts))
+       :uri (nth parts 1)
+       :protocol proto})))
 
-(defn parse-headers [conn]
-  (loop [headers {}]
+;; Header names are case-insensitive (lower-cased here); repeated fields
+;; are combined with ", " as RFC 9110 §5.3 allows for list-valued fields.
+(defn parse-headers [conn max-headers]
+  (loop [headers {} n 0]
     (let [line (read-line conn)]
-      (if (or (nil? line) (= (str/trim line) ""))
-        headers
-        (let [trimmed (str/trim line)
-              parts (str/split trimmed ":")]
-          (if (< (count parts) 2)
-            (recur headers)
-            (let [key (str/lower-case (str/trim (first parts)))
-                  val (str/trim (subs trimmed (+ (count (first parts)) 1) (count trimmed)))]
-              (recur (assoc headers key val)))))))))
+      (when (nil? line) (closed))
+      (let [line (chomp line)]
+        (if (= line "")
+          headers
+          (do
+            (when (>= n max-headers) (fail 431 "too many header fields"))
+            (when (or (str/starts-with? line " ") (str/starts-with? line "\t"))
+              (fail 400 "obsolete line folding"))
+            (let [name (first (str/split line ":"))]
+              (when (or (= name line) (= name "") (not (= name (str/trim name))))
+                (fail 400 "malformed header field"))
+              (let [k (str/lower-case name)
+                    v (str/trim (subs line (+ (count name) 1)))]
+                (recur (assoc headers k (if (contains? headers k)
+                                          (str (get headers k) ", " v)
+                                          v))
+                       (+ n 1))))))))))
 
-(defn read-body [conn headers]
-  (let [cl (get headers "content-length")]
-    (if cl
-      (read-bytes conn (read-string cl))
-      nil)))
+(def digit-chars #{\0 \1 \2 \3 \4 \5 \6 \7 \8 \9})
 
-(defn parse-request [conn]
-  (let [line (read-line conn)]
-    (when line
-      (let [trimmed (str/trim line)]
-        (when (not (= trimmed ""))
-          (let [req (parse-request-line trimmed)
-                headers (parse-headers conn)
-                body (read-body conn headers)]
-            (merge req {:headers headers :body body})))))))
+;; Content-Length: digits only; repeated values must agree
+(defn content-length [headers]
+  (let [v (get headers "content-length")]
+    (when v
+      (let [vals (map str/trim (str/split v ","))
+            n (first vals)]
+        (when (or (= n "")
+                  (not (every? (fn [c] (contains? digit-chars c)) n))
+                  (not (every? (fn [x] (= x n)) vals)))
+          (fail 400 "invalid content-length"))
+        (read-string n)))))
+
+(defn read-exactly [conn n]
+  (let [b (str/builder)]
+    (loop [got 0]
+      (if (>= got n)
+        (str b)
+        (let [chunk (read-bytes conn (- n got))]
+          (cond
+            (nil? chunk) (fail 400 "request body is not valid UTF-8")
+            (= chunk "") (closed)
+            :else (do (str/append! b chunk)
+                      (recur (+ got (str/byte-count chunk))))))))))
+
+(defn read-body [conn req opts]
+  (let [headers (:headers req)]
+    (when (get headers "transfer-encoding")
+      (fail 501 "transfer-encoding is not supported"))
+    (let [n (content-length headers)
+          expect (get headers "expect")]
+      (when (and n (> n (:max-body opts))) (fail 413 "request body too large"))
+      (when expect
+        (when (not (= (str/lower-case expect) "100-continue"))
+          (fail 417 "unsupported expectation"))
+        (when (and n (> n 0) (= (:protocol req) "HTTP/1.1"))
+          (write conn "HTTP/1.1 100 Continue\r\n\r\n")
+          (flush conn)))
+      (if (and n (> n 0)) (read-exactly conn n) nil))))
+
+;; A request line, or nil once the client is done: EOF or idle timeout.
+;; Empty lines before it are ignored (RFC 9112 §2.2).
+(defn read-request-line [conn]
+  (try
+    (loop [blank 0]
+      (let [line (read-line conn)]
+        (cond
+          (nil? line) nil
+          (and (= (chomp line) "") (< blank 8)) (recur (+ blank 1))
+          :else (chomp line))))
+    (catch e (if (timeout? e) nil (throw e)))))
+
+(defn read-request [conn line opts]
+  (try
+    (let [req (parse-request-line line)
+          headers (parse-headers conn (:max-headers opts))
+          req (assoc req :headers headers)]
+      (when (and (= (:protocol req) "HTTP/1.1") (nil? (get headers "host")))
+        (fail 400 "missing host header"))
+      (when (str/includes? (or (get headers "host") "") ",")
+        (fail 400 "multiple host headers"))
+      (assoc req :body (read-body conn req opts)))
+    (catch e
+      (cond
+        (timeout? e) (fail 408 "request timed out")
+        (:data e) (throw e)
+        :else (fail 400 "bad request")))))
+
+(defn parse-request
+  "Read one request from conn; nil if the client closed the connection."
+  [conn]
+  (let [line (read-request-line conn)]
+    (when line (read-request conn line default-opts))))
+
+;; ============================================================
+;; Persistence (RFC 9112 §9.3)
+;; ============================================================
+
+(defn connection-tokens [v]
+  (set (map (fn [t] (str/lower-case (str/trim t))) (str/split (or v "") ","))))
+
+(defn client-persistent? [req]
+  (let [tokens (connection-tokens (get (:headers req) "connection"))]
+    (if (= (:protocol req) "HTTP/1.1")
+      (not (contains? tokens "close"))
+      (contains? tokens "keep-alive"))))
 
 ;; ============================================================
 ;; Response formatting
 ;; ============================================================
 
-(defn format-response [resp]
-  (let [status (or (:status resp) 200)
-        text (or (get status-text status) "Unknown")
-        body (or (:body resp) "")
-        hdrs (or (:headers resp) {})
-        hdrs (assoc hdrs "content-length" (str (count body)))
-        hdr-str (str/join "\r\n"
-                  (map (fn [k] (str k ": " (get hdrs k)))
-                       (keys hdrs)))]
-    (str "HTTP/1.1 " status " " text "\r\n"
-         hdr-str "\r\n\r\n"
-         body)))
+(defn lower-case-keys [m]
+  (reduce-kv (fn [acc k v] (assoc acc (str/lower-case (name k)) v)) {} (or m {})))
+
+;; 1xx, 204 and 304 responses never carry a body (RFC 9110 §6.4.1)
+(defn body-allowed? [status]
+  (not (or (< status 200) (= status 204) (= status 304))))
+
+(defn format-response
+  ([resp] (format-response nil resp true))
+  ([req resp persist?]
+   (let [status (or (:status resp) 200)
+         text (or (get status-text status) "Unknown")
+         body (if (body-allowed? status) (str (or (:body resp) "")) "")
+         hdrs (lower-case-keys (:headers resp))
+         hdrs (if (or (< status 200) (= status 204))
+                (dissoc hdrs "content-length")
+                (if (= status 304) hdrs (assoc hdrs "content-length" (str (str/byte-count body)))))
+         hdrs (cond
+                (not persist?) (assoc hdrs "connection" "close")
+                (= (:protocol req) "HTTP/1.0") (assoc hdrs "connection" "keep-alive")
+                :else (dissoc hdrs "connection"))
+         b (str/builder "HTTP/1.1 " status " " text "\r\n")]
+     (doseq [k (keys hdrs)]
+       (let [v (str (get hdrs k))]
+         (when (or (str/includes? v "\r") (str/includes? v "\n")
+                   (str/includes? k "\r") (str/includes? k "\n") (str/includes? k ":"))
+           (fail 500 "invalid response header"))
+         (str/append! b k ": " v "\r\n")))
+     (str/append! b "\r\n")
+     ;; HEAD: same headers as GET, no body
+     (when (not (= (:method req) :head)) (str/append! b body))
+     (str b))))
+
+(defn send-error [conn status]
+  (let [text (or (get status-text status) "Error")]
+    (try
+      (write conn (str "HTTP/1.1 " status " " text "\r\n"
+                       "content-length: " (str/byte-count text) "\r\n"
+                       "connection: close\r\n\r\n"
+                       text))
+      (flush conn)
+      (catch e nil))))
 
 ;; ============================================================
 ;; Connection handler
 ;; ============================================================
 
-(defn handle-connection [handler conn]
-  (try
-    (let [request (parse-request conn)]
-      (if request
-        (let [response (handler request)]
-          (write conn (format-response response))
-          (flush conn))
-        nil))
-    (catch e
-      (let [err-body "Internal Server Error"
-            err-resp (str "HTTP/1.1 500 Internal Server Error\r\n"
-                         "content-length: " (count err-body) "\r\n\r\n"
-                         err-body)]
-        (try
-          (write conn err-resp)
-          (flush conn)
-          (catch e2 nil))))
-    (finally
-      (close conn))))
-
-;; ============================================================
-;; Public API
-;; ============================================================
+;; Serve requests on conn until the connection should close. Read and
+;; handler failures answer with an error status and close; write
+;; failures (client gone) just close.
+(defn handle-connection
+  ([handler conn] (handle-connection handler conn {}))
+  ([handler conn opts]
+   (let [opts (merge default-opts opts)]
+     (set-read-timeout! conn (:keep-alive-timeout opts))
+     (try
+       (loop [served 0]
+         (let [line (read-request-line conn)]
+           (when line
+             (let [r (try {:req (read-request conn line opts)}
+                          (catch e {:error e}))
+                   err (:error r)]
+               (if err
+                 (when (get-in err [:data :status]) (send-error conn (get-in err [:data :status])))
+                 (let [req (:req r)
+                       out (try {:resp (handler req)} (catch e {:error e}))]
+                   (if (:error out)
+                     (send-error conn 500)
+                     (let [resp (:resp out)
+                           persist? (and (:keep-alive opts)
+                                         (client-persistent? req)
+                                         (< (+ served 1) (:max-requests opts))
+                                         (not (contains? (connection-tokens
+                                                          (get (lower-case-keys (:headers resp)) "connection"))
+                                                         "close")))
+                           text (try {:ok (format-response req resp persist?)} (catch e {:error e}))]
+                       (if (:error text)
+                         (send-error conn 500)
+                         (do
+                           (write conn (:ok text))
+                           (flush conn)
+                           (when persist? (recur (+ served 1)))))))))))))
+       (catch e nil)
+       (finally
+         (close conn))))))
 
 ;; ============================================================
 ;; Middleware
@@ -107,15 +276,22 @@
 (defn wrap-content-type [handler ct]
   (fn [req]
     (let [resp (handler req)]
-      (if (get (:headers resp) "content-type")
+      (if (get (lower-case-keys (:headers resp)) "content-type")
         resp
         (assoc resp :headers (assoc (or (:headers resp) {}) "content-type" ct))))))
 
-(defn run-server [handler opts]
-  (let [port (or (get opts :port) 8080)
-        server (tcp/listen port)]
-    (println (str "Listening on port " port))
+;; ============================================================
+;; Public API
+;; ============================================================
+
+(defn run-server
+  "Accept connections on (:port opts) and serve each in its own task.
+  Options: :port :keep-alive :keep-alive-timeout :max-requests :max-headers :max-body"
+  [handler opts]
+  (let [opts (merge default-opts opts)
+        server (tcp/listen (:port opts))]
+    (println (str "Listening on port " (:port opts)))
     (loop []
       (let [conn (tcp/accept server)]
-        (spawn (fn [] (handle-connection handler conn)))
+        (spawn (fn [] (handle-connection handler conn opts)))
         (recur)))))

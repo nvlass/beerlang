@@ -1,6 +1,6 @@
 # Beerlang Implementation Progress
 
-**Last Updated:** 2026-10-12
+**Last Updated:** 2026-10-16
 
 ## Current Status
 
@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 61 unit tests
-- 551 REPL smoke tests
+- 589 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -61,6 +61,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - **HashMap**: HAMT (Hash Array Mapped Trie) with structural sharing
 - **Set**: Persistent set wrapping the HAMT (element → itself); callable, order-independent equality and hashing
 - **Atom**: Mutable reference type with `swap!`, `reset!`, `compare-and-set!`
+- **StringBuilder**: Growable mutable UTF-8 buffer (`str/builder`, `str/append!`, `(str b)`); appends format like `str`, amortized O(1)
 - **ByteBuffer**: Mutable, non-UTF8-validated binary buffer with NIO-style position/limit cursor; endian-explicit u8-u64/i8-i64 accessors, bulk fill!/copy!/blit, DMA-friendly raw address access (`beer.bytes` namespace). Driven by beeros driver work — see `docs/beerlang-bytebuffer.md` in the beeros repo
 
 ### Reader
@@ -85,6 +86,12 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - Automatic bigint promotion on overflow
 - Callable non-functions: keywords, maps, vectors in head position (IFn-like)
 - Immortal function templates (`REFCOUNT_IMMORTAL`) for shared constants
+- LOAD_VAR cache: (home ns, symbol) → `Var*`, invalidated by `namespace_generation`
+  (bumped on var/refer/alias create or remove). With cached `beer.core` and
+  per-function home ns, an empty `loop` iteration went 946 → 245 ns
+- Trace/debug logging gated on a global level (no `ulog_log` call per opcode)
+- `make bench`: micro-benchmark set (`tests/integration/benchmarks/run.beer`, `beer.bench` runner) with a "vs previous run" column; `nano-time`, `current-time-millis`, `time`
+- Strings: O(1) char indexing when the string is pure ASCII
 
 ### REPL & Runtime
 - Read-Eval-Print loop with compilation
@@ -125,8 +132,10 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 ### Networking
 - TCP sockets: `tcp/listen`, `tcp/accept`, `tcp/connect`, `tcp/local-port`
 - `beer.tcp` wrapper library with high-level API
-- `beer.http` — Ring-inspired HTTP server library with middleware
-- `beer.json` — pure beerlang JSON parser/emitter
+- `beer.http` — Ring-inspired HTTP/1.1 server with middleware: persistent connections (RFC 9112 §9.3), pipelining, idle/read timeouts, HEAD/204/304 framing, `Expect: 100-continue`, 400/408/413/417/431/501/505 handling
+- Socket reads never return a partial line or a split UTF-8 character (unread pushback); `set-read-timeout!` for timed `read-line`/`read-bytes`
+- `beer.json` — native JSON parser/emitter (`src/runtime/json.c`): ~2 µs per small object
+- `beer.json.pure` — pure-beerlang reference/oracle with the same semantics; smoke tests compare it against the natives
 
 ### Project Tooling
 - `beer` CLI with subcommands: `new`, `run`, `build`, `ubertar`, `repl`
@@ -207,7 +216,7 @@ beerlang/
 │   ├── vm/            # vm.c, value.c, fixnum.c, disasm.c
 │   ├── memory/        # alloc.c — refcounting + leak tracking
 │   ├── reader/        # reader.c, buffer.c
-│   ├── runtime/       # core.c (native fns), namespace.c, tcp.c, shell.c
+│   ├── runtime/       # core.c (native fns), namespace.c, tcp.c, shell.c, json.c
 │   ├── types/         # bigint, string, symbol, cons, vector, hashmap, function, native, atom
 │   ├── task/          # task.c
 │   ├── scheduler/     # scheduler.c
@@ -218,7 +227,7 @@ beerlang/
 ├── lib/
 │   ├── core.beer      # Core macros (defn, when, and, or, cond, ->, let, etc.)
 │   └── beer/          # Standard libraries
-│       ├── json.beer   # JSON parser/emitter
+│       ├── json.beer   # beer.json ns stub (natives in src/runtime/json.c)
 │       ├── http.beer   # Ring-inspired HTTP server
 │       ├── tcp.beer    # TCP socket wrapper
 │       ├── shell.beer  # Shell execution wrapper

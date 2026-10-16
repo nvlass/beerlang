@@ -44,10 +44,11 @@ user:5> (->> (range 1 11) (filter odd?) (reduce +))
 ;; Simple function
 (defn square [x] (* x x))
 
-;; Multi-arity
+;; Multi-arity (a variadic arity matches any extra args)
 (defn greet
   ([name] (greet name "Hello"))
-  ([name greeting] (str greeting ", " name "!")))
+  ([name greeting] (str greeting ", " name "!"))
+  ([name greeting & more] (str greeting ", " name " and " (count more) " more!")))
 
 ;; Destructuring
 (let [[a b & rest] [1 2 3 4 5]]

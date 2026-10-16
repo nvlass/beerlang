@@ -78,6 +78,10 @@ Yield control to the scheduler.
 ```clojure
 (yield)
 ```
+Tasks are also preempted automatically at safe points — every jump (loops,
+`recur`) and every function entry — once they have used their quantum
+(1000 safe points), so a long-running loop can't starve other tasks.
+Straight-line code between safe points is never interrupted.
 
 ### `await`
 Wait for a task to complete and return its result.
@@ -205,6 +209,14 @@ All arithmetic supports fixnum, bigint, and float with automatic promotion.
 | `str/starts-with?` | Prefix check | `(str/starts-with? "hello" "he")` → `true` |
 | `str/ends-with?` | Suffix check | `(str/ends-with? "hello" "lo")` → `true` |
 | `str/replace` | Replace all occurrences | `(str/replace "aabb" "a" "x")` → `"xxbb"` |
+| `str/byte-count` | UTF-8 byte length (`count` is characters) | `(str/byte-count "héllo")` → `6` |
+| `str/builder` | New mutable string builder, optionally seeded | `(str/builder "[")` |
+| `str/append!` | Append values (formatted like `str`), returns the builder | `(str/append! b 1 ", " :k)` |
+
+Build strings in a loop with a builder rather than `(str acc x)`, which
+copies the whole accumulator each time. `(str b)` returns the contents;
+`append!` accepts anything `str` does, including other builders and the
+builder itself.
 
 Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, and `map`.
 
@@ -236,7 +248,10 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 | `gensym` | Generate unique symbol | `(gensym "tmp")` → `tmp42` |
 | `type` | Type as keyword | `(type 42)` → `:fixnum` |
 | `float` | Coerce to float | `(float 3)` → `3.0` |
-| `int` | Coerce to fixnum (truncate) | `(int 3.7)` → `3` |
+| `int` | Coerce to fixnum (truncate); char → code point | `(int 3.7)` → `3`, `(int \a)` → `97` |
+| `nano-time` | Monotonic nanoseconds, for measuring intervals (arbitrary origin) | `(- (nano-time) t0)` |
+| `current-time-millis` | Wall-clock ms since the Unix epoch | `(current-time-millis)` |
+| `time` | Macro: evaluate, print elapsed ms, return the value | `(time (fib 20))` |
 | `apply` | Apply function to arg list | `(apply + [1 2 3])` → `6` |
 | `macroexpand-1` | Expand macro once | `(macroexpand-1 '(when true 1))` |
 | `macroexpand` | Fully expand macros | `(macroexpand '(when true 1))` |
@@ -484,6 +499,38 @@ Require with `(require 'beer.json :as 'json)`.
 | `json/parse` | Parse JSON string to beerlang data | `(json/parse "{\"a\":1}")` → `{"a" 1}` |
 | `json/emit` | Serialize beerlang data to JSON string | `(json/emit {:a 1})` → `"{\"a\":1}"` |
 
+Implemented natively (`src/runtime/json.c`). `parse` gives maps with string
+keys, vectors, fixnums (bigints past 61 bits), floats for anything with a
+`.` or exponent, and handles `\uXXXX` escapes including surrogate pairs.
+It is strict: trailing characters, leading zeros and control characters in
+strings are errors. `emit` accepts maps, vectors, lists and sets (as
+arrays), strings, keywords and symbols (as strings, namespace kept:
+`:a/b` → `"a/b"`), chars, numbers, booleans and nil. Floats are written in
+shortest round-trip form and stay floats (`10.0` → `10.0`); NaN/Infinity
+and other types (atoms, functions, ...) are errors. All errors are
+catchable with `try`/`catch`.
+
+`beer.json.pure` (`lib/beer/json/pure.beer`) is a pure-beerlang
+implementation with the same API and semantics, kept as the reference /
+test oracle and as a fallback where the natives aren't available. It is
+roughly 10–40× slower. Known differences: floats go through `str` (`%g`,
+6 significant digits), error offsets are character indices (the natives
+report bytes; equal on ASCII), and there is no nesting limit.
+
+### Benchmarks (beer.bench)
+
+`(bench/run-all benches opts prev)` runs micro-benchmarks and prints min and
+median ns/op. A benchmark is `{:name "..." :f (fn [n] ...)}` where `:f` runs
+the operation `n` times in its own loop; each is calibrated to about
+`:target-ms` (100) per round and timed for `:rounds` (5) rounds after a
+warm-up. `save-results` / `load-results` keep results as EDN; pass the
+loaded map as `prev` to get a "vs prev" column (change in min ns/op).
+`make bench` runs `tests/integration/benchmarks/run.beer` and compares with
+the previous run (results in `.bench/`, kept across `make clean`).
+`make bench REF=<sha>` builds that commit in `.bench/src` and runs the
+current benchmark set against it, so two runs in a row compare two commits;
+`EXTRA_CFLAGS=...` applies to that build too.
+
 ### HTTP Server (beer.http)
 
 Require with `(require 'beer.http :as 'http)`.
@@ -491,9 +538,39 @@ Require with `(require 'beer.http :as 'http)`.
 | Function | Description | Example |
 |----------|-------------|---------|
 | `http/run-server` | Start HTTP server with handler | `(http/run-server handler {:port 8080})` |
+| `http/handle-connection` | Serve one accepted connection | `(http/handle-connection handler conn opts)` |
 | `http/wrap-content-type` | Middleware: set Content-Type header | `(http/wrap-content-type handler "text/html")` |
 
-The handler receives a request map `{:method :path :headers :body}` and returns a response map `{:status :headers :body}`.
+The handler receives a request map `{:method :uri :protocol :headers :body}`
+(`:method` is a lower-case keyword such as `:get`; header names are
+lower-cased strings) and returns a response map `{:status :headers :body}`.
+
+Connections are persistent (RFC 9112 §9.3): HTTP/1.1 unless the client
+sends `Connection: close`, HTTP/1.0 only with `Connection: keep-alive`.
+A connection is closed after `:keep-alive-timeout` ms idle, after
+`:max-requests` requests, when the handler's response has
+`Connection: close`, and after any error response.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `:port` | 8080 | Listen port (`run-server`) |
+| `:keep-alive` | `true` | Allow persistent connections |
+| `:keep-alive-timeout` | 5000 | Idle timeout in ms; also bounds each read within a request (408 on expiry) |
+| `:max-requests` | 1000 | Requests per connection |
+| `:max-headers` | 100 | Header fields per request (431 above it) |
+| `:max-body` | 10 MiB | Request body limit in bytes (413 above it) |
+
+Protocol handling: pipelined requests are answered in order; HEAD gets
+GET's headers without a body; 1xx/204 responses carry no body or
+Content-Length, 304 no body; `Expect: 100-continue` gets an interim
+`100 Continue` before the body is read. Bodies need `Content-Length`
+(`Transfer-Encoding` → 501); a missing `Host` on HTTP/1.1, bad or
+conflicting `Content-Length`, whitespace before a header colon, or obs-fold
+→ 400; non-HTTP/1.x → 505. Request bodies must be UTF-8 (strings are UTF-8).
+
+Streams: `(set-read-timeout! stream ms)` makes `read-line` / `read-bytes`
+on a socket throw `"... timed out after N ms"` (catchable) if no data
+arrives in time; `0`/`nil` disables it.
 
 ### Actor System (beer.hive)
 
@@ -518,9 +595,11 @@ Actor handlers receive `(state msg)` and return `{:state new-state}` (or `{:stat
 
 | Macro | Description | Example |
 |-------|-------------|---------|
-| `defn` | Define named function (optional docstring, multi-arity) | `(defn add "Add two nums" [a b] (+ a b))` |
+| `defn` | Define named function (optional docstring, multi-arity incl. one variadic arity `([a & more] ...)`) | `(defn add "Add two nums" [a b] (+ a b))` |
 | `doc` | Print documentation for a symbol | `(doc add)` |
 | `when` | Conditional without else branch | `(when (> x 0) (println "pos"))` |
+| `if-let` | Bind and branch on truthiness | `(if-let [x (get m :a)] (inc x) 0)` |
+| `when-let` | Bind and run body when truthy | `(when-let [[a b] (find-pair)] (+ a b))` |
 | `and` | Short-circuit logical AND | `(and true 42)` → `42` |
 | `or` | Short-circuit logical OR | `(or nil false 42)` → `42` |
 | `cond` | Multi-branch conditional | `(cond (< x 0) "neg" (> x 0) "pos" :else "zero")` |

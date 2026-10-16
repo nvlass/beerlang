@@ -94,21 +94,6 @@ struct Object* object_alloc(uint8_t type, size_t size) {
     return obj;
 }
 
-/* Increment reference count */
-void object_retain(Value v) {
-    if (!is_pointer(v)) {
-        return;  /* Immediate values don't need refcounting */
-    }
-
-    struct Object* obj = (struct Object*)untag_pointer(v);
-    assert(obj != NULL);
-    assert(obj->refcount > 0);  /* Object should be alive */
-
-    if (obj->refcount == REFCOUNT_IMMORTAL) return;
-
-    obj->refcount++;
-}
-
 /* Mark an object as immortal */
 void object_make_immortal(Value v) {
     if (!is_pointer(v)) return;
@@ -117,53 +102,43 @@ void object_make_immortal(Value v) {
     obj->refcount = REFCOUNT_IMMORTAL;
 }
 
-/* Decrement reference count and free if zero */
-void object_release(Value v) {
-    if (!is_pointer(v)) {
-        return;  /* Immediate values don't need refcounting */
+/* Exported for the embedding API (beer.h), which doesn't see memory.h */
+void beer_value_retain(Value v)  { object_retain(v); }
+void beer_value_release(Value v) { object_release(v); }
+
+/* Run the destructor and free; object_release calls this at refcount 0 */
+void object_destroy(struct Object* obj) {
+    /* Call type-specific destructor if registered */
+    uint8_t type = obj->type & 0xFF;
+    if (g_destructors[type]) {
+        g_destructors[type](obj);
     }
-
-    struct Object* obj = (struct Object*)untag_pointer(v);
-    assert(obj != NULL);
-    assert(obj->refcount > 0);  /* Object should be alive */
-
-    if (obj->refcount == REFCOUNT_IMMORTAL) return;
-
-    obj->refcount--;
-
-    if (obj->refcount == 0) {
-        /* Call type-specific destructor if registered */
-        uint8_t type = obj->type & 0xFF;
-        if (g_destructors[type]) {
-            g_destructors[type](obj);
-        }
 
 #ifdef BEER_TRACK_ALLOCS
-        /* Remove from live object list */
-        if (g_all_objects == obj) {
-            g_all_objects = obj->next_alloc;
-        } else {
-            struct Object* prev = g_all_objects;
-            while (prev && prev->next_alloc != obj) {
-                prev = prev->next_alloc;
-            }
-            if (prev) {
-                prev->next_alloc = obj->next_alloc;
-            }
+    /* Remove from live object list */
+    if (g_all_objects == obj) {
+        g_all_objects = obj->next_alloc;
+    } else {
+        struct Object* prev = g_all_objects;
+        while (prev && prev->next_alloc != obj) {
+            prev = prev->next_alloc;
         }
+        if (prev) {
+            prev->next_alloc = obj->next_alloc;
+        }
+    }
 #endif
 
-        /* Update statistics (use aligned size to match allocation) */
-        size_t size = obj->size;
-        size_t aligned_size = (size + 7) & ~7;
-        g_stats.total_freed += aligned_size;
-        g_stats.current_allocated -= aligned_size;
-        g_stats.free_count++;
-        g_stats.objects_alive--;
+    /* Update statistics (use aligned size to match allocation) */
+    size_t size = obj->size;
+    size_t aligned_size = (size + 7) & ~7;
+    g_stats.total_freed += aligned_size;
+    g_stats.current_allocated -= aligned_size;
+    g_stats.free_count++;
+    g_stats.objects_alive--;
 
-        /* Free the object */
-        free(obj);
-    }
+    /* Free the object */
+    free(obj);
 }
 
 /* Get current reference count */

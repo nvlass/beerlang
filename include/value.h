@@ -168,6 +168,7 @@ typedef enum {
     TYPE_BIGINT = 0x01,
     TYPE_STRING = 0x12,
     TYPE_BYTEBUFFER = 0x13,
+    TYPE_STRBUILDER = 0x14,
     TYPE_SYMBOL = 0x10,
     TYPE_KEYWORD = 0x11,
     TYPE_CONS = 0x20,

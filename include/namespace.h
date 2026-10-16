@@ -30,7 +30,9 @@ struct Var {
 /* Var API */
 Var* var_new(Value name);
 void var_free(Var* var);
-Value var_get_value(Var* var);
+static inline Value var_get_value(Var* var) {
+    return var ? var->value : VALUE_NIL;
+}
 void var_set_value(Var* var, Value value);
 
 /* =================================================================
@@ -44,6 +46,8 @@ struct Namespace {
     Value aliases;           /* HashMap: Symbol -> String (alias -> ns name) */
     Value refers;            /* HashMap: Symbol -> Var owned by another ns */
 };
+
+extern uint32_t namespace_generation;
 
 /* Namespace API */
 Namespace* namespace_new(const char* name);
@@ -76,6 +80,7 @@ const char* namespace_resolve_alias(Namespace* ns, Value alias_sym);
 struct NamespaceRegistry {
     Value namespaces;  /* HashMap: String -> Namespace* (as pointer value) */
     Namespace* current;  /* Current namespace (for REPL) */
+    Namespace* core;     /* beer.core, cached: namespaces are never removed */
 };
 
 /* Registry API */
@@ -92,7 +97,9 @@ Namespace* namespace_registry_get(NamespaceRegistry* reg, const char* name);
 void namespace_registry_set_current(NamespaceRegistry* reg, Namespace* ns);
 
 /* Get current namespace */
-Namespace* namespace_registry_current(NamespaceRegistry* reg);
+static inline Namespace* namespace_registry_current(NamespaceRegistry* reg) {
+    return reg ? reg->current : NULL;
+}
 
 /* Get beer.core namespace */
 Namespace* namespace_registry_get_core(NamespaceRegistry* reg);

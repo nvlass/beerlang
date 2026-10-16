@@ -1,0 +1,108 @@
+(ns beer.bench
+  "Micro-benchmark runner.
+
+  A benchmark is a map {:name \"...\" :f (fn [n] ...)} whose :f runs the
+  measured operation n times in its own loop, so the cost of calling :f
+  doesn't swamp the operation. Each benchmark is calibrated until one round
+  takes about :target-ms, run once to warm up, then timed for :rounds
+  rounds; ns/op is reported as the min and median over the rounds.
+
+    (bench/run-all [{:name \"inc\" :f (fn [n] (loop [i 0] (when (< i n) (recur (inc i)))))}])
+
+  Results are a vector of {:name :n :min :median :max} (ns/op). save-results
+  and load-results keep them in an EDN file, and run-all prints the change
+  in min ns/op (less noisy than the median) against a previous run."
+  (:require [beer.string :as str]))
+
+(def default-opts {:target-ms 100 :rounds 5})
+
+(defn time-ns [f n]
+  (let [t0 (nano-time)]
+    (f n)
+    (- (nano-time) t0)))
+
+;; Grow n until one round takes at least target-ns
+(defn calibrate [f target-ns]
+  (loop [n 1]
+    (let [t (time-ns f n)]
+      (cond
+        (>= t target-ns) n
+        (>= n 1000000000) n
+        (< (* t 100) target-ns) (recur (* n 10))
+        :else (recur (max (+ n 1) (int (* n (/ (float target-ns) (max t 1))))))))))
+
+(defn run-one [b opts]
+  (let [f (:f b)
+        n (calibrate f (* (:target-ms opts) 1000000))
+        _ (time-ns f n)
+        per-op (sort (map (fn [_] (/ (float (time-ns f n)) n)) (range (:rounds opts))))]
+    {:name (:name b)
+     :n n
+     :min (first per-op)
+     :median (nth per-op (int (* 0.5 (- (count per-op) 1))))
+     :max (last per-op)}))
+
+;; ============================================================
+;; Reporting
+;; ============================================================
+
+(defn round1 [x]
+  (/ (float (int (+ (* x 10.0) 0.5))) 10.0))
+
+(defn fmt-ns [x]
+  (cond
+    (>= x 1000000.0) (str (round1 (/ x 1000000.0)) " ms")
+    (>= x 1000.0) (str (round1 (/ x 1000.0)) " us")
+    :else (str (round1 x) " ns")))
+
+(defn pad-right [s width]
+  (let [b (str/builder s)]
+    (loop [k (count s)]
+      (when (< k width) (str/append! b " ") (recur (+ k 1))))
+    (str b)))
+
+(defn pad-left [s width]
+  (let [b (str/builder)]
+    (loop [k (count s)]
+      (when (< k width) (str/append! b " ") (recur (+ k 1))))
+    (str/append! b s)
+    (str b)))
+
+(defn fmt-delta [new old]
+  (if (and old (> old 0))
+    (let [pct (round1 (* 100.0 (/ (- new old) old)))]
+      (str (if (> pct 0) "+" "") pct "%"))
+    ""))
+
+(defn print-row [cols]
+  (println (str (pad-right (nth cols 0) 28)
+                (pad-left (nth cols 1) 12)
+                (pad-left (nth cols 2) 12)
+                (pad-left (nth cols 3) 10))))
+
+(defn run-all
+  "Run benchmarks, printing a row per benchmark as it finishes. prev is a
+  map of name → result from an earlier run (or nil)."
+  ([benches] (run-all benches {} nil))
+  ([benches opts] (run-all benches opts nil))
+  ([benches opts prev]
+   (let [opts (merge default-opts opts)]
+     (print-row ["benchmark" "min/op" "median/op" "vs prev"])
+     (loop [bs benches acc []]
+       (if (empty? bs)
+         acc
+         (let [r (run-one (first bs) opts)
+               old (get prev (:name r))]
+           (print-row [(:name r) (fmt-ns (:min r)) (fmt-ns (:median r))
+                       (fmt-delta (:min r) (:min old))])
+           (recur (rest bs) (conj acc r))))))))
+
+(defn save-results [path results]
+  (spit path (pr-str results)))
+
+(defn load-results
+  "name → result map from an EDN file written by save-results, or nil."
+  [path]
+  (try
+    (reduce (fn [m r] (assoc m (:name r) r)) {} (read-string (slurp path)))
+    (catch e nil)))

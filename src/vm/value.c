@@ -15,6 +15,7 @@ FILE* g_value_pr_out = NULL;
 #include "function.h"
 #include "native.h"
 #include "atom.h"
+#include "strbuilder.h"
 #ifdef BEER_CFFI
 #include "cpointer.h"
 #endif
@@ -108,6 +109,9 @@ void value_print(Value v) {
             }
             case TYPE_BYTEBUFFER:
                 printf("#<bytebuffer %zu>", bytebuffer_capacity(v));
+                break;
+            case TYPE_STRBUILDER:
+                printf("#<string-builder %zu>", ((StringBuilder*)untag_pointer(v))->len);
                 break;
 #ifdef BEER_CFFI
             case TYPE_CPOINTER:
@@ -239,6 +243,9 @@ void value_print_readable(Value v) {
             }
             case TYPE_BYTEBUFFER:
                 fprintf(PR_OUT, "#<bytebuffer %zu>", bytebuffer_capacity(v));
+                break;
+            case TYPE_STRBUILDER:
+                fprintf(PR_OUT, "#<string-builder %zu>", ((StringBuilder*)untag_pointer(v))->len);
                 break;
 #ifdef BEER_CFFI
             case TYPE_CPOINTER:
@@ -377,6 +384,11 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
                 slen = strlen(s);
                 break;
             }
+            case TYPE_STRBUILDER:
+                slen = (size_t)snprintf(tmp, sizeof(tmp), "#<string-builder %zu>",
+                                        ((StringBuilder*)untag_pointer(v))->len);
+                s = tmp;
+                break;
             default:
                 s = value_type_name(v);
                 slen = strlen(s);
@@ -538,6 +550,7 @@ const char* value_type_name(Value v) {
             case TYPE_TASK: return "task";
             case TYPE_CHANNEL: return "channel";
             case TYPE_ATOM: return "atom";
+            case TYPE_STRBUILDER: return "string-builder";
 #ifdef BEER_CFFI
             case TYPE_CPOINTER: return "cpointer";
 #endif

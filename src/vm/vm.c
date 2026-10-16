@@ -89,6 +89,7 @@ VM* vm_new(int stack_size) {
     vm->write_resumed = false;
     vm->pending_fd = -1;
     vm->pending_deadline = 0;
+    vm->read_deadline = 0;
     vm->native_throw = false;
     vm->thrown_exception = VALUE_NIL;
     vm->scheduler = NULL;
@@ -208,50 +209,63 @@ static inline uint8_t read_byte(VM* vm) {
 }
 
 /* Read int64 from bytecode (8 bytes, little endian) */
-static int64_t read_int64(VM* vm) {
+static inline int64_t read_int64(VM* vm) {
     if (vm->pc + 8 > vm->code_size) {
         vm_error(vm, "Not enough bytes for int64");
         return 0;
     }
-
-    uint64_t value = 0;
-    for (int i = 0; i < 8; i++) {
-        value |= ((uint64_t)vm->code[vm->pc++]) << (i * 8);
-    }
+    const uint8_t* b = vm->code + vm->pc;
+    uint64_t value = (uint64_t)b[0] | (uint64_t)b[1] << 8 | (uint64_t)b[2] << 16 |
+                     (uint64_t)b[3] << 24 | (uint64_t)b[4] << 32 | (uint64_t)b[5] << 40 |
+                     (uint64_t)b[6] << 48 | (uint64_t)b[7] << 56;
+    vm->pc += 8;
     return (int64_t)value;
 }
 
 /* Read uint32 from bytecode (4 bytes, little endian) */
-static uint32_t read_uint32(VM* vm) {
+static inline uint32_t read_uint32(VM* vm) {
     if (vm->pc + 4 > vm->code_size) {
         vm_error(vm, "Not enough bytes for uint32");
         return 0;
     }
-
-    uint32_t value = 0;
-    for (int i = 0; i < 4; i++) {
-        value |= ((uint32_t)vm->code[vm->pc++]) << (i * 8);
-    }
+    const uint8_t* b = vm->code + vm->pc;
+    uint32_t value = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 |
+                     (uint32_t)b[3] << 24;
+    vm->pc += 4;
     return value;
 }
 
 /* Read int32 from bytecode (4 bytes, little endian) */
-static int32_t read_int32(VM* vm) {
+static inline int32_t read_int32(VM* vm) {
     return (int32_t)read_uint32(vm);
 }
 
 /* Read uint16 from bytecode (2 bytes, little endian) */
-static uint16_t read_uint16(VM* vm) {
+/* LOAD_VAR resolution cache: (home ns, interned symbol) -> Var*.
+ * Valid while namespace_generation is unchanged. */
+typedef struct {
+    Namespace* home;
+    void* sym;
+    Var* var;
+    uint32_t gen;
+} VarCacheEntry;
+
+#define VAR_CACHE_SIZE 1024
+static VarCacheEntry var_cache[VAR_CACHE_SIZE];
+
+static inline size_t var_cache_slot(Namespace* home, void* sym) {
+    uintptr_t h = ((uintptr_t)home >> 4) * 31 ^ ((uintptr_t)sym >> 4);
+    return (size_t)((h ^ (h >> 10)) & (VAR_CACHE_SIZE - 1));
+}
+
+static inline uint16_t read_uint16(VM* vm) {
     if (vm->pc + 2 > vm->code_size) {
         vm_error(vm, "Not enough bytes for uint16");
         return 0;
     }
-
-    uint16_t value = 0;
-    for (int i = 0; i < 2; i++) {
-        value |= ((uint16_t)vm->code[vm->pc++]) << (i * 8);
-    }
-    return value;
+    const uint8_t* b = vm->code + vm->pc;
+    vm->pc += 2;
+    return (uint16_t)(b[0] | b[1] << 8);
 }
 
 /* Push a new call frame, saving caller's execution context */
@@ -303,8 +317,8 @@ static CallFrame* current_frame(VM* vm) {
     return &vm->frames[vm->frame_count - 1];
 }
 
-/* Push value onto stack */
-void vm_push(VM* vm, Value v) {
+/* Push value onto stack. Inline here; vm_push is the exported wrapper. */
+static inline void push_value(VM* vm, Value v) {
     if (vm->stack_pointer >= vm->stack_size) {
         vm_error(vm, "Stack overflow");
         return;
@@ -319,7 +333,7 @@ void vm_push(VM* vm, Value v) {
 }
 
 /* Pop value from stack (releases the stack's reference). */
-Value vm_pop(VM* vm) {
+static inline Value pop_value(VM* vm) {
     if (vm->stack_pointer <= 0) {
         vm_error(vm, "Stack underflow");
         return VALUE_NIL;
@@ -334,6 +348,13 @@ Value vm_pop(VM* vm) {
 
     return v;
 }
+
+void vm_push(VM* vm, Value v) { push_value(vm, v); }
+Value vm_pop(VM* vm) { return pop_value(vm); }
+
+/* Inside this file the calls below inline */
+#define vm_push(vm, v) push_value((vm), (v))
+#define vm_pop(vm) pop_value(vm)
 
 /* Peek at top of stack without popping */
 Value vm_peek(VM* vm) {
@@ -424,12 +445,29 @@ static bool vm_invoke_value(VM* vm, Value head, int n_args, Value* args, Value* 
     return false;
 }
 
-/* Execute single instruction */
-void vm_step(VM* vm) {
-    if (!vm->running || vm->error) {
-        return;
-    }
+#if defined(__GNUC__) || defined(__clang__)
+#define VM_ALWAYS_INLINE inline __attribute__((always_inline))
+#define VM_NOINLINE __attribute__((noinline))
+#define VM_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define VM_ALWAYS_INLINE inline
+#define VM_NOINLINE
+#define VM_UNLIKELY(x) (x)
+#endif
 
+/* Auto-yield countdown, taken at safe points only: OP_JUMP (every loop and
+ * recur) and OP_ENTER (every bytecode fn entry, call or tail call). Any
+ * unbounded run of instructions passes one, so a task can't starve others,
+ * and straight-line code doesn't pay for the countdown. */
+#define SAFE_POINT(vm) do { \
+        if ((vm)->yield_countdown > 0 && --(vm)->yield_countdown == 0 && \
+            (vm)->running && !(vm)->error) \
+            (vm)->yielded = true; \
+    } while (0)
+
+/* Execute single instruction. Inlined into vm_run's loop, which already
+ * checks running/error; vm_step below is the checked public entry. */
+static VM_ALWAYS_INLINE void step(VM* vm) {
     if (vm->pc >= vm->code_size) {
         vm->running = false;
         return;
@@ -860,6 +898,7 @@ void vm_step(VM* vm) {
                 return;
             }
             vm->pc += offset;
+            SAFE_POINT(vm);
             break;
         }
 
@@ -894,6 +933,7 @@ void vm_step(VM* vm) {
                     return;
                 }
             }
+            SAFE_POINT(vm);
             break;
         }
 
@@ -1363,15 +1403,21 @@ void vm_step(VM* vm) {
             if (vm->frame_count > 0) {
                 Value fn_val = vm->frames[vm->frame_count - 1].function;
                 if (is_function(fn_val) && function_ns_name(fn_val)) {
-                    Namespace* fn_home = namespace_registry_get(global_namespace_registry,
-                                                                function_ns_name(fn_val));
-                    if (fn_home) home = fn_home;
+                    Function* f = (Function*)untag_pointer(fn_val);
+                    if (!f->home_ns)
+                        f->home_ns = namespace_registry_get(global_namespace_registry, f->ns_name);
+                    if (f->home_ns) home = f->home_ns;
                 }
             }
 
-            Var* var = NULL;
+            void* sym_ptr = untag_pointer(symbol);
+            VarCacheEntry* ce = &var_cache[var_cache_slot(home, sym_ptr)];
+            Var* var = (ce->gen == namespace_generation && ce->home == home && ce->sym == sym_ptr)
+                ? ce->var : NULL;
 
-            if (symbol_has_namespace(symbol)) {
+            if (var) {
+                /* cache hit */
+            } else if (symbol_has_namespace(symbol)) {
                 /* Qualified: foo/bar — resolve namespace */
                 const char* ns_part = symbol_str(symbol);
                 const char* slash = strchr(ns_part, '/');
@@ -1426,6 +1472,10 @@ void vm_step(VM* vm) {
                     return;
                 }
             }
+            ce->home = home;
+            ce->sym = sym_ptr;
+            ce->var = var;
+            ce->gen = namespace_generation;
 
             Value value = var_get_value(var);
             vm_push(vm, value);
@@ -1775,7 +1825,10 @@ void vm_step(VM* vm) {
                  * temp VM) can re-throw it rather than losing it behind "apply: ..." */
                 if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
                 vm->thrown_exception = exc;  /* transfer ownership — do NOT release */
-                vm_error(vm, "Unhandled exception");
+                /* Report the exception's own message when it has one (e.g. a
+                 * runtime error rethrown after a finally) */
+                Value msg = hashmap_get(exc, keyword_intern("message"));
+                vm_error(vm, is_string(msg) ? string_cstr(msg) : "Unhandled exception");
                 return;
             }
 
@@ -1972,6 +2025,42 @@ void vm_step(VM* vm) {
     }
 }
 
+void vm_step(VM* vm) {
+    if (!vm->running || vm->error) {
+        return;
+    }
+    step(vm);
+}
+
+/* A runtime error with a try/catch handler active: turn it into a
+ * catchable {:message ...} exception and resume at the handler. */
+static VM_NOINLINE void error_to_exception(VM* vm) {
+    const char* emsg = vm->error_msg ? vm->error_msg : "runtime error";
+    Value exc = hashmap_create_default();
+    Value k   = keyword_intern("message");
+    Value s   = string_from_cstr(emsg);
+    Value exc2 = hashmap_assoc(exc, k, s);
+    object_release(exc);
+    object_release(s);
+
+    ExceptionHandler* h = &vm->handlers[--vm->handler_count];
+    while (vm->frame_count > h->frame_count) {
+        CallFrame* frame = pop_frame(vm);
+        if (!frame) break;
+        while (vm->stack_pointer > frame->base_pointer) vm_pop(vm);
+        vm->code = frame->caller_code;
+        vm->code_size = frame->caller_code_size;
+        vm->constants = frame->caller_constants;
+        vm->num_constants = frame->caller_num_constants;
+    }
+    while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
+    if (is_pointer(vm->exception)) object_release(vm->exception);
+    vm->exception = exc2;
+    vm->pc  = h->catch_pc;
+    vm->error   = false;
+    vm->running = true;
+}
+
 /* Run VM until halt or yield */
 void vm_run(VM* vm) {
     vm->running = true;
@@ -1980,43 +2069,9 @@ void vm_run(VM* vm) {
     /* Don't reset pc - allow caller to set starting position */
 
     while (vm->running && !vm->error && !vm->yielded) {
-        vm_step(vm);
-
-        /* If an error occurred but a try/catch handler is active, convert
-         * the fatal error into a catchable exception and resume execution. */
-        if (vm->error && vm->handler_count > 0) {
-            const char* emsg = vm->error_msg ? vm->error_msg : "runtime error";
-            Value exc = hashmap_create_default();
-            Value k   = keyword_intern("message");
-            Value s   = string_from_cstr(emsg);
-            Value exc2 = hashmap_assoc(exc, k, s);
-            object_release(exc);
-            object_release(s);
-
-            ExceptionHandler* h = &vm->handlers[--vm->handler_count];
-            while (vm->frame_count > h->frame_count) {
-                CallFrame* frame = pop_frame(vm);
-                if (!frame) break;
-                while (vm->stack_pointer > frame->base_pointer) vm_pop(vm);
-                vm->code = frame->caller_code;
-                vm->code_size = frame->caller_code_size;
-                vm->constants = frame->caller_constants;
-                vm->num_constants = frame->caller_num_constants;
-            }
-            while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
-            if (is_pointer(vm->exception)) object_release(vm->exception);
-            vm->exception = exc2;
-            vm->pc  = h->catch_pc;
-            vm->error   = false;
-            vm->running = true;
-        }
-
-        /* Auto-yield countdown */
-        if (vm->yield_countdown > 0) {
-            vm->yield_countdown--;
-            if (vm->yield_countdown == 0 && vm->running && !vm->error) {
-                vm->yielded = true;
-            }
+        step(vm);
+        if (VM_UNLIKELY(vm->error) && vm->handler_count > 0) {
+            error_to_exception(vm);
         }
     }
 

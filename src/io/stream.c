@@ -56,6 +56,8 @@ Value stream_from_fd(int fd, bool readable, bool writable, bool owns_fd, StreamK
     s->read_buf = readable ? malloc(STREAM_BUF_SIZE) : NULL;
     s->read_pos = 0;
     s->read_len = 0;
+    s->read_cap = readable ? STREAM_BUF_SIZE : 0;
+    s->read_timeout_ms = 0;
     s->write_buf = writable ? malloc(STREAM_BUF_SIZE) : NULL;
     s->write_len = 0;
     s->write_flush_pos = 0;
@@ -113,11 +115,41 @@ int stream_close(Value stream) {
     return ret;
 }
 
+/* Put n bytes back in front of the unread input */
+static void stream_unread(Stream* s, const char* data, size_t n) {
+    size_t unread = s->read_len - s->read_pos;
+    if (n + unread > s->read_cap) {
+        size_t cap = s->read_cap;
+        while (n + unread > cap) cap *= 2;
+        uint8_t* nb = malloc(cap);
+        memcpy(nb + n, s->read_buf + s->read_pos, unread);
+        free(s->read_buf);
+        s->read_buf = nb;
+        s->read_cap = cap;
+    } else {
+        memmove(s->read_buf + n, s->read_buf + s->read_pos, unread);
+    }
+    memcpy(s->read_buf, data, n);
+    s->read_pos = 0;
+    s->read_len = n + unread;
+}
+
+/* Bytes at the end of buf[0..len) that start an incomplete UTF-8 sequence */
+static size_t utf8_incomplete_tail(const char* buf, size_t len) {
+    for (size_t k = 1; k <= 3 && k <= len; k++) {
+        unsigned char c = (unsigned char)buf[len - k];
+        if ((c & 0xC0) == 0x80) continue;           /* continuation byte */
+        size_t need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        return need > k ? k : 0;
+    }
+    return 0;
+}
+
 /* Refill read buffer from fd.
  * Returns bytes read, 0 on EOF, -1 on error, STREAM_WOULDBLOCK on EAGAIN. */
 static ssize_t stream_refill(Stream* s) {
     s->read_pos = 0;
-    ssize_t n = read(s->fd, s->read_buf, STREAM_BUF_SIZE);
+    ssize_t n = read(s->fd, s->read_buf, s->read_cap);
     if (n < 0) {
         s->read_len = 0;
         if (s->nonblocking && (errno == EAGAIN || errno == EWOULDBLOCK))
@@ -185,13 +217,11 @@ Value stream_read_line_nb(Value stream, bool* would_block) {
         if (s->read_pos >= s->read_len) {
             ssize_t n = stream_refill(s);
             if (n == STREAM_WOULDBLOCK) {
-                if (len == 0) {
-                    /* No data accumulated — signal would-block */
-                    free(buf);
-                    *would_block = true;
-                    return VALUE_NIL;
-                }
-                break;  /* Return partial line */
+                /* Never hand out part of a line: keep it for the retry */
+                if (len > 0) stream_unread(s, buf, len);
+                free(buf);
+                *would_block = true;
+                return VALUE_NIL;
             }
             if (n <= 0) {
                 if (len == 0) { free(buf); return VALUE_NIL; }
@@ -262,12 +292,18 @@ Value stream_read_bytes_nb(Value stream, size_t n, bool* would_block) {
         }
         ssize_t rc = stream_refill(s);
         if (rc == STREAM_WOULDBLOCK) {
+            /* Partial data is fine, a split UTF-8 character is not */
+            size_t tail = utf8_incomplete_tail(buf, total);
+            if (tail > 0) {
+                stream_unread(s, buf + total - tail, tail);
+                total -= tail;
+            }
             if (total == 0) {
                 free(buf);
                 *would_block = true;
                 return VALUE_NIL;
             }
-            break; /* Return partial data */
+            break;
         }
         if (rc <= 0) break;
     }

@@ -43,20 +43,6 @@ Value native_function_new(int arity, NativeFn fn_ptr, const char* name) {
     return v;
 }
 
-/* Get native function arity */
-int native_function_arity(Value fn) {
-    assert(is_native_function(fn));
-    NativeFunction* nf = (NativeFunction*)untag_pointer(fn);
-    return nf->arity;
-}
-
-/* Get native function pointer */
-NativeFn native_function_ptr(Value fn) {
-    assert(is_native_function(fn));
-    NativeFunction* nf = (NativeFunction*)untag_pointer(fn);
-    return nf->fn_ptr;
-}
-
 /* Get native function name */
 const char* native_function_name(Value fn) {
     assert(is_native_function(fn));
@@ -64,7 +50,3 @@ const char* native_function_name(Value fn) {
     return nf->name ? nf->name : "<native>";
 }
 
-/* Type check */
-bool is_native_function(Value v) {
-    return is_pointer(v) && object_type(v) == TYPE_NATIVE_FN;
-}

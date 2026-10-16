@@ -5,15 +5,18 @@
 #include "ulog.h"
 #include "log.h"
 
+int log_level = ULOG_LEVEL_DEBUG;
+
 /* Initialize logging system */
 void log_init(void) {
 #ifndef LOG_DISABLED
     /* Set default log level to INFO in release, DEBUG in debug builds */
 #ifdef DEBUG
-    ulog_output_level_set_all(ULOG_LEVEL_DEBUG);
+    log_level = ULOG_LEVEL_DEBUG;
 #else
-    ulog_output_level_set_all(ULOG_LEVEL_INFO);
+    log_level = ULOG_LEVEL_INFO;
 #endif
+    ulog_output_level_set_all((ulog_level)log_level);
 
     LOG_DEBUG("Logging system initialized");
 #endif
@@ -22,6 +25,7 @@ void log_init(void) {
 /* Set log level */
 void log_set_level(int level) {
 #ifndef LOG_DISABLED
+    log_level = level;
     ulog_output_level_set_all((ulog_level)level);
 #else
     (void)level;  /* Suppress unused parameter warning */

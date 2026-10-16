@@ -71,7 +71,7 @@ LIBEXECDIR  = $(PREFIX)/lib/beerlang
 SHAREDIR    = $(PREFIX)/share/beerlang
 
 # Targets
-.PHONY: all clean test repl repl-trace debug track-leaks asan install uninstall libbeerlang embed wasm wasm-docker help
+.PHONY: all clean test bench repl repl-trace debug track-leaks asan install uninstall libbeerlang embed wasm wasm-docker help
 
 all: $(BIN_DIR)/beerlang
 
@@ -135,6 +135,29 @@ asan: CFLAGS = $(ASAN_CFLAGS)
 asan: LDFLAGS += -fsanitize=address,undefined
 asan: clean all
 	@echo "Built with AddressSanitizer (run normally to detect memory errors)"
+
+# Micro-benchmarks: prints ns/op per benchmark and the change vs the
+# previous run. Results live in .bench/ (latest.edn, prev.edn), which
+# `make clean` leaves alone.
+#   make bench                    benchmark the working tree
+#   make bench REF=<sha>          build <sha> in .bench/src and benchmark it
+#                                 with the current benchmark set
+# EXTRA_CFLAGS applies to either build, e.g. EXTRA_CFLAGS=-DVM_THREADED_DISPATCH
+BENCH_DIR = .bench
+ifdef REF
+bench:
+	@mkdir -p $(BENCH_DIR)
+	rm -rf $(BENCH_DIR)/src && mkdir -p $(BENCH_DIR)/src
+	git archive $(REF) | tar -x -C $(BENCH_DIR)/src
+	$(MAKE) -C $(BENCH_DIR)/src all
+	@echo "== benchmarking $(REF) $(EXTRA_CFLAGS)"
+	BEERPATH=$(BENCH_DIR)/src/lib:lib $(BENCH_DIR)/src/$(BIN_DIR)/beerlang tests/integration/benchmarks/run.beer
+else
+bench: $(BIN_DIR)/beerlang
+	@mkdir -p $(BENCH_DIR)
+	@echo "== benchmarking working tree $(EXTRA_CFLAGS)"
+	BEERPATH=lib ./$(BIN_DIR)/beerlang tests/integration/benchmarks/run.beer
+endif
 
 # REPL (depends on main executable)
 repl: $(BIN_DIR)/beerlang
@@ -238,6 +261,8 @@ help:
 	@echo "  make track-leaks   Build with allocation tracking (--dump-leaks)"
 	@echo "  make asan          Build with AddressSanitizer"
 	@echo "  make test          Run all tests"
+	@echo "  make bench         Run micro-benchmarks (compares with the previous run)"
+	@echo "  make bench REF=sha Benchmark another commit with the current benchmark set"
 	@echo "  make repl          Start REPL"
 	@echo "  make repl-trace    Start REPL with opcode tracing"
 	@echo "  make clean         Remove build artifacts"

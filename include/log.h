@@ -36,8 +36,11 @@ void log_add_file(const char* filename, int level);
   #define LOG_ERROR(...) ((void)0)
   #define LOG_FATAL(...) ((void)0)
 #else
-  #define LOG_TRACE(...) ulog_trace(__VA_ARGS__)
-  #define LOG_DEBUG(...) ulog_debug(__VA_ARGS__)
+  /* Mirrors the ulog level so the hot paths (one LOG_TRACE per opcode)
+   * skip the ulog_log call entirely unless --trace is on. */
+  extern int log_level;
+  #define LOG_TRACE(...) do { if (log_level <= (int)ULOG_LEVEL_TRACE) ulog_trace(__VA_ARGS__); } while (0)
+  #define LOG_DEBUG(...) do { if (log_level <= (int)ULOG_LEVEL_DEBUG) ulog_debug(__VA_ARGS__); } while (0)
   #define LOG_INFO(...)  ulog_info(__VA_ARGS__)
   #define LOG_WARN(...)  ulog_warn(__VA_ARGS__)
   #define LOG_ERROR(...) ulog_error(__VA_ARGS__)

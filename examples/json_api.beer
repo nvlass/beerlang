@@ -71,11 +71,11 @@
         uri    (:uri req)]
     (cond
       ;; GET /items — list all
-      (and (= method "GET") (= uri "/items"))
+      (and (= method :get) (= uri "/items"))
       (ok (vec (vals @*store*)))
 
       ;; POST /items — create
-      (and (= method "POST") (= uri "/items"))
+      (and (= method :post) (= uri "/items"))
       (let [body (try (json/parse (:body req))
                       (catch _ nil))]
         (if (map? body)
@@ -83,7 +83,7 @@
           (bad-req "body must be a JSON object")))
 
       ;; GET /items/:id
-      (and (= method "GET") (str/starts-with? uri "/items/"))
+      (and (= method :get) (str/starts-with? uri "/items/"))
       (let [id-str (subs uri 7)
             id     (parse-int id-str)]
         (if-let [item (and id (store-get id))]
@@ -91,7 +91,7 @@
           (not-found (str "item " id-str " not found"))))
 
       ;; DELETE /items/:id
-      (and (= method "DELETE") (str/starts-with? uri "/items/"))
+      (and (= method :delete) (str/starts-with? uri "/items/"))
       (let [id-str (subs uri 7)
             id     (parse-int id-str)]
         (if (and id (store-delete! id))

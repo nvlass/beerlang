@@ -197,14 +197,15 @@ BeerValue beer_get(BeerValue map, BeerValue key);
 /* Retain/release heap-allocated values when storing them beyond the
  * current native call frame. beer_int/float/bool/nil never need this. */
 
-/* Forward declarations (defined in memory.h / alloc.c) */
-void object_retain(Value v);
-void object_release(Value v);
+/* Out-of-line refcount entry points (src/memory/alloc.c); the runtime
+ * itself uses the inline object_retain/object_release from memory.h */
+void beer_value_retain(Value v);
+void beer_value_release(Value v);
 
 /* Interned symbols/keywords (beer_keyword, beer_symbol) are immortal:
  * retaining or releasing them is a harmless no-op. */
-static inline void beer_retain (BeerValue v) { if (is_pointer(v)) object_retain(v);  }
-static inline void beer_release(BeerValue v) { if (is_pointer(v)) object_release(v); }
+static inline void beer_retain (BeerValue v) { if (is_pointer(v)) beer_value_retain(v);  }
+static inline void beer_release(BeerValue v) { if (is_pointer(v)) beer_value_release(v); }
 
 #ifdef __cplusplus
 }

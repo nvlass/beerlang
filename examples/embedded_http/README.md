@@ -31,8 +31,9 @@ and the symbol/keyword intern tables as plain C file-scope globals (see
 `src/lib/beer.c`, `src/runtime/namespace.c`, `src/types/symbol.c`) — a
 second `beer_open()` in the same process would just share that same state,
 not create an isolated second VM. Reference counting
-(`object_retain`/`object_release`, `src/memory/alloc.c`) is plain
-non-atomic `refcount++`/`refcount--`.
+(`object_retain`/`object_release` in `include/memory.h`, exposed to
+embedders as `beer_retain`/`beer_release`) is plain non-atomic
+`refcount++`/`refcount--`.
 
 Two OS threads calling into the VM concurrently would race on the shared
 symbol table, the namespace registry, and every object's refcount — this

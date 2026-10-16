@@ -942,6 +942,26 @@ check_multi '(require (quote beer.json) :as (quote json))
 check_multi '(require (quote beer.json) :as (quote json))
 (json/emit {:a 1})' '"{\"a\":1}"' "json emit map"
 
+check_multi '(require (quote beer.json) :as (quote json))
+(= {"c" false "a" [1 -250.0 {"b" nil}]} (json/parse " {\"a\" : [1, -2.5e2, {\"b\": null}], \"c\": false} "))' 'true' "json parse nested"
+check_multi '(require (quote beer.json) :as (quote json))
+(= "é😀" (json/parse "\"\\u00e9\\ud83d\\ude00\""))' 'true' "json parse unicode escapes"
+check_multi '(require (quote beer.json) :as (quote json))
+(json/parse "123456789012345678901234567890")' '123456789012345678901234567890' "json parse bigint"
+check_multi '(require (quote beer.json) :as (quote json))
+(float? (json/parse "1e3"))' 'true' "json parse exponent is float"
+check_multi '(require (quote beer.json) :as (quote json))
+(json/emit [(list 1 2) #{3} :ns/kw (quote sym) \c 10.0 0.1 "q\"\n"])' '"[[1,2],[3],\"ns/kw\",\"sym\",\"c\",10.0,0.1,\"q\\\"\\n\"]"' "json emit lists sets keywords floats escapes"
+check_multi '(require (quote beer.json) :as (quote json))
+(json/emit 3.141592653589793)' '"3.141592653589793"' "json emit float round-trips"
+check_multi '(require (quote beer.json) :as (quote json))
+(def x {"a" [1 2.5 "s" {"z" [true false nil]}] "big" 123456789012345678901234567890})
+(= x (json/parse (json/emit x)))' 'true' "json round trip"
+check_multi '(require (quote beer.json) :as (quote json))
+[(try (json/parse "[1,2") (catch e (:message e))) (try (json/parse "[1] x") (catch e (:message e)))]' '["json/parse: unterminated array at offset 4" "json/parse: trailing characters at offset 4"]' "json parse errors are catchable"
+check_multi '(require (quote beer.json) :as (quote json))
+(try (json/emit [(atom 1)]) (catch e (:message e)))' '"json/emit: cannot encode value of type atom"' "json emit unencodable value"
+
 # --- Metadata & Docstrings ---
 echo ""
 echo "--- Metadata & Docstrings ---"
@@ -1058,7 +1078,7 @@ cat > "$HTTP_TEST" << 'HTTPEOF'
     "ok"))))
 (def client-task (spawn (fn []
   (let [c (tcp/connect "127.0.0.1" port)]
-    (write c "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    (write c "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
     (flush c)
     (loop [acc ""]
       (let [line (read-line c)]
@@ -1083,6 +1103,82 @@ else
     echo "FAIL: HTTP status line => '$http_out' (expected HTTP/1.1 200 OK)"
     FAIL=$((FAIL + 1))
 fi
+
+# --- finally runs when an exception leaves the try ---
+check_multi '(def log (atom []))
+(defn note [x] (swap! log conj x) x)
+[(try (try (throw (ex-info "t" {})) (finally (note :f1))) (catch e (:message e))) (try (try (+ 1 :x) (finally (note :f2))) (catch e (:message e))) (try (try (throw (ex-info "a" {})) (catch e (throw (ex-info "b" {}))) (finally (note :f3))) (catch e (:message e))) (try (note :body) (finally (note :f4))) @log]' '["t" "+: arguments must be numbers" "b" :body [:f1 :f2 :f3 :body :f4]]' 'finally on throw, error, rethrow and normal exit'
+check '(try (try (throw (ex-info "a" {})) (finally (throw (ex-info "b" {})))) (catch e (:message e)))' '"b"'
+
+# --- loop body calls are not tail calls unless the loop is ---
+check_multi '(def log (atom []))
+(defn note [x] (swap! log conj x))
+(defn f [] (try (loop [i 0] (note :body)) (finally (note :finally))))
+(defn g [] (do (loop [i 0] (note :loop)) (note :after)))
+(f)
+(g)
+@log' '[:body :finally :loop :after]' 'finally and code after a loop still run'
+check_multi '(defn deep [n] (if (= n 0) :deep (deep (- n 1))))
+(defn f [] (loop [i 0] (deep 100000)))
+(f)' ':deep' 'tail call in a loop in tail position'
+
+# --- multi-arity defn: direct dispatch, variadic arities ---
+check_multi '(defn ma ([] :zero) ([a] [:one a]) ([a & more] [:var a more]))
+[(ma) (ma 1) (ma 1 2 3)]' '[:zero [:one 1] [:var 1 (2 3)]]' 'multi-arity with variadic arity'
+check_multi '(defn sum-to ([n] (sum-to n 0)) ([n acc] (if (= n 0) acc (recur (- n 1) (+ acc n)))))
+(sum-to 100000)' '5000050000' 'multi-arity recur'
+
+# --- beer.http keep-alive ---
+HTTP_KA=$(mktemp /tmp/beer_http_ka_XXXXXX.beer)
+cat > "$HTTP_KA" << 'HTTPEOF'
+(require (quote beer.tcp) :as (quote tcp))
+(require (quote beer.http) :as (quote http))
+(defn handler [req] {:status 200 :body (str "r" (:uri req))})
+(defn serve-one [opts]
+  (let [srv (tcp/listen 0)
+        port (tcp/local-port srv)
+        t (spawn (fn [] (let [conn (tcp/accept srv)] (http/handle-connection handler conn opts) :done)))]
+    [srv port t]))
+(defn read-all [c]
+  (loop [acc ""]
+    (let [line (read-line c)]
+      (if (nil? line) acc (recur (str acc line "\n"))))))
+(defn exchange [opts request]
+  (let [[srv port t] (serve-one opts)
+        c (await (spawn (fn [] (tcp/connect "127.0.0.1" port))))
+        out (await (spawn (fn [] (write c request) (flush c) (read-all c))))]
+    (await t)
+    (close c)
+    (close srv)
+    out))
+(defn count-of [s sub]
+  (loop [s s n 0]
+    (if (beer.string/includes? s sub)
+      (recur (subs s (+ (count (first (beer.string/split s sub))) (count sub))) (+ n 1))
+      n)))
+;; two requests + close on one connection, pipelined
+(def a (exchange {} (str "GET /1 HTTP/1.1\r\nHost: x\r\n\r\n"
+                         "HEAD /2 HTTP/1.1\r\nHost: x\r\n\r\n"
+                         "GET /3 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")))
+(println "ka:" (count-of a "HTTP/1.1 200 OK") (beer.string/includes? a "r/1") (beer.string/includes? a "r/2") (beer.string/includes? a "r/3") (count-of a "connection: close"))
+;; idle timeout closes a kept-alive connection
+(def b (exchange {:keep-alive-timeout 200} "GET /t HTTP/1.1\r\nHost: x\r\n\r\n"))
+(println "idle:" (beer.string/includes? b "r/t") (beer.string/includes? b "connection"))
+;; HTTP/1.0 without keep-alive closes; errors close with a status
+(def c1 (exchange {} "GET /o HTTP/1.0\r\n\r\n"))
+(def d (exchange {} "GET / HTTP/1.1\r\n\r\n"))
+(println "10:" (beer.string/includes? c1 "connection: close") "nohost:" (beer.string/includes? d "400 Bad Request"))
+HTTPEOF
+ka_out=$(BEERPATH=lib "$BEER" "$HTTP_KA" 2>/dev/null)
+rm -f "$HTTP_KA"
+for expected in "ka: 3 true false true 1" "idle: true false" "10: true nohost: true"; do
+    if echo "$ka_out" | grep -qF "$expected"; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: HTTP keep-alive => '$ka_out' (expected line '$expected')"
+        FAIL=$((FAIL + 1))
+    fi
+done
 
 # --- beer.hive: actors ---
 check_multi '(require (quote beer.hive) :as (quote hive))
@@ -1873,6 +1969,69 @@ check_multi '(def old+ +)
 (defmethod + :num [& args] (apply old+ args))
 [(+ 1 2) (+ "a" "b") (inc 41) (reduce beer.core/+ [1 2 3])]' '[3 "ab" 42 6]' 'multimethod + in user ns'
 check '[(reduce + [1 2 3]) (reduce + 10 [1 2 3]) (reduce + []) (reduce max [3 9 2]) (reduce + [5])]' '[6 16 0 9 5]'
+
+# --- if-let / when-let / byte-count / name ---
+check '[(if-let [x 5] (+ x 1) :no) (if-let [x nil] x :no) (if-let [x false] x) (when-let [[a b] [1 2]] (+ a b)) (when-let [x nil] :yes)]' '[6 :no nil 3 nil]'
+check '[(count "héllo") (beer.string/byte-count "héllo")]' '[5 6]'
+check_multi '(def r (name (str "ab" "cd")))
+(str "x" "y")
+r' '"abcd"' 'name on a string returns an owned ref'
+
+# --- let: rebinding a name must not share a slot with later bindings ---
+check '(let* [a 1 b 2 a (+ a 10) c 3] [a b c])' '[11 2 3]'
+check '(let [j 0 j (+ j 1) k 5 j (+ j 1)] [j k])' '[2 5]'
+check '(let [x 1 x (inc x)] ((fn [] (let [y 10 y (inc y) z 0] [x y z]))))' '[2 11 0]'
+check '[(int \a) (char-code \a) (str (char 233))]' '[97 97 "é"]'
+check '(try (char 55296) (catch e (:message e)))' '"char: surrogate code point"'
+
+# --- beer.json.pure agrees with the beer.json natives ---
+check_multi '(require (quote beer.json) :as (quote json))
+(require (quote beer.json.pure) :as (quote pure))
+(defn res [f x] (try [:ok (f x)] (catch e [:err (:message e)])))
+(def docs [" {\"a\" : [1, -2.5e2 , \"q\\nz\\u00e9\\ud83d\\ude00\"], \"b\": {\"c\": null}} " "123456789012345678901234567890" "-0" "0.5" "1E3" "1.5e+3" "[]" "{}" "\"\\ud800x\"" "\"a\\/b\\b\\f\"" "[1,2" "{\"a\" 1}" "tru" "01" "1." "1e" "[1] x" "\"abc" "{\"a\":1,}" "\"\\q\"" "\"\\u12zz\"" "" "[1,]" "{\"a\":}"])
+(filter (fn [d] (not (= (res json/parse d) (res pure/parse d)))) docs)' 'nil' 'beer.json.pure parse matches natives'
+check_multi '(require (quote beer.json) :as (quote json))
+(require (quote beer.json.pure) :as (quote pure))
+(defn res [f x] (try [:ok (f x)] (catch e [:err (:message e)])))
+(def vals [nil true 0 -7 123456789012345678901234567890 2.5 0.1 10.0 1e20 "" "q\"b\\s\n\t" (json/parse "\"\\u0001\\b\"") "héllo" :ns/kw (quote a/b) \c [1 [2 [3]]] (list 1 "a") #{3} {:a 1 "b" [true nil] 5 6 \f 7 true 1} (atom 1) {[1] 2}])
+(filter (fn [v] (not (= (res json/emit v) (res pure/emit v)))) vals)' 'nil' 'beer.json.pure emit matches natives'
+
+# --- Clock natives, time macro, beer.bench ---
+check '(let [a (nano-time) b (nano-time)] [(int? a) (>= b a) (> (current-time-millis) 1700000000000)])' '[true true true]'
+check_multi '(def r (time (+ 1 2)))
+r' '3'
+check_multi '(require (quote beer.bench) :as (quote bench))
+(def rs (bench/run-all [{:name "noop" :f (fn [n] (loop [i 0] (when (< i n) (recur (+ i 1)))))}] {:target-ms 5 :rounds 3}))
+[(count rs) (:name (first rs)) (> (:min (first rs)) 0) (<= (:min (first rs)) (:median (first rs)) (:max (first rs)))]' '[1 "noop" true true]' 'beer.bench run-all'
+
+# --- String builder ---
+check_multi '(def b (beer.string/builder "[" 1))
+(beer.string/append! b ", " :kw ", " 2.5 ", " [1 "a"] ", " \c ", " nil)
+(str b)' '"[1, :kw, 2.5, [1 \"a\"], c, nil"' 'string builder appends like str'
+check_multi '(def b (beer.string/builder "ab"))
+(beer.string/append! b b)
+(beer.string/append! b (beer.string/builder "é"))
+[(str b) (str "<" b ">")]' '["ababé" "<ababé>"]' 'string builder self-append and nesting'
+check_multi '(def b (beer.string/builder))
+(loop [i 0] (when (< i 1000) (beer.string/append! b i) (recur (+ i 1))))
+[(count (str b)) (type b) (subs (str (beer.string/append! b "!")) 2885)]' '[2890 :string-builder "98999!"]' 'string builder grows'
+check '(try (beer.string/append! "x" 1) (catch e (:message e)))' '"append!: first argument must be a string builder"'
+
+# --- LOAD_VAR cache invalidation ---
+check_multi '(ns cache.a)
+(defn add2 [a b] (+ a b))
+(def before (add2 3 4))
+(def + (fn [a b] (* a b)))
+[before (add2 3 4)]' '[7 12]' 'shadowing a core var after a cached lookup'
+check_multi '(defn h [] 10)
+(defn callh [] (h))
+(def before (callh))
+(def h (fn [] 20))
+[before (callh)]' '[10 20]' 'redefining a var after a cached lookup'
+check_multi '(defn calls-q [] (q))
+(def before (try (calls-q) (catch e :undefined)))
+(def q (fn [] :defined))
+[before (calls-q)]' '[:undefined :defined]' 'defining a var after a failed lookup'
 
 echo ""
 echo "===================="

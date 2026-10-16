@@ -55,6 +55,7 @@ Value function_new_closure(int arity, uint32_t code_offset, uint16_t n_locals,
     fn->num_constants = 0;
     fn->name = strdup(name ? name : "anonymous-fn");
     fn->ns_name = NULL;
+    fn->home_ns = NULL;
     fn->meta = VALUE_NIL;
 
     /* Copy and retain closed-over values */
@@ -78,13 +79,6 @@ int function_arity(Value fn) {
     assert(is_function(fn));
     Function* f = (Function*)untag_pointer(fn);
     return f->arity;
-}
-
-/* Get function code offset */
-uint32_t function_code_offset(Value fn) {
-    assert(is_function(fn));
-    Function* f = (Function*)untag_pointer(fn);
-    return f->code_offset;
 }
 
 /* Get number of locals */
@@ -152,19 +146,13 @@ const char* function_name(Value fn) {
     return f->name;
 }
 
-/* Get defining namespace */
-const char* function_ns_name(Value fn) {
-    assert(is_function(fn));
-    Function* f = (Function*)untag_pointer(fn);
-    return f->ns_name;
-}
-
 /* Set defining namespace */
 void function_set_ns_name(Value fn, const char* ns_name) {
     assert(is_function(fn));
     Function* f = (Function*)untag_pointer(fn);
     free(f->ns_name);
     f->ns_name = ns_name ? strdup(ns_name) : NULL;
+    f->home_ns = NULL;
 }
 
 /* Get metadata */
@@ -184,7 +172,3 @@ void function_set_meta(Value fn, Value meta) {
     if (is_pointer(old)) object_release(old);
 }
 
-/* Type check */
-bool is_function(Value v) {
-    return is_pointer(v) && object_type(v) == TYPE_FUNCTION;
-}

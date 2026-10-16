@@ -59,6 +59,7 @@ struct LexicalEnv {
     Value bindings;         /* HashMap: Symbol -> local index */
     bool is_function;       /* Function boundary? */
     int base_index;         /* Base local index for this scope */
+    int n_slots;            /* Slots allocated here (> bindings when a name is rebound) */
 };
 
 /* Capture entry - one captured variable from an enclosing scope */
@@ -108,6 +109,8 @@ struct Compiler {
 
     /* Compilation state */
     bool in_tail_pos;       /* Currently in tail position? */
+    int no_tail_calls;      /* > 0 inside a loop body that isn't in the fn's tail
+                               position: recur is legal there, TAIL_CALL is not */
     int local_count;        /* Total locals in current function */
 
     /* Error tracking */

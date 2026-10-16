@@ -170,10 +170,11 @@ LexicalEnv* lexical_env_new(LexicalEnv* parent, bool is_function) {
     env->parent = parent;
     env->bindings = hashmap_create_default();
     env->is_function = is_function;
+    env->n_slots = 0;
     if (is_function) {
         env->base_index = 0;  /* Function boundary resets base (new stack frame) */
     } else {
-        env->base_index = parent ? parent->base_index + (int)hashmap_size(parent->bindings) : 0;
+        env->base_index = parent ? parent->base_index + parent->n_slots : 0;
     }
 
     return env;
@@ -187,7 +188,7 @@ void lexical_env_free(LexicalEnv* env) {
 }
 
 int lexical_env_add_local(LexicalEnv* env, Value symbol) {
-    int local_idx = env->base_index + (int)hashmap_size(env->bindings);
+    int local_idx = env->base_index + env->n_slots++;
     hashmap_set(env->bindings, symbol, make_fixnum(local_idx));
     return local_idx;
 }
@@ -221,6 +222,7 @@ Compiler* compiler_new(const char* filename) {
     c->captures = NULL;
     c->recur_target = NULL;
     c->in_tail_pos = false;
+    c->no_tail_calls = 0;
     c->local_count = 0;
     c->error = false;
     c->error_msg[0] = '\0';
@@ -258,6 +260,7 @@ void compiler_reset(Compiler* c) {
     c->captures = NULL;
     c->recur_target = NULL;
     c->in_tail_pos = false;
+    c->no_tail_calls = 0;
     c->local_count = 0;
     c->error = false;
     c->error_msg[0] = '\0';
@@ -1034,7 +1037,7 @@ static void compile_list(Compiler* c, Value form, bool in_tail_pos) {
     compile_expr(c, first, false);
 
     /* Emit call instruction */
-    if (in_tail_pos) {
+    if (in_tail_pos && c->no_tail_calls == 0) {
         emit_uint16(c, OP_TAIL_CALL, (uint16_t)n_args);
     } else {
         emit_uint16(c, OP_CALL, (uint16_t)n_args);
@@ -1443,6 +1446,8 @@ static void compile_fn_form(Compiler* c, Value form) {
     fn_recur_target.first_binding_index = 0;  /* first param is local 0 */
     fn_recur_target.n_bindings = total_params;
     c->recur_target = &fn_recur_target;
+    int saved_no_tail_calls = c->no_tail_calls;
+    c->no_tail_calls = 0;
 
     /* Compile function body (implicit do) */
     while (is_cons(body)) {
@@ -1475,6 +1480,7 @@ static void compile_fn_form(Compiler* c, Value form) {
     /* Restore parent's local_count and recur target */
     c->local_count = saved_local_count;
     c->recur_target = saved_recur_target;
+    c->no_tail_calls = saved_no_tail_calls;
 
     /* Patch the skip jump (offset is relative to PC after reading the offset) */
     size_t after_fn = bytecode_current_offset(c->bytecode);
@@ -1816,6 +1822,11 @@ static void compile_loop(Compiler* c, Value form, bool in_tail_pos) {
     loop_recur_target.first_binding_index = first_binding_index;
     loop_recur_target.n_bindings = n_bindings;
     c->recur_target = &loop_recur_target;
+    /* The last body expr is compiled in tail position so recur is legal
+     * there; unless the loop itself is in tail position, calls in it must
+     * not become TAIL_CALLs (they'd return from the enclosing fn, skipping
+     * code after the loop and any enclosing try/finally). */
+    if (!need_frame && !in_tail_pos) c->no_tail_calls++;
 
     /* Compile body (implicit do) */
     while (is_cons(body)) {
@@ -1835,6 +1846,7 @@ static void compile_loop(Compiler* c, Value form, bool in_tail_pos) {
 
     /* Restore recur target */
     c->recur_target = saved_recur_target;
+    if (!need_frame && !in_tail_pos) c->no_tail_calls--;
 
     /* If we wrapped in function, emit RETURN and create function object */
     if (need_frame) {
@@ -2029,6 +2041,15 @@ static void compile_try(Compiler* c, Value form, bool in_tail_pos) {
         emit_uint16(c, OP_ENTER, 0);  /* Placeholder */
     }
 
+    /* With a finally, an outer handler covers the body and the catch body,
+     * so an exception escaping either still runs finally (then rethrows). */
+    size_t finally_handler_operand = 0;
+    if (has_finally) {
+        bytecode_emit_byte(c->bytecode, OP_PUSH_HANDLER);
+        finally_handler_operand = bytecode_current_offset(c->bytecode);
+        bytecode_emit_uint32(c->bytecode, 0);  /* Placeholder */
+    }
+
     if (has_catch) {
         /* Emit OP_PUSH_HANDLER with placeholder catch_pc */
         bytecode_emit_byte(c->bytecode, OP_PUSH_HANDLER);
@@ -2053,11 +2074,6 @@ static void compile_try(Compiler* c, Value form, bool in_tail_pos) {
 
         /* Normal exit: pop handler */
         emit_op(c, OP_POP_HANDLER);
-
-        /* Emit finally body (first copy) if present */
-        if (has_finally) {
-            compile_finally_body(c, finally_body);
-        }
 
         size_t jump_past_catch_offset = bytecode_current_offset(c->bytecode);
         emit_int32(c, OP_JUMP, 0);  /* Placeholder: jump past catch */
@@ -2098,17 +2114,12 @@ static void compile_try(Compiler* c, Value form, bool in_tail_pos) {
         lexical_env_free(c->env);
         c->env = try_env;
 
-        /* Emit finally body (second copy) if present */
-        if (has_finally) {
-            compile_finally_body(c, finally_body);
-        }
-
         /* Patch jump past catch */
         size_t after_catch = bytecode_current_offset(c->bytecode);
         int32_t jump_offset = (int32_t)(after_catch - jump_past_catch_offset - 5);
         bytecode_patch_int32(c->bytecode, jump_past_catch_offset + 1, jump_offset);
     } else {
-        /* try with finally only (no catch) — just compile body + finally */
+        /* try with finally only (no catch) */
         if (body_count == 0) {
             emit_op(c, OP_PUSH_NIL);
         } else {
@@ -2123,8 +2134,38 @@ static void compile_try(Compiler* c, Value form, bool in_tail_pos) {
                 cur = cdr(cur);
             }
         }
+    }
 
+    if (has_finally) {
+        /* Normal exit (body or catch finished): drop the outer handler and
+         * run finally once; the try's value stays on the stack */
+        emit_op(c, OP_POP_HANDLER);
         compile_finally_body(c, finally_body);
+        size_t jump_past_rethrow = bytecode_current_offset(c->bytecode);
+        emit_int32(c, OP_JUMP, 0);  /* Placeholder */
+
+        /* Exceptional exit: keep the exception in a hidden local (the space
+         * makes the name impossible to write in source), run finally,
+         * rethrow it */
+        uint32_t rethrow_pc = (uint32_t)bytecode_current_offset(c->bytecode);
+        bytecode_patch_uint32(c->bytecode, finally_handler_operand, rethrow_pc);
+        LexicalEnv* outer_env = c->env;
+        c->env = lexical_env_new(outer_env, false);
+        emit_op(c, OP_LOAD_EXCEPTION);
+        int exc_local = lexical_env_add_local(c->env, symbol_intern(" finally-exception"));
+        emit_uint16(c, OP_STORE_LOCAL, (uint16_t)exc_local);
+        if (exc_local >= c->local_count) {
+            c->local_count = exc_local + 1;
+        }
+        compile_finally_body(c, finally_body);
+        emit_uint16(c, OP_LOAD_LOCAL, (uint16_t)exc_local);
+        emit_op(c, OP_THROW);
+        lexical_env_free(c->env);
+        c->env = outer_env;
+
+        size_t after_rethrow = bytecode_current_offset(c->bytecode);
+        bytecode_patch_int32(c->bytecode, jump_past_rethrow + 1,
+                             (int32_t)(after_rethrow - jump_past_rethrow - 5));
     }
 
     /* If we wrapped in function, emit RETURN and create function object */
