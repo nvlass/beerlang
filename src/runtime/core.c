@@ -36,6 +36,7 @@
 #include "tarindex.h"
 #include "disasm.h"
 #include "strbuilder.h"
+#include "verify.h"
 #include <fcntl.h>
 
 /* Forward declarations */
@@ -2209,6 +2210,7 @@ static void reduce_kv_bytecode_cb(Value key, Value value, void* ctx_ptr) {
     temp_vm->scheduler = ctx->vm->scheduler;
     vm_load_code(temp_vm, code, (int)pc);
     vm_load_constants(temp_vm, consts, 4);
+    vm_trust_loaded_code(temp_vm);  /* generated call stub */
     vm_run(temp_vm);
 
     if (temp_vm->error) {
@@ -2370,6 +2372,7 @@ static Value native_apply(VM* vm, int argc, Value* argv) {
         temp_vm->scheduler = vm->scheduler;
         vm_load_code(temp_vm, code, (int)pc);
         vm_load_constants(temp_vm, consts, n_consts);
+        vm_trust_loaded_code(temp_vm);  /* generated call stub */
         vm_run(temp_vm);
 
         if (temp_vm->error) {
@@ -2750,6 +2753,16 @@ static Value native_disasm(VM* vm, int argc, Value* argv) {
     hashmap_set(result, keyword_intern("code"), code_vec);
     hashmap_set(result, keyword_intern("constants"), const_vec);
     hashmap_set(result, keyword_intern("arity"), make_fixnum((int64_t)arity));
+    Function* fobj = (Function*)untag_pointer(argv[0]);
+    if (fobj->n_arities > 0) {
+        /* Multi-arity: every entry's arity (the listing starts at the first) */
+        Value arities = vector_create(fobj->n_arities);
+        for (uint16_t i = 0; i < fobj->n_arities; i++) {
+            vector_push(arities, make_fixnum((int64_t)fobj->arities[i].arity));
+        }
+        hashmap_set(result, keyword_intern("arities"), arities);
+        object_release(arities);
+    }
     object_release(code_vec);
     object_release(const_vec);
 
@@ -2984,6 +2997,20 @@ static Value native_asm(VM* vm, int argc, Value* argv) {
         pc += (size_t)info->total_size;
     }
 
+
+    /* The VM trusts verified code (no per-instruction bounds checks), so
+     * hand-assembled code must pass the verifier before it can run */
+    char verr[200];
+    if (!bytecode_verify(bytecode, (int)total_size, const_arr, num_constants, verr, sizeof(verr))) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "asm: invalid bytecode: %s", verr);
+        vm_error(vm, buf);
+        for (int i = 0; i < num_constants; i++) {
+            if (is_pointer(const_arr[i])) object_release(const_arr[i]);
+        }
+        free(bytecode); free(const_arr);
+        return VALUE_NIL;
+    }
 
     /* Create function object */
     Value fn = function_new(arity, 0, n_locals, "asm-fn");
@@ -4509,6 +4536,7 @@ static Value do_macroexpand_1(VM* vm, Value form) {
     tmp_vm->scheduler = vm->scheduler;
     vm_load_code(tmp_vm, code, (int)pc);
     vm_load_constants(tmp_vm, consts, n_consts);
+    vm_trust_loaded_code(tmp_vm);  /* generated call stub */
     vm_run(tmp_vm);
 
     Value result = VALUE_NIL;
@@ -4565,23 +4593,23 @@ static Value native_macroexpand(VM* vm, int argc, Value* argv) {
  * load: Read, compile, and execute all forms from a file
  * ================================================================= */
 
-/* Kept-alive compiled units (same pattern as REPL) */
-#define MAX_LOAD_UNITS 4096
-static CompiledCode* load_units[MAX_LOAD_UNITS];
-static Value* load_constants[MAX_LOAD_UNITS];
+/* Compiled units stay alive for the whole run: function templates point
+ * into their bytecode and constants, so freeing one leaves dangling code. */
+static CompiledCode** load_units = NULL;
+static Value** load_constants = NULL;
 static int n_load_units = 0;
+static int cap_load_units = 0;
 
-/* Called by beer.c (embeddable API) to keep code+constants alive. */
+/* Also called by beer.c (embeddable API) */
 void core_retain_unit(CompiledCode* code, Value* constants) {
-    if (n_load_units < MAX_LOAD_UNITS) {
-        load_units[n_load_units] = code;
-        load_constants[n_load_units] = constants;
-        n_load_units++;
-    } else {
-        fprintf(stderr, "core: warning: too many compiled units, freeing\n");
-        compiled_code_free(code);
-        free(constants);
+    if (n_load_units == cap_load_units) {
+        cap_load_units = cap_load_units ? cap_load_units * 2 : 256;
+        load_units = realloc(load_units, sizeof(*load_units) * (size_t)cap_load_units);
+        load_constants = realloc(load_constants, sizeof(*load_constants) * (size_t)cap_load_units);
     }
+    load_units[n_load_units] = code;
+    load_constants[n_load_units] = constants;
+    n_load_units++;
 }
 
 /* Load and execute beerlang source from a buffer (used by tar require) */
@@ -4642,15 +4670,7 @@ static Value native_eval(VM* caller_vm, int argc, Value* argv) {
 
     object_release(task_val);
 
-    if (n_load_units < MAX_LOAD_UNITS) {
-        load_units[n_load_units] = code;
-        load_constants[n_load_units] = constants;
-        n_load_units++;
-    } else {
-        fprintf(stderr, "eval: warning: too many compiled units\n");
-        compiled_code_free(code);
-        free(constants);
-    }
+    core_retain_unit(code, constants);
 
     return result;
 }
@@ -4727,15 +4747,7 @@ static Value load_from_buffer(VM* caller_vm, const char* source, const char* nam
 
         object_release(task_val);
 
-        if (n_load_units < MAX_LOAD_UNITS) {
-            load_units[n_load_units] = code;
-            load_constants[n_load_units] = constants;
-            n_load_units++;
-        } else {
-            fprintf(stderr, "load: warning: too many compiled units\n");
-            compiled_code_free(code);
-            free(constants);
-        }
+        core_retain_unit(code, constants);
     }
 
     object_release(forms);
@@ -4850,15 +4862,7 @@ Value native_load(VM* caller_vm, int argc, Value* argv) {
         object_release(task_val);
 
         /* Keep compiled code alive (functions reference it) */
-        if (n_load_units < MAX_LOAD_UNITS) {
-            load_units[n_load_units] = code;
-            load_constants[n_load_units] = constants;
-            n_load_units++;
-        } else {
-            fprintf(stderr, "load: warning: too many compiled units\n");
-            compiled_code_free(code);
-            free(constants);
-        }
+        core_retain_unit(code, constants);
     }
 
     object_release(forms);

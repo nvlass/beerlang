@@ -121,6 +121,15 @@ All multi-byte operands are little-endian. The operand sizes are:
 | `OP_MAKE_CLOSURE` | multiple fields | 12 bytes total | raw emit (see below) |
 
 `OP_MAKE_CLOSURE` encoding: `code_offset(u32) n_locals(u16) n_closed(u16) arity(i16) name_idx(u16)`.
+For a multi-arity `fn`, `name_idx` points at a template function that carries
+the name and the arity table (one `(arity, code_offset)` entry per clause);
+the operands describe the first clause.
+
+Multi-arity `fn`: the clauses' bodies are compiled one after another behind
+a single skip `JUMP`, each with its own lexical env, locals, `ENTER` and
+`recur` target, but sharing one capture list, so all arities share one
+closure environment. `CALL`/`TAIL_CALL` pick the entry by argument count
+(`function_select_arity`).
 
 ## Compilation Pipeline
 

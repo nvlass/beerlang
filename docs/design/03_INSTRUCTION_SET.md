@@ -97,7 +97,7 @@ Note: `JUMP_IF_FALSE` peeks at the stack (does not consume the value). The compi
 
 | Opcode | Instruction | Operands | Description |
 |--------|-------------|----------|-------------|
-| 0x80 | `MAKE_CLOSURE` | `u32` code_offset, `u16` n_locals, `u16` n_closed, `u16` arity, `u16` name_idx | Create a closure object. `code_offset` is the byte offset into the code buffer. `n_closed` captured values are popped from the stack. `name_idx` is a constant pool index for the function name (0xFFFF = anonymous). |
+| 0x80 | `MAKE_CLOSURE` | `u32` code_offset, `u16` n_locals, `u16` n_closed, `u16` arity, `u16` name_idx | Create a closure object. `code_offset` is the byte offset into the code buffer. `n_closed` captured values are popped from the stack. `name_idx` is a constant pool index for the function name (0xFFFF = anonymous); for a multi-arity fn it is a template function instead, whose name and arity table the closure copies. |
 
 ---
 

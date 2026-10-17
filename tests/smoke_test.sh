@@ -1104,6 +1104,14 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# --- bytecode verifier (asm input is checked before it can run) ---
+check '((asm {:code [[:ENTER 0] [:PUSH_INT 41] [:RETURN]] :constants [] :arity 0}))' '41'
+check '((asm (disasm (fn [x] (if (> x 1) :big :small)))) 5)' ':big'
+check '(try (asm {:code [[:ENTER 0] [:PUSH_INT 1] [:INC] [:RETURN]] :constants [] :arity 0}) (catch e (:message e)))' '"asm: invalid bytecode: invalid opcode 0x36 at offset 12"'
+check '(try (asm {:code [[:ENTER 0] [:PUSH_INT 1]] :constants [] :arity 0}) (catch e (:message e)))' '"asm: invalid bytecode: the last instruction (offset 3) falls through past the end of the code"'
+check '(try (asm {:code [[:ENTER 0] [:PUSH_CONST 5] [:RETURN]] :constants [] :arity 0}) (catch e (:message e)))' '"asm: invalid bytecode: PUSH_CONST at offset 3: constant 5 out of range (0 constants)"'
+check '(try (asm {:code [[:ENTER 0] [:LOAD_VAR 0] [:RETURN]] :constants [42] :arity 0}) (catch e (:message e)))' '"asm: invalid bytecode: LOAD_VAR at offset 3: constant 0 is not a symbol"'
+
 # --- finally runs when an exception leaves the try ---
 check_multi '(def log (atom []))
 (defn note [x] (swap! log conj x) x)
@@ -1127,6 +1135,14 @@ check_multi '(defn ma ([] :zero) ([a] [:one a]) ([a & more] [:var a more]))
 [(ma) (ma 1) (ma 1 2 3)]' '[:zero [:one 1] [:var 1 (2 3)]]' 'multi-arity with variadic arity'
 check_multi '(defn sum-to ([n] (sum-to n 0)) ([n acc] (if (= n 0) acc (recur (- n 1) (+ acc n)))))
 (sum-to 100000)' '5000050000' 'multi-arity recur'
+check '[((fn ([] 0) ([a] a) ([a b & r] r)) 1 2 3 4) ((fn named ([n] (named n 0)) ([n acc] (if (= n 0) acc (recur (- n 1) (+ acc n))))) 1000)]' '[(3 4) 500500]'
+check_multi '(defn mk [k] (fn ([x] (+ x k)) ([x y] (* (+ x y) k))))
+(def h (mk 10))
+[(h 1) (h 1 2) ((fn ([[a b]] (+ a b)) ([[a b] c] (* (+ a b) c))) [1 2] 10)]' '[11 30 30]' 'multi-arity closures and destructuring'
+check '(try ((fn ([a] a) ([a b] b)) 1 2 3) (catch e (:message e)))' '"CALL: wrong number of arguments (3) passed to anonymous-fn:<repl>"'
+check '(fn ([a] 1) ([b] 2))' "Compile error: fn: can't have two arities with the same number of params"
+check '(fn ([a b c] 1) ([a & r] 2))' "Compile error: fn: can't have a fixed arity with more params than the variadic arity"
+check '(:arities (disasm (fn ([a] a) ([a b & c] c))))' '[1 -3]'
 
 # --- beer.http keep-alive ---
 HTTP_KA=$(mktemp /tmp/beer_http_ka_XXXXXX.beer)

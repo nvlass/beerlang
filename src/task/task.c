@@ -104,6 +104,7 @@ Value task_new(Value fn, int argc, Value* argv, Scheduler* sched) {
 
     vm_load_code(vm, code, (int)pc);
     vm_load_constants(vm, consts, n_consts);
+    vm_trust_loaded_code(vm);  /* generated call stub */
     task->own_code = code;
     task->own_constants = consts;
     task->n_own_constants = n_consts;

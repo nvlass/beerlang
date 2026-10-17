@@ -119,6 +119,7 @@ Value atom_swap(VM* vm, Value atom_val, Value fn, int extra_argc, Value* extra_a
     temp_vm->scheduler = vm->scheduler;
     vm_load_code(temp_vm, code, (int)pc);
     vm_load_constants(temp_vm, consts, n_consts);
+    vm_trust_loaded_code(temp_vm);  /* generated call stub */
     vm_run(temp_vm);
 
     Value result = VALUE_NIL;

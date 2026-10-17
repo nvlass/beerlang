@@ -9,72 +9,13 @@
   (let* [has-doc (string? (first fdecl))
          docstring (if has-doc (first fdecl) nil)
          fdecl (if has-doc (rest fdecl) fdecl)
-         base (if (vector? (first fdecl))
-                ; Single arity
-                (list (quote def) name (cons (quote fn) (cons name fdecl)))
-                ; Multi-arity
-                (let* [arities fdecl
-                       clauses (__multi-arity-clauses arities)
-                       err-expr (list (quote __arity-error)
-                                      (list (quote str)
-                                            (str name)
-                                            " called with wrong number of args: "
-                                            (list (quote count) (quote __args))))
-                       full-clauses (concat clauses (list :else err-expr))]
-                  (list (quote def) name
-                        (list (quote fn) name (quote [& __args])
-                              (cons (quote cond) full-clauses)))))]
+         ; fn handles both [params] body... and ([params] body...) clauses
+         base (list (quote def) name (cons (quote fn) (cons name fdecl)))]
     (if has-doc
       (list (quote do) base
             (list (quote alter-meta!) (list (quote quote) name) (quote assoc) :doc docstring)
             name)
       base)))
-
-; Helper: build cond clauses for multi-arity dispatch. Each arity's fn is
-; called directly with its args pulled out of __args (no apply, which would
-; run it in a temp VM where I/O can't park). Fixed arities match on exact
-; count; a variadic arity [a & more] matches (>= count 1), goes last, and
-; receives more as a seq, like recur in a Clojure variadic fn.
-(defn __arg-exprs [n]
-  (loop [i 0 acc []]
-    (if (< i n)
-      (recur (+ i 1) (conj acc (list (quote nth) (quote __args) i)))
-      acc)))
-
-(defn __args-from [n args]
-  (if (= n 0) args (recur (- n 1) (rest args))))
-
-(defn __arity-clause [arity]
-  (let* [params (first arity)
-         body (rest arity)
-         amp (loop [i 0] (if (< i (count params)) (if (= (nth params i) (quote &)) i (recur (+ i 1))) -1))]
-    (if (< amp 0)
-      (list (list (quote =) (list (quote count) (quote __args)) (count params))
-            (cons (cons (quote fn) (cons params body)) (__arg-exprs (count params))))
-      (let* [fixed (subvec params 0 amp)
-             rest-param (nth params (+ amp 1))]
-        (list (list (quote >=) (list (quote count) (quote __args)) amp)
-              (cons (cons (quote fn) (cons (conj fixed rest-param) body))
-                    (conj (__arg-exprs amp) (list (quote __args-from) amp (quote __args)))))))))
-
-; Only natives and loop here: this runs while core.beer is still loading
-(defn __variadic-arity? [arity]
-  (let* [params (first arity)]
-    (loop [i 0]
-      (if (< i (count params))
-        (if (= (nth params i) (quote &)) true (recur (+ i 1)))
-        false))))
-
-(defn __multi-arity-clauses [arities]
-  (loop [as arities fixed '() var '()]
-    (if (empty? as)
-      (loop [as (concat fixed var) out '()]
-        (if (empty? as)
-          out
-          (recur (rest as) (concat out (__arity-clause (first as))))))
-      (if (__variadic-arity? (first as))
-        (recur (rest as) fixed (concat var (list (first as))))
-        (recur (rest as) (concat fixed (list (first as))) var)))))
 
 ; doc: print documentation for a symbol
 (defmacro doc [sym]
@@ -192,8 +133,6 @@
       (list 'when tmp
         (cons 'let (cons [(nth bindings 0) tmp] body))))))
 
-; Arity error helper (until we have throw)
-(defn __arity-error [msg] (println "ERROR:" msg) nil)
 
 ; --- Numeric utilities ---
 (defn inc [x] (+ x 1))

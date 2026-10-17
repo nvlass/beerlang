@@ -29,7 +29,6 @@
 
 #define INPUT_BUFFER_SIZE   4096
 #define ACCUM_BUFFER_SIZE  65536   /* max accumulated multi-line input */
-#define MAX_COMPILED_UNITS  1024
 
 /* ----------------------------------------------------------------
  * is_form_complete — check whether SRC contains at least one
@@ -99,9 +98,22 @@ static void maybe_dump_leaks(void) {
  * ================================================================ */
 
 /* Kept-alive compiled units so function pointers stay valid */
-static CompiledCode* compiled_units[MAX_COMPILED_UNITS];
-static Value* constant_arrays[MAX_COMPILED_UNITS];
+/* Every compiled unit stays alive until exit: functions point into it */
+static CompiledCode** compiled_units = NULL;
+static Value** constant_arrays = NULL;
 static int n_compiled_units = 0;
+static int cap_compiled_units = 0;
+
+static void keep_unit(CompiledCode* code, Value* constants) {
+    if (n_compiled_units == cap_compiled_units) {
+        cap_compiled_units = cap_compiled_units ? cap_compiled_units * 2 : 64;
+        compiled_units = realloc(compiled_units, sizeof(*compiled_units) * (size_t)cap_compiled_units);
+        constant_arrays = realloc(constant_arrays, sizeof(*constant_arrays) * (size_t)cap_compiled_units);
+    }
+    compiled_units[n_compiled_units] = code;
+    constant_arrays[n_compiled_units] = constants;
+    n_compiled_units++;
+}
 
 /* Evaluate a single form string. Returns 0 on success, 1 on error. */
 static int eval_form(const char* source, const char* filename) {
@@ -163,14 +175,7 @@ static int eval_form(const char* source, const char* filename) {
 
     object_release(task_val);
 
-    if (n_compiled_units < MAX_COMPILED_UNITS) {
-        compiled_units[n_compiled_units] = code;
-        constant_arrays[n_compiled_units] = constants;
-        n_compiled_units++;
-    } else {
-        compiled_code_free(code);
-        free(constants);
-    }
+    keep_unit(code, constants);
 
     return had_error;
 }
@@ -239,14 +244,7 @@ static int cmd_eval_exprs(const char** exprs, int n) {
                 if (is_pointer(res)) object_release(res);
             }
             object_release(task_val);
-            if (n_compiled_units < MAX_COMPILED_UNITS) {
-                compiled_units[n_compiled_units] = code;
-                constant_arrays[n_compiled_units] = constants;
-                n_compiled_units++;
-            } else {
-                compiled_code_free(code);
-                free(constants);
-            }
+            keep_unit(code, constants);
             compiler_free(compiler);
             if (result) break;
         }
@@ -533,15 +531,7 @@ static int run_repl(void) {
 
             object_release(task_val);
 
-            if (n_compiled_units < MAX_COMPILED_UNITS) {
-                compiled_units[n_compiled_units] = code;
-                constant_arrays[n_compiled_units] = constants;
-                n_compiled_units++;
-            } else {
-                fprintf(stderr, "Warning: too many compiled units\n");
-                compiled_code_free(code);
-                free(constants);
-            }
+            keep_unit(code, constants);
 
             compiler_free(compiler);
         }
@@ -637,6 +627,9 @@ int main(int argc, char** argv) {
     log_init();
     if (trace) {
         log_set_level(ULOG_LEVEL_TRACE);
+#if !defined(DEBUG) && !defined(VM_TRACE)
+        fprintf(stderr, "note: per-opcode tracing is only built into debug builds (make debug)\n");
+#endif
     }
     memory_init();
     symbol_init();
@@ -701,6 +694,8 @@ int main(int argc, char** argv) {
         compiled_code_free(compiled_units[i]);
         free(constant_arrays[i]);
     }
+    free(compiled_units);
+    free(constant_arrays);
 
 #ifdef BEER_TRACK_ALLOCS
     maybe_dump_leaks();

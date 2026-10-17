@@ -62,8 +62,22 @@ Performance — investigate / optimize:
 - [investigate] keep `pc`/`sp`/`code` in locals in the dispatch loop; write
   back only around calls into C, yields and errors. Measure on both
   platforms (the dispatch rewrite above was a regression on one)
-- multi-arity calls are ~2x a plain call (args packed into a list, counted,
-  pulled back out with nth); dispatch on argc inside the fn instead
+- Multi-arity fns are native (done 2026-10-17): one Function with an arity
+  table, picked by argc in CALL/TAIL_CALL; `multi-arity-call` 382 -> 189 ns.
+  Side effect: +1-3% on other benchmarks (code layout, measured with
+  `make bench REF=`), check on Linux
+- Profile of 23c6ce8 (macOS/clang, Instruments; empty loop / fib / pure JSON
+  parse): dispatch is 33% / 27% / 27% of all time, CALL 25-29% including the
+  natives it runs, LOAD_VAR 12-15%. Cheap follow-ups:
+  - [done] running/error/yielded share one word, tested with one compare;
+    bytecode verifier (verify.c) lets release builds drop per-instruction
+    pc/operand/opcode/constant checks: -25% to -35% on VM-bound benchmarks.
+    Opcode tracing is debug-build-only now. Next candidates: stack-depth
+    verification (would drop push/pop and local-index checks)
+  - [todo] force-inline push_value/pop_value: clang keeps an out-of-line copy
+    that costs 5-6%
+  - [investigate] phase 1 (pc/code in registers) is 1-4% faster on clang but
+    3-8% slower on GCC; get a Linux `perf` breakdown before the sp phase
 - [investigate] Inline core fns at compile time: `OP_ADD`/`OP_LT`/… exist in
   the VM but the compiler never emits them, so `(+ k 1)` is LOAD_VAR + CALL
   of a native. Clojure inlines via `:inline` metadata on core vars

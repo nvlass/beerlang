@@ -120,8 +120,7 @@ typedef struct VM {
     int num_constants;
 
     /* Cooperative multitasking */
-    int yield_countdown;        /* Instructions until auto-yield (0 = disabled) */
-    bool yielded;               /* Set by OP_YIELD or countdown expiry */
+    int yield_countdown;        /* Safe points until auto-yield (0 = disabled) */
     bool native_blocked;        /* Set by native fn that needs I/O retry */
     int64_t sleep_wake_at;      /* CLOCK_MONOTONIC ns deadline for (sleep ms) — 0 = not sleeping */
     bool write_resumed;         /* Retrying a write native whose data is already buffered */
@@ -130,14 +129,29 @@ typedef struct VM {
     int64_t read_deadline;      /* CLOCK_MONOTONIC ns deadline of a parked timed read — 0 = none */
     struct Scheduler* scheduler; /* Back-pointer (NULL for standalone VMs) */
 
-    /* State */
-    bool running;
-    bool error;
+    /* State. running/error/yielded share one word so vm_run's loop tests
+     * all three with a single compare (see vm_run_state_go) */
+    union {
+        struct {
+            bool running;
+            bool error;
+            bool yielded;       /* Set by OP_YIELD, a parking native or countdown expiry */
+            bool state_pad;     /* Always false */
+        };
+        uint32_t run_state;
+    };
+    bool needs_verify;          /* Code loaded by vm_load_*: verify before running */
     const char* error_msg;
     char error_buf[256];  /* Buffer for dynamic error messages */
     bool native_throw;   /* Native requested a catchable throw; exception in vm->exception */
     Value thrown_exception; /* Exception value saved when OP_THROW finds no handler (for temp-VM re-throw) */
 } VM;
+
+/* run_state of a VM that is running, with no error and not yielded */
+static inline uint32_t vm_run_state_go(void) {
+    union { struct { bool r, e, y, p; } s; uint32_t w; } u = { .s = { true, false, false, false } };
+    return u.w;
+}
 
 /* VM API */
 VM* vm_new(int stack_size);
@@ -145,6 +159,11 @@ void vm_free(VM* vm);
 
 void vm_load_code(VM* vm, uint8_t* code, int size);
 void vm_load_constants(VM* vm, Value* constants, int num);
+
+/* Skip verification of the loaded code. Only for stubs the runtime itself
+ * generates (PUSH_CONST... CALL n HALT); anything compiled, assembled or
+ * handed in by an embedder must stay verified. */
+static inline void vm_trust_loaded_code(VM* vm) { vm->needs_verify = false; }
 
 void vm_run(VM* vm);
 void vm_step(VM* vm);

@@ -29,6 +29,20 @@ Create an anonymous function. Optionally named for self-recursion.
 (fn [x y] (+ x y))
 (fn factorial [n] (if (< n 2) 1 (* n (factorial (- n 1)))))
 ```
+Multiple arities, as in Clojure: each clause is `([params] body...)`, and a
+call runs the clause matching its argument count. At most one clause may be
+variadic, and it must take at least as many fixed params as any other
+clause. Each arity has its own `recur` target; all share one closure.
+```clojure
+(fn greet
+  ([name] (greet name "Hello"))
+  ([name greeting] (str greeting ", " name "!"))
+  ([name greeting & more] (str greeting ", " name " and " (count more) " more")))
+```
+A call with no matching arity throws a catchable
+`"CALL: wrong number of arguments (n) passed to <name>"`. `defn` with
+several arities expands to this form, so multi-arity calls cost the same as
+single-arity ones.
 
 ### `let*`
 Lexical bindings (primitive form — prefer `let` macro).
@@ -745,6 +759,15 @@ Assemble a data map back into a callable function:
 ```
 
 The map must have `:code`, `:constants`, and `:arity`. Round-tripping `(asm (disasm f))` produces an equivalent function.
+
+The assembled code is verified before `asm` returns, because the VM does not
+re-check it while running: every opcode must be one the VM executes, operands
+must fit, jumps must land on instructions, the last instruction must not fall
+through past the end (end with `:RETURN`, `:HALT`, `:JUMP` or `:THROW`),
+constant indices must be in range and `:LOAD_VAR`/`:STORE_VAR` must name a
+symbol. Otherwise `asm` throws, e.g.
+`"asm: invalid bytecode: the last instruction (offset 3) falls through past the end of the code"`.
+Stack depth and local indices are still checked at run time.
 
 ### Use cases
 

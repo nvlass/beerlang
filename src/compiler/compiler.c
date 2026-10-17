@@ -844,6 +844,7 @@ static Value expand_macro(Compiler* c, Value macro_fn, Value form) {
     VM* vm = vm_new(256);
     vm_load_code(vm, code, (int)pc);
     vm_load_constants(vm, consts, n_consts);
+    vm_trust_loaded_code(vm);  /* generated call stub */
     vm_run(vm);
 
     Value result = VALUE_NIL;
@@ -1298,64 +1299,85 @@ static Value destructure_fn_params(Value form) {
 
 static void compile_fn_form(Compiler* c, Value form);
 
+/* (fn name? ([params] body...) ...): rewrite each clause's destructuring
+ * params; nil if there's nothing to rewrite */
+static Value destructure_multi_arity(Value form) {
+    Value rest = cdr(form);
+    Value name = VALUE_NIL;
+    if (is_cons(rest) && is_pointer(car(rest)) && object_type(car(rest)) == TYPE_SYMBOL) {
+        name = car(rest);
+        rest = cdr(rest);
+    }
+    Value fn_sym = car(form);
+    Value clauses = VALUE_NIL;   /* rebuilt in reverse, then reversed */
+    bool any = false;
+    for (Value cl = rest; is_cons(cl); cl = cdr(cl)) {
+        Value clause = car(cl);
+        Value clause_form = cons(fn_sym, clause);
+        Value rewritten = destructure_fn_params(clause_form);
+        Value use = is_nil(rewritten) ? clause : cdr(rewritten);
+        if (!is_nil(rewritten)) any = true;
+        Value next = cons(use, clauses);
+        object_release(clauses);
+        clauses = next;
+        object_release(clause_form);
+        if (!is_nil(rewritten)) object_release(rewritten);
+    }
+    if (!any) {
+        object_release(clauses);
+        return VALUE_NIL;
+    }
+    Value out = VALUE_NIL;
+    for (Value cl = clauses; is_cons(cl); cl = cdr(cl)) {
+        Value next = cons(car(cl), out);
+        object_release(out);
+        out = next;
+    }
+    object_release(clauses);
+    if (!is_nil(name)) {
+        Value with_name = cons(name, out);
+        object_release(out);
+        out = with_name;
+    }
+    Value result = cons(fn_sym, out);
+    object_release(out);
+    return result;
+}
+
+static void compile_fn_form(Compiler* c, Value form);
+
 static void compile_fn(Compiler* c, Value form) {
-    Value rewritten = destructure_fn_params(form);
+    Value rest = cdr(form);
+    if (is_cons(rest) && is_pointer(car(rest)) && object_type(car(rest)) == TYPE_SYMBOL)
+        rest = cdr(rest);
+    bool multi = is_cons(rest) && is_cons(car(rest));
+    Value rewritten = multi ? destructure_multi_arity(form) : destructure_fn_params(form);
     compile_fn_form(c, is_nil(rewritten) ? form : rewritten);
     if (!is_nil(rewritten)) object_release(rewritten);
 }
 
-static void compile_fn_form(Compiler* c, Value form) {
-    /* Parse: (fn [params] body...) or (fn name [params] body...) */
-    Value rest = cdr(form);  /* Skip 'fn' symbol */
-
-    /* Check for named function */
-    Value name = VALUE_NIL;
-    Value params_vec = VALUE_NIL;
-    Value body = VALUE_NIL;
-
-    if (!is_cons(rest)) {
-        compile_error(c, "fn: missing parameter vector");
-        return;
-    }
-
-    Value first = car(rest);
-    rest = cdr(rest);
-
-    /* Is it a named function? (fn name [params] body...) */
-    if (is_pointer(first) && object_type(first) == TYPE_SYMBOL) {
-        name = first;
-        if (!is_cons(rest)) {
-            compile_error(c, "fn: missing parameter vector after name");
-            return;
-        }
-        params_vec = car(rest);
-        body = cdr(rest);
-    } else {
-        /* Anonymous function: (fn [params] body...) */
-        params_vec = first;
-        body = rest;
-    }
-
-    /* Validate parameter vector */
+/* Compile one arity's body at the current offset: params become locals
+ * 0.., the fn name (if any) the next one. Sets *arity_out (>= 0 fixed,
+ * -(required+1) variadic) and *n_locals_out. Captures go to c->captures,
+ * shared by all arities of the fn. False on a compile error. */
+static bool compile_fn_arity(Compiler* c, Value name, Value params_vec, Value body,
+                             int* arity_out, int* n_locals_out) {
     if (!is_pointer(params_vec) || object_type(params_vec) != TYPE_VECTOR) {
         compile_error(c, "fn: parameter list must be a vector");
-        return;
+        return false;
     }
-
-    /* Validate body exists */
     if (!is_cons(body)) {
         compile_error(c, "fn: missing body");
-        return;
+        return false;
     }
 
     /* Parse parameters, checking for & rest args */
-    int arity;        /* call-site arity: negative for variadic */
-    int total_params;  /* actual number of parameter locals */
+    int arity;
+    int total_params;
     bool is_variadic = false;
     int required_count = 0;
     int ampersand_pos = -1;
 
-    /* Scan for & symbol */
     for (int i = 0; i < (int)vector_length(params_vec); i++) {
         Value param = vector_get(params_vec, (size_t)i);
         if (is_pointer(param) && object_type(param) == TYPE_SYMBOL
@@ -1368,119 +1390,195 @@ static void compile_fn_form(Compiler* c, Value form) {
     if (ampersand_pos >= 0) {
         is_variadic = true;
         required_count = ampersand_pos;
-        /* Validate: & must be followed by exactly one symbol */
         if ((int)vector_length(params_vec) != ampersand_pos + 2) {
             compile_error(c, "fn: & must be followed by exactly one parameter");
-            return;
+            return false;
         }
         Value rest_param = vector_get(params_vec, (size_t)(ampersand_pos + 1));
         if (!is_pointer(rest_param) || object_type(rest_param) != TYPE_SYMBOL) {
             compile_error(c, "fn: rest parameter after & must be a symbol");
-            return;
+            return false;
         }
         arity = -(required_count + 1);
-        total_params = required_count + 1;  /* required + rest */
+        total_params = required_count + 1;
     } else {
         required_count = (int)vector_length(params_vec);
         arity = required_count;
         total_params = required_count;
     }
 
-    /* Emit JUMP to skip over function body (we'll patch this later) */
-    size_t skip_jump_offset = bytecode_current_offset(c->bytecode);
-    emit_int32(c, OP_JUMP, 0);  /* Placeholder (int32 offset) */
-
-    /* Remember code offset where function starts */
-    uint32_t fn_code_offset = (uint32_t)bytecode_current_offset(c->bytecode);
-
-    /* Save parent environment and captures, set up new ones */
     LexicalEnv* parent_env = c->env;
-    CaptureList* parent_captures = c->captures;
-    CaptureList fn_captures = { .count = 0 };
-    c->captures = &fn_captures;
     c->env = lexical_env_new(parent_env, true);  /* is_function = true */
 
-    /* Add required parameters as locals */
     for (int i = 0; i < required_count; i++) {
         Value param = vector_get(params_vec, (size_t)i);
         if (!is_pointer(param) || object_type(param) != TYPE_SYMBOL) {
             compile_error(c, "fn: parameter must be a symbol");
             lexical_env_free(c->env);
             c->env = parent_env;
-            c->captures = parent_captures;
-            return;
+            return false;
         }
         lexical_env_add_local(c->env, param);
     }
-
-    /* Add rest parameter if variadic */
     if (is_variadic) {
-        Value rest_param = vector_get(params_vec, (size_t)(ampersand_pos + 1));
-        lexical_env_add_local(c->env, rest_param);
+        lexical_env_add_local(c->env, vector_get(params_vec, (size_t)(ampersand_pos + 1)));
     }
-
     /* For named functions, add the name as a local (for recursion) */
     if (!is_nil(name)) {
         lexical_env_add_local(c->env, name);
     }
 
-    /* Save parent's local_count; each fn has its own local tracking */
+    /* Each arity has its own local tracking */
     int saved_local_count = c->local_count;
     c->local_count = total_params + (is_nil(name) ? 0 : 1);
 
-    /* Emit ENTER instruction with placeholder — we'll patch it after body compilation */
+    /* ENTER with placeholder — patched after the body */
     size_t enter_operand_offset = bytecode_current_offset(c->bytecode);
-    emit_uint16(c, OP_ENTER, 0);  /* Placeholder */
+    emit_uint16(c, OP_ENTER, 0);
 
     /* For named functions, store the function into its self-reference local */
     if (!is_nil(name)) {
-        int name_slot = total_params;  /* name is added after params */
         emit_op(c, OP_LOAD_SELF);
-        emit_uint16(c, OP_STORE_LOCAL, (uint16_t)name_slot);
+        emit_uint16(c, OP_STORE_LOCAL, (uint16_t)total_params);
     }
 
-    /* Set recur target so (recur ...) targets this fn's entry */
+    /* (recur ...) targets this arity's entry */
     RecurTarget* saved_recur_target = c->recur_target;
     RecurTarget fn_recur_target;
     fn_recur_target.jump_pc = (uint32_t)bytecode_current_offset(c->bytecode);
-    fn_recur_target.first_binding_index = 0;  /* first param is local 0 */
+    fn_recur_target.first_binding_index = 0;
     fn_recur_target.n_bindings = total_params;
     c->recur_target = &fn_recur_target;
     int saved_no_tail_calls = c->no_tail_calls;
     c->no_tail_calls = 0;
 
-    /* Compile function body (implicit do) */
+    /* Body (implicit do); the last expression is in tail position */
     while (is_cons(body)) {
         Value expr = car(body);
         Value rest_body = cdr(body);
         bool is_last = !is_cons(rest_body);
-
-        /* Last expression is in tail position (could be tail call) */
         compile_expr(c, expr, is_last);
-
         if (!is_last) {
-            /* Not last => discard result */
             emit_op(c, OP_POP);
         }
-
         body = rest_body;
     }
-
-    /* Emit RETURN */
     emit_op(c, OP_RETURN);
 
-    /* Patch ENTER with the actual number of additional locals */
-    int additional_locals = c->local_count - total_params;
     bytecode_patch_uint16(c->bytecode, enter_operand_offset + 1,
-                          (uint16_t)additional_locals);
+                          (uint16_t)(c->local_count - total_params));
 
-    /* n_locals for function object = total locals in this fn */
-    int n_locals = c->local_count;
+    *arity_out = arity;
+    *n_locals_out = c->local_count;
 
-    /* Restore parent's local_count and recur target */
     c->local_count = saved_local_count;
     c->recur_target = saved_recur_target;
     c->no_tail_calls = saved_no_tail_calls;
+    lexical_env_free(c->env);
+    c->env = parent_env;
+    return true;
+}
+
+#define MAX_FN_ARITIES 16
+
+static void compile_fn_form(Compiler* c, Value form) {
+    /* (fn name? [params] body...) or (fn name? ([params] body...) ...) */
+    Value rest = cdr(form);  /* Skip 'fn' symbol */
+    Value name = VALUE_NIL;
+
+    if (!is_cons(rest)) {
+        compile_error(c, "fn: missing parameter vector");
+        return;
+    }
+    if (is_pointer(car(rest)) && object_type(car(rest)) == TYPE_SYMBOL) {
+        name = car(rest);
+        rest = cdr(rest);
+        if (!is_cons(rest)) {
+            compile_error(c, "fn: missing parameter vector after name");
+            return;
+        }
+    }
+
+    /* Clauses: one (params . body) for the single-arity form, else each
+     * ([params] body...) list */
+    Value clause_params[MAX_FN_ARITIES];
+    Value clause_bodies[MAX_FN_ARITIES];
+    int n_clauses = 0;
+    if (is_cons(car(rest))) {
+        for (Value cl = rest; is_cons(cl); cl = cdr(cl)) {
+            Value clause = car(cl);
+            if (!is_cons(clause)) {
+                compile_error(c, "fn: each arity must be a list ([params] body...)");
+                return;
+            }
+            if (n_clauses == MAX_FN_ARITIES) {
+                compile_error(c, "fn: too many arities");
+                return;
+            }
+            clause_params[n_clauses] = car(clause);
+            clause_bodies[n_clauses] = cdr(clause);
+            n_clauses++;
+        }
+    } else {
+        clause_params[0] = car(rest);
+        clause_bodies[0] = cdr(rest);
+        n_clauses = 1;
+    }
+
+    /* Jump over the bodies; patched below */
+    size_t skip_jump_offset = bytecode_current_offset(c->bytecode);
+    emit_int32(c, OP_JUMP, 0);
+
+    /* All arities share one capture list, so one closure environment */
+    CaptureList* parent_captures = c->captures;
+    CaptureList fn_captures = { .count = 0 };
+    c->captures = &fn_captures;
+
+    FnArity arities[MAX_FN_ARITIES];
+    int n_locals = 0;
+    for (int i = 0; i < n_clauses; i++) {
+        arities[i].code_offset = (uint32_t)bytecode_current_offset(c->bytecode);
+        int locals = 0;
+        if (!compile_fn_arity(c, name, clause_params[i], clause_bodies[i],
+                              &arities[i].arity, &locals)) {
+            c->captures = parent_captures;
+            return;
+        }
+        if (locals > n_locals) n_locals = locals;
+    }
+
+    /* Clojure's rules: distinct fixed arities, at most one variadic arity,
+     * which takes at least as many args as any fixed one */
+    int variadic_required = -1;
+    int max_fixed = -1;
+    for (int i = 0; i < n_clauses; i++) {
+        int a = arities[i].arity;
+        if (a < 0) {
+            if (variadic_required >= 0) {
+                compile_error(c, "fn: can't have more than one variadic arity");
+                c->captures = parent_captures;
+                return;
+            }
+            variadic_required = -(a + 1);
+        } else {
+            for (int j = 0; j < i; j++) {
+                if (arities[j].arity == a) {
+                    compile_error(c, "fn: can't have two arities with the same number of params");
+                    c->captures = parent_captures;
+                    return;
+                }
+            }
+            if (a > max_fixed) max_fixed = a;
+        }
+    }
+    if (variadic_required >= 0 && max_fixed > variadic_required) {
+        compile_error(c, "fn: can't have a fixed arity with more params than the variadic arity");
+        c->captures = parent_captures;
+        return;
+    }
+
+    int arity = arities[0].arity;
+    uint32_t fn_code_offset = arities[0].code_offset;
 
     /* Patch the skip jump (offset is relative to PC after reading the offset) */
     size_t after_fn = bytecode_current_offset(c->bytecode);
@@ -1493,10 +1591,6 @@ static void compile_fn_form(Compiler* c, Value form) {
     if (n_closed > 0) {
         memcpy(captures_snapshot, fn_captures.entries, n_closed * sizeof(CaptureEntry));
     }
-
-    /* Restore parent environment and captures */
-    lexical_env_free(c->env);
-    c->env = parent_env;
     c->captures = parent_captures;
 
     /* Build function name */
@@ -1510,6 +1604,7 @@ static void compile_fn_form(Compiler* c, Value form) {
     if (n_closed == 0) {
         /* Plain function — compile-time constant, no captures */
         Value fn_obj = function_new(arity, fn_code_offset, (uint16_t)n_locals, fn_name_buf);
+        if (n_clauses > 1) function_set_arities(fn_obj, arities, (uint16_t)n_clauses);
         int fn_idx = constant_pool_add(c->constants, fn_obj);
         emit_uint32(c, OP_PUSH_CONST, (uint32_t)fn_idx);
         object_release(fn_obj);
@@ -1546,10 +1641,17 @@ static void compile_fn_form(Compiler* c, Value form) {
             }
         }
 
-        /* Add function name to constant pool for MAKE_CLOSURE */
-        Value name_str = string_from_cstr(fn_name_buf);
-        int name_idx = constant_pool_add(c->constants, name_str);
-        object_release(name_str);
+        /* MAKE_CLOSURE's name constant: the name, or for a multi-arity fn
+         * a template carrying the name and the arity table */
+        Value name_const;
+        if (n_clauses > 1) {
+            name_const = function_new(arity, fn_code_offset, (uint16_t)n_locals, fn_name_buf);
+            function_set_arities(name_const, arities, (uint16_t)n_clauses);
+        } else {
+            name_const = string_from_cstr(fn_name_buf);
+        }
+        int name_idx = constant_pool_add(c->constants, name_const);
+        object_release(name_const);
 
         /* Emit MAKE_CLOSURE: code_offset(u32) n_locals(u16) n_closed(u16) arity(i16) name_idx(u16) */
         bytecode_emit_byte(c->bytecode, OP_MAKE_CLOSURE);

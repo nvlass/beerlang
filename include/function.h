@@ -9,6 +9,13 @@
 
 #include "value.h"
 
+/* One arity of a multi-arity fn: arity as in Function.arity (>= 0 fixed,
+ * -(required+1) variadic) and where its body starts */
+typedef struct FnArity {
+    int arity;
+    uint32_t code_offset;
+} FnArity;
+
 /* Function object structure */
 typedef struct Function {
     struct Object header;
@@ -25,7 +32,9 @@ typedef struct Function {
     char* ns_name;           /* Defining namespace name (owned, NULL = current) */
     struct Namespace* home_ns; /* ns_name resolved lazily; namespaces are never removed */
     Value    meta;           /* Metadata map (or nil) */
-    Value    closed[];       /* Flexible array: closure environment */
+    uint16_t n_arities;      /* Multi-arity fn: entries in arities (0 = single arity) */
+    FnArity* arities;        /* Owned; arity/code_offset above mirror arities[0] */
+    Value    closed[];       /* Flexible array: closure environment, shared by all arities */
 } Function;
 
 /* Create a new function (no closure) */
@@ -66,6 +75,25 @@ static inline const char* function_ns_name(Value fn) {
     return ((Function*)untag_pointer(fn))->ns_name;
 }
 void function_set_ns_name(Value fn, const char* ns_name);
+
+/* Multi-arity: copy n entries into fn (fn's arity/code_offset become entry 0) */
+void function_set_arities(Value fn, const FnArity* arities, uint16_t n);
+
+/* Entry to run for a call with n_args arguments: the exact fixed arity, else
+ * the variadic one if n_args covers its required args. False if none fits.
+ * Single-arity fns take the inline path; the table search is out of line to
+ * keep the VM's call path small. */
+bool function_select_multi_arity(const Function* f, int n_args, int* arity, uint32_t* code_offset);
+
+static inline bool function_select_arity(Value fn, int n_args, int* arity, uint32_t* code_offset) {
+    const Function* f = (const Function*)untag_pointer(fn);
+    if (f->n_arities == 0) {
+        *arity = f->arity;
+        *code_offset = f->code_offset;
+        return true;
+    }
+    return function_select_multi_arity(f, n_args, arity, code_offset);
+}
 
 /* Get/set metadata */
 Value function_get_meta(Value fn);

@@ -20,6 +20,8 @@ static void function_destructor(struct Object* obj) {
         object_release(fn->meta);
     }
 
+    free(fn->arities);
+
     /* Release all closed-over values */
     for (uint16_t i = 0; i < fn->n_closed; i++) {
         if (is_pointer(fn->closed[i])) {
@@ -57,6 +59,8 @@ Value function_new_closure(int arity, uint32_t code_offset, uint16_t n_locals,
     fn->ns_name = NULL;
     fn->home_ns = NULL;
     fn->meta = VALUE_NIL;
+    fn->n_arities = 0;
+    fn->arities = NULL;
 
     /* Copy and retain closed-over values */
     if (n_closed > 0 && closed_values) {
@@ -172,3 +176,31 @@ void function_set_meta(Value fn, Value meta) {
     if (is_pointer(old)) object_release(old);
 }
 
+void function_set_arities(Value fn, const FnArity* arities, uint16_t n) {
+    assert(is_function(fn) && n > 0);
+    Function* f = (Function*)untag_pointer(fn);
+    free(f->arities);
+    f->arities = malloc(sizeof(FnArity) * n);
+    memcpy(f->arities, arities, sizeof(FnArity) * n);
+    f->n_arities = n;
+    f->arity = arities[0].arity;
+    f->code_offset = arities[0].code_offset;
+}
+
+bool function_select_multi_arity(const Function* f, int n_args, int* arity, uint32_t* code_offset) {
+    const FnArity* variadic = NULL;
+    for (uint16_t i = 0; i < f->n_arities; i++) {
+        if (f->arities[i].arity == n_args) {
+            *arity = n_args;
+            *code_offset = f->arities[i].code_offset;
+            return true;
+        }
+        if (f->arities[i].arity < 0) variadic = &f->arities[i];
+    }
+    if (variadic && n_args >= -(variadic->arity + 1)) {
+        *arity = variadic->arity;
+        *code_offset = variadic->code_offset;
+        return true;
+    }
+    return false;
+}

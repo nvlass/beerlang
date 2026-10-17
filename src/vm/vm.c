@@ -13,6 +13,7 @@
 #include "namespace.h"
 #include "symbol.h"
 #include "bstring.h"
+#include "verify.h"
 #include "cons.h"
 #include "hashmap.h"
 #include "vector.h"
@@ -96,6 +97,8 @@ VM* vm_new(int stack_size) {
 
     vm->running = false;
     vm->error = false;
+    vm->state_pad = false;
+    vm->needs_verify = false;
     vm->error_msg = NULL;
 
     return vm;
@@ -146,6 +149,7 @@ void vm_load_code(VM* vm, uint8_t* code, int size) {
     vm->running = false;
     vm->error = false;
     vm->error_msg = NULL;
+    vm->needs_verify = true;
 }
 
 /* Load constant pool */
@@ -153,6 +157,7 @@ void vm_load_constants(VM* vm, Value* constants, int num) {
     assert(vm != NULL);
     vm->constants = constants;
     vm->num_constants = num;
+    vm->needs_verify = true;
 }
 
 /* Set error state */
@@ -199,48 +204,92 @@ void vm_rethrow(VM* vm, Value exc) {
     vm->native_throw = true;
 }
 
-/* Read next byte from bytecode */
-static inline uint8_t read_byte(VM* vm) {
-    if (vm->pc >= vm->code_size) {
-        vm_error(vm, "PC out of bounds");
-        return 0;
-    }
-    return vm->code[vm->pc++];
-}
+/* Release builds run only verified bytecode (verify.c: valid opcodes,
+ * operands inside the code, branch targets on instruction starts, no fall
+ * off the end, constant indices in range), so the per-instruction checks
+ * for those are compiled only into debug builds (make debug / asan). */
+#ifdef DEBUG
+#define VM_CHECKED 1
+#endif
+#ifdef VM_CHECKED
+#define READ_CHECK() do { if (vm->error) return; } while (0)
+#else
+#define READ_CHECK() ((void)0)
+#endif
+
+/* Per-opcode tracing (--trace) is built into debug builds, or with -DVM_TRACE */
+#if defined(DEBUG) || defined(VM_TRACE)
+#define TRACE_OP(...) LOG_TRACE(__VA_ARGS__)
+#else
+#define TRACE_OP(...) ((void)0)
+#endif
+
+/* Instruction-stream registers: vm_run keeps pc and the current code
+ * buffer in locals (registers) while it runs and writes pc back to vm when
+ * it stops; step() reaches them through this struct, which never escapes
+ * the inlined loop. Opcodes that switch code (call, return, unwind) update
+ * both vm->code/code_size and these. */
+typedef struct {
+    uint32_t pc;
+    const uint8_t* code;
+    uint32_t code_size;
+} Regs;
 
 /* Read int64 from bytecode (8 bytes, little endian) */
-static inline int64_t read_int64(VM* vm) {
-    if (vm->pc + 8 > vm->code_size) {
+static inline int64_t read_int64(VM* vm, Regs* r) {
+#ifdef VM_CHECKED
+    if (r->pc + 8 > r->code_size) {
         vm_error(vm, "Not enough bytes for int64");
         return 0;
     }
-    const uint8_t* b = vm->code + vm->pc;
+#else
+    (void)vm;
+#endif
+    const uint8_t* b = r->code + r->pc;
     uint64_t value = (uint64_t)b[0] | (uint64_t)b[1] << 8 | (uint64_t)b[2] << 16 |
                      (uint64_t)b[3] << 24 | (uint64_t)b[4] << 32 | (uint64_t)b[5] << 40 |
                      (uint64_t)b[6] << 48 | (uint64_t)b[7] << 56;
-    vm->pc += 8;
+    r->pc += 8;
     return (int64_t)value;
 }
 
 /* Read uint32 from bytecode (4 bytes, little endian) */
-static inline uint32_t read_uint32(VM* vm) {
-    if (vm->pc + 4 > vm->code_size) {
+static inline uint32_t read_uint32(VM* vm, Regs* r) {
+#ifdef VM_CHECKED
+    if (r->pc + 4 > r->code_size) {
         vm_error(vm, "Not enough bytes for uint32");
         return 0;
     }
-    const uint8_t* b = vm->code + vm->pc;
+#else
+    (void)vm;
+#endif
+    const uint8_t* b = r->code + r->pc;
     uint32_t value = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 |
                      (uint32_t)b[3] << 24;
-    vm->pc += 4;
+    r->pc += 4;
     return value;
 }
 
 /* Read int32 from bytecode (4 bytes, little endian) */
-static inline int32_t read_int32(VM* vm) {
-    return (int32_t)read_uint32(vm);
+static inline int32_t read_int32(VM* vm, Regs* r) {
+    return (int32_t)read_uint32(vm, r);
 }
 
 /* Read uint16 from bytecode (2 bytes, little endian) */
+static inline uint16_t read_uint16(VM* vm, Regs* r) {
+#ifdef VM_CHECKED
+    if (r->pc + 2 > r->code_size) {
+        vm_error(vm, "Not enough bytes for uint16");
+        return 0;
+    }
+#else
+    (void)vm;
+#endif
+    const uint8_t* b = r->code + r->pc;
+    r->pc += 2;
+    return (uint16_t)(b[0] | b[1] << 8);
+}
+
 /* LOAD_VAR resolution cache: (home ns, interned symbol) -> Var*.
  * Valid while namespace_generation is unchanged. */
 typedef struct {
@@ -258,15 +307,6 @@ static inline size_t var_cache_slot(Namespace* home, void* sym) {
     return (size_t)((h ^ (h >> 10)) & (VAR_CACHE_SIZE - 1));
 }
 
-static inline uint16_t read_uint16(VM* vm) {
-    if (vm->pc + 2 > vm->code_size) {
-        vm_error(vm, "Not enough bytes for uint16");
-        return 0;
-    }
-    const uint8_t* b = vm->code + vm->pc;
-    vm->pc += 2;
-    return (uint16_t)(b[0] | b[1] << 8);
-}
 
 /* Push a new call frame, saving caller's execution context */
 static void push_frame(VM* vm, Value function, uint32_t return_pc) {
@@ -455,6 +495,13 @@ static bool vm_invoke_value(VM* vm, Value head, int n_args, Value* args, Value* 
 #define VM_UNLIKELY(x) (x)
 #endif
 
+static VM_NOINLINE void arity_error(VM* vm, const char* op, Value fn, uint16_t n_args) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s: wrong number of arguments (%u) passed to %s",
+             op, (unsigned)n_args, function_name(fn));
+    vm_error(vm, buf);
+}
+
 /* Auto-yield countdown, taken at safe points only: OP_JUMP (every loop and
  * recur) and OP_ENTER (every bytecode fn entry, call or tail call). Any
  * unbounded run of instructions passes one, so a task can't starve others,
@@ -467,37 +514,39 @@ static bool vm_invoke_value(VM* vm, Value head, int n_args, Value* args, Value* 
 
 /* Execute single instruction. Inlined into vm_run's loop, which already
  * checks running/error; vm_step below is the checked public entry. */
-static VM_ALWAYS_INLINE void step(VM* vm) {
-    if (vm->pc >= vm->code_size) {
+static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
+#ifdef VM_CHECKED
+    if (r->pc >= r->code_size) {
         vm->running = false;
         return;
     }
+#endif
 
     /* Capture PC before reading opcode for trace logging */
-    uint32_t pc_at_opcode = vm->pc;
-    uint8_t op = read_byte(vm);
+    uint32_t pc_at_opcode = r->pc;
+    uint8_t op = r->code[r->pc++];
 
     switch (op) {
         /* Stack operations */
         case OP_NOP:
-            LOG_TRACE("PC=%04u OP=%02X (OP_NOP) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_NOP) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             break;
 
         case OP_POP: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_POP) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_POP) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             vm_pop(vm);
             break;
         }
 
         case OP_DUP: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_DUP) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_DUP) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             Value v = vm_peek(vm);
             vm_push(vm, v);
             break;
         }
 
         case OP_SWAP: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_SWAP) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_SWAP) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 2) {
                 vm_error(vm, "SWAP requires 2 stack values");
                 return;
@@ -511,23 +560,23 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
 
         /* Constants & Literals */
         case OP_PUSH_NIL:
-            LOG_TRACE("PC=%04u OP=%02X (OP_PUSH_NIL) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_PUSH_NIL) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             vm_push(vm, VALUE_NIL);
             break;
 
         case OP_PUSH_TRUE:
-            LOG_TRACE("PC=%04u OP=%02X (OP_PUSH_TRUE) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_PUSH_TRUE) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             vm_push(vm, VALUE_TRUE);
             break;
 
         case OP_PUSH_FALSE:
-            LOG_TRACE("PC=%04u OP=%02X (OP_PUSH_FALSE) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_PUSH_FALSE) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             vm_push(vm, VALUE_FALSE);
             break;
 
         case OP_PUSH_INT: {
-            int64_t value = read_int64(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_PUSH_INT) value=%lld sp=%d", pc_at_opcode, op, (long long)value, vm->stack_pointer);
+            int64_t value = read_int64(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_PUSH_INT) value=%lld sp=%d", pc_at_opcode, op, (long long)value, vm->stack_pointer);
             if (!vm->error) {
                 vm_push(vm, make_fixnum(value));
             }
@@ -535,22 +584,22 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_PUSH_CONST: {
-            uint32_t idx = read_uint32(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_PUSH_CONST) idx=%u sp=%d", pc_at_opcode, op, idx, vm->stack_pointer);
-            if (vm->error) {
-                return;
-            }
+            uint32_t idx = read_uint32(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_PUSH_CONST) idx=%u sp=%d", pc_at_opcode, op, idx, vm->stack_pointer);
+            READ_CHECK();
+#ifdef VM_CHECKED
             if (idx >= (uint32_t)vm->num_constants) {
                 vm_error(vm, "Constant index out of bounds");
                 return;
             }
+#endif
             vm_push(vm, vm->constants[idx]);
             break;
         }
 
         /* Arithmetic operations */
         case OP_ADD: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_ADD) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_ADD) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 2) {
                 vm_error(vm, "ADD requires 2 operands");
                 return;
@@ -601,7 +650,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_SUB: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_SUB) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_SUB) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 2) {
                 vm_error(vm, "SUB requires 2 operands");
                 return;
@@ -651,7 +700,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_MUL: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_MUL) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_MUL) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 2) {
                 vm_error(vm, "MUL requires 2 operands");
                 return;
@@ -701,7 +750,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_DIV: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_DIV) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_DIV) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 2) {
                 vm_error(vm, "DIV requires 2 operands");
                 return;
@@ -758,7 +807,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_NEG: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_NEG) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_NEG) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 1) {
                 vm_error(vm, "NEG requires 1 operand");
                 return;
@@ -796,7 +845,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
 
         /* Comparison operations */
         case OP_EQ: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_EQ) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_EQ) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 2) {
                 vm_error(vm, "EQ requires 2 operands");
                 return;
@@ -810,7 +859,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_LT: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_LT) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_LT) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 2) {
                 vm_error(vm, "LT requires 2 operands");
                 return;
@@ -850,7 +899,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_GT: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_GT) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_GT) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 2) {
                 vm_error(vm, "GT requires 2 operands");
                 return;
@@ -891,28 +940,24 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
 
         /* Control flow */
         case OP_JUMP: {
-            int32_t offset = read_int32(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_JUMP) offset=%d target=%u sp=%d",
-                      pc_at_opcode, op, offset, vm->pc + offset, vm->stack_pointer);
-            if (vm->error) {
-                return;
-            }
-            vm->pc += offset;
+            int32_t offset = read_int32(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_JUMP) offset=%d target=%u sp=%d",
+                      pc_at_opcode, op, offset, r->pc + offset, vm->stack_pointer);
+            READ_CHECK();
+            r->pc += offset;
             SAFE_POINT(vm);
             break;
         }
 
         case OP_JUMP_IF_FALSE: {
-            int32_t offset = read_int32(vm);
+            int32_t offset = read_int32(vm, r);
             Value condition = vm_peek(vm);
             bool will_jump = is_false(condition) || is_nil(condition);
-            LOG_TRACE("PC=%04u OP=%02X (OP_JUMP_IF_FALSE) offset=%d will_jump=%d target=%u sp=%d",
-                      pc_at_opcode, op, offset, will_jump, vm->pc + offset, vm->stack_pointer);
-            if (vm->error) {
-                return;
-            }
+            TRACE_OP("PC=%04u OP=%02X (OP_JUMP_IF_FALSE) offset=%d will_jump=%d target=%u sp=%d",
+                      pc_at_opcode, op, offset, will_jump, r->pc + offset, vm->stack_pointer);
+            READ_CHECK();
             if (will_jump) {
-                vm->pc += offset;
+                r->pc += offset;
             }
             break;
         }
@@ -920,11 +965,9 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         /* Function calls */
         case OP_ENTER: {
             /* Function prologue - allocate local variable slots */
-            uint16_t n_locals = read_uint16(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_ENTER) n_locals=%u sp=%d", pc_at_opcode, op, n_locals, vm->stack_pointer);
-            if (vm->error) {
-                return;
-            }
+            uint16_t n_locals = read_uint16(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_ENTER) n_locals=%u sp=%d", pc_at_opcode, op, n_locals, vm->stack_pointer);
+            READ_CHECK();
 
             /* Push nil for each local slot */
             for (uint16_t i = 0; i < n_locals; i++) {
@@ -941,10 +984,8 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
             /* Call a function with n arguments */
             /* Stack layout: [... | arg0 | arg1 | ... | argN | func] */
             /* Function is on top, args below it */
-            uint16_t n_args = read_uint16(vm);
-            if (vm->error) {
-                return;
-            }
+            uint16_t n_args = read_uint16(vm, r);
+            READ_CHECK();
 
             /* Function is on top of stack */
             if (vm->stack_pointer < (int)n_args + 1) {
@@ -953,9 +994,9 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
             }
 
             Value fn = vm->stack[vm->stack_pointer - 1];
-            uint32_t target = is_function(fn) ? function_code_offset(fn) : 0;
-            LOG_TRACE("PC=%04u OP=%02X (OP_CALL) n_args=%u target=%u sp=%d",
-                      pc_at_opcode, op, n_args, target, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_CALL) n_args=%u target=%u sp=%d",
+                      pc_at_opcode, op, n_args,
+                      is_function(fn) ? function_code_offset(fn) : 0, vm->stack_pointer);
 
             /* Check if it's a native function */
             if (is_native_function(fn)) {
@@ -982,7 +1023,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                 /* Native blocked on I/O — rewind PC, don't touch stack */
                 if (vm->yielded) {
                     vm->native_blocked = false;
-                    vm->pc = pc_at_opcode;
+                    r->pc = pc_at_opcode;
                     break;
                 }
 
@@ -1000,12 +1041,12 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                         if (!fr) break;
                         while (vm->stack_pointer > fr->base_pointer) vm_pop(vm);
                         vm->code = fr->caller_code;
-                        vm->code_size = fr->caller_code_size;
+                        vm->code_size = fr->caller_code_size; r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
                         vm->constants = fr->caller_constants;
                         vm->num_constants = fr->caller_num_constants;
                     }
                     while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
-                    vm->pc = h->catch_pc;
+                    r->pc = h->catch_pc;
                     break;
                 }
 
@@ -1055,10 +1096,12 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                 return;
             }
 
-            /* Check arity */
-            int arity = function_arity(fn);
-            if (arity >= 0 && arity != (int)n_args) {
-                vm_error(vm, "CALL: wrong number of arguments");
+            /* Pick the entry for n_args (a multi-arity fn has several) */
+            int arity;
+            uint32_t entry_pc;
+            if (!function_select_arity(fn, (int)n_args, &arity, &entry_pc) ||
+                (arity >= 0 && arity != (int)n_args)) {
+                arity_error(vm, "CALL", fn, n_args);
                 return;
             } else if (arity < 0) {
                 /* Variadic function: arity = -(required + 1) */
@@ -1108,7 +1151,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
             vm_pop(vm);
 
             /* Push call frame (saves caller's code/constants) */
-            push_frame(vm, fn, vm->pc);
+            push_frame(vm, fn, r->pc);
 
             /* Balance the extra retain — push_frame already retained */
             if (is_pointer(fn)) object_release(fn);
@@ -1122,22 +1165,20 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
             /* Switch to function's bytecode and constants if available */
             if (function_get_code(fn) != NULL) {
                 vm->code = function_get_code(fn);
-                vm->code_size = function_get_code_size(fn);
+                vm->code_size = function_get_code_size(fn); r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
                 vm->constants = function_get_constants(fn);
                 vm->num_constants = function_get_num_constants(fn);
             }
 
             /* Jump to function code */
-            vm->pc = function_code_offset(fn);
+            r->pc = entry_pc;
             break;
         }
 
         case OP_TAIL_CALL: {
             /* Tail call - reuse current frame */
-            uint16_t n_args = read_uint16(vm);
-            if (vm->error) {
-                return;
-            }
+            uint16_t n_args = read_uint16(vm, r);
+            READ_CHECK();
 
             /* Function is on top of stack, args below it */
             /* Stack layout: [... | arg0 | arg1 | ... | argN | func] */
@@ -1147,9 +1188,9 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
             }
 
             Value fn = vm->stack[vm->stack_pointer - 1];
-            uint32_t target = is_function(fn) ? function_code_offset(fn) : 0;
-            LOG_TRACE("PC=%04u OP=%02X (OP_TAIL_CALL) n_args=%u target=%u sp=%d",
-                      pc_at_opcode, op, n_args, target, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_TAIL_CALL) n_args=%u target=%u sp=%d",
+                      pc_at_opcode, op, n_args,
+                      is_function(fn) ? function_code_offset(fn) : 0, vm->stack_pointer);
 
             /* Handle native function in tail position */
             if (is_native_function(fn)) {
@@ -1173,7 +1214,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                 /* Native blocked on I/O — rewind PC, don't touch stack */
                 if (vm->yielded) {
                     vm->native_blocked = false;
-                    vm->pc = pc_at_opcode;
+                    r->pc = pc_at_opcode;
                     break;
                 }
 
@@ -1191,12 +1232,12 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                         if (!fr) break;
                         while (vm->stack_pointer > fr->base_pointer) vm_pop(vm);
                         vm->code = fr->caller_code;
-                        vm->code_size = fr->caller_code_size;
+                        vm->code_size = fr->caller_code_size; r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
                         vm->constants = fr->caller_constants;
                         vm->num_constants = fr->caller_num_constants;
                     }
                     while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
-                    vm->pc = h->catch_pc;
+                    r->pc = h->catch_pc;
                     break;
                 }
 
@@ -1236,10 +1277,12 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                 return;
             }
 
-            /* Check arity */
-            int arity = function_arity(fn);
-            if (arity >= 0 && arity != (int)n_args) {
-                vm_error(vm, "TAIL_CALL: wrong number of arguments");
+            /* Pick the entry for n_args (a multi-arity fn has several) */
+            int arity;
+            uint32_t entry_pc;
+            if (!function_select_arity(fn, (int)n_args, &arity, &entry_pc) ||
+                (arity >= 0 && arity != (int)n_args)) {
+                arity_error(vm, "TAIL_CALL", fn, n_args);
                 return;
             } else if (arity < 0) {
                 /* Variadic function: arity = -(required + 1) */
@@ -1309,24 +1352,23 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
             /* Switch to function's bytecode and constants if available */
             if (function_get_code(fn) != NULL) {
                 vm->code = function_get_code(fn);
-                vm->code_size = function_get_code_size(fn);
+                vm->code_size = function_get_code_size(fn); r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
                 vm->constants = function_get_constants(fn);
                 vm->num_constants = function_get_num_constants(fn);
             }
 
             /* Jump to new function */
-            vm->pc = function_code_offset(fn);
+            r->pc = entry_pc;
             break;
         }
 
         case OP_RETURN: {
             /* Return from function */
-            CallFrame* frame = current_frame(vm);
-            uint32_t return_pc = frame ? frame->return_pc : 0;
-            LOG_TRACE("PC=%04u OP=%02X (OP_RETURN) return_pc=%u frame_count=%d sp=%d",
-                      pc_at_opcode, op, return_pc, vm->frame_count, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_RETURN) return_pc=%u frame_count=%d sp=%d",
+                      pc_at_opcode, op, current_frame(vm) ? current_frame(vm)->return_pc : 0,
+                      vm->frame_count, vm->stack_pointer);
 
-            frame = pop_frame(vm);
+            CallFrame* frame = pop_frame(vm);
             if (!frame) {
                 /* No frame - top level return, halt */
                 vm->running = false;
@@ -1353,35 +1395,37 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
 
             /* Restore caller's execution context */
             vm->code = frame->caller_code;
-            vm->code_size = frame->caller_code_size;
+            vm->code_size = frame->caller_code_size; r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
             vm->constants = frame->caller_constants;
             vm->num_constants = frame->caller_num_constants;
 
             /* Restore PC */
-            vm->pc = frame->return_pc;
+            r->pc = frame->return_pc;
             break;
         }
 
         /* Global variables */
         case OP_LOAD_VAR: {
-            uint16_t const_idx = read_uint16(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_LOAD_VAR) const_idx=%u sp=%d", pc_at_opcode, op, const_idx, vm->stack_pointer);
-            if (vm->error) {
-                return;
-            }
+            uint16_t const_idx = read_uint16(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_LOAD_VAR) const_idx=%u sp=%d", pc_at_opcode, op, const_idx, vm->stack_pointer);
+            READ_CHECK();
 
+#ifdef VM_CHECKED
             /* Get symbol from constant pool */
             if (const_idx >= (uint16_t)vm->num_constants) {
                 vm_error(vm, "LOAD_VAR: constant index out of bounds");
                 return;
             }
+#endif
 
             Value symbol = vm->constants[const_idx];
 
+#ifdef VM_CHECKED
             if (!is_pointer(symbol) || object_type(symbol) != TYPE_SYMBOL) {
                 vm_error(vm, "LOAD_VAR: constant is not a symbol");
                 return;
             }
+#endif
 
             /* Look up var in current namespace */
             if (!global_namespace_registry) {
@@ -1483,23 +1527,25 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_STORE_VAR: {
-            uint16_t const_idx = read_uint16(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_STORE_VAR) const_idx=%u sp=%d", pc_at_opcode, op, const_idx, vm->stack_pointer);
-            if (vm->error) {
-                return;
-            }
+            uint16_t const_idx = read_uint16(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_STORE_VAR) const_idx=%u sp=%d", pc_at_opcode, op, const_idx, vm->stack_pointer);
+            READ_CHECK();
 
+#ifdef VM_CHECKED
             /* Get symbol from constant pool */
             if (const_idx >= (uint16_t)vm->num_constants) {
                 vm_error(vm, "STORE_VAR: constant index out of bounds");
                 return;
             }
+#endif
 
             Value symbol = vm->constants[const_idx];
+#ifdef VM_CHECKED
             if (!is_pointer(symbol) || object_type(symbol) != TYPE_SYMBOL) {
                 vm_error(vm, "STORE_VAR: constant is not a symbol");
                 return;
             }
+#endif
 
             /* Pop value from stack */
             if (vm->stack_pointer <= 0) {
@@ -1575,11 +1621,9 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
 
         /* Local variables */
         case OP_LOAD_LOCAL: {
-            uint16_t idx = read_uint16(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_LOAD_LOCAL) idx=%u sp=%d", pc_at_opcode, op, idx, vm->stack_pointer);
-            if (vm->error) {
-                return;
-            }
+            uint16_t idx = read_uint16(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_LOAD_LOCAL) idx=%u sp=%d", pc_at_opcode, op, idx, vm->stack_pointer);
+            READ_CHECK();
 
             CallFrame* frame = current_frame(vm);
             if (!frame) {
@@ -1598,11 +1642,9 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_STORE_LOCAL: {
-            uint16_t idx = read_uint16(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_STORE_LOCAL) idx=%u sp=%d", pc_at_opcode, op, idx, vm->stack_pointer);
-            if (vm->error) {
-                return;
-            }
+            uint16_t idx = read_uint16(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_STORE_LOCAL) idx=%u sp=%d", pc_at_opcode, op, idx, vm->stack_pointer);
+            READ_CHECK();
 
             CallFrame* frame = current_frame(vm);
             if (!frame) {
@@ -1639,11 +1681,9 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
 
         /* Closures */
         case OP_LOAD_CLOSURE: {
-            uint16_t idx = read_uint16(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_LOAD_CLOSURE) idx=%u sp=%d", pc_at_opcode, op, idx, vm->stack_pointer);
-            if (vm->error) {
-                return;
-            }
+            uint16_t idx = read_uint16(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_LOAD_CLOSURE) idx=%u sp=%d", pc_at_opcode, op, idx, vm->stack_pointer);
+            READ_CHECK();
 
             CallFrame* frame = current_frame(vm);
             if (!frame) {
@@ -1668,7 +1708,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
 
         case OP_LOAD_SELF: {
             /* Push the current function onto the stack (for named fn self-recursion) */
-            LOG_TRACE("PC=%04u OP=%02X (OP_LOAD_SELF) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_LOAD_SELF) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             CallFrame* frame = current_frame(vm);
             if (!frame || !is_function(frame->function)) {
                 vm_error(vm, "LOAD_SELF: no current function");
@@ -1680,30 +1720,35 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
 
         case OP_MAKE_CLOSURE: {
             /* MAKE_CLOSURE <code_offset:u32> <n_locals:u16> <n_closed:u16> <arity:u16> <name_idx:u16> */
-            uint32_t code_offset = read_uint32(vm);
-            if (vm->error) return;
+            uint32_t code_offset = read_uint32(vm, r);
+            READ_CHECK();
 
-            uint16_t n_locals = read_uint16(vm);
-            if (vm->error) return;
+            uint16_t n_locals = read_uint16(vm, r);
+            READ_CHECK();
 
-            uint16_t n_closed = read_uint16(vm);
-            if (vm->error) return;
+            uint16_t n_closed = read_uint16(vm, r);
+            READ_CHECK();
 
-            int16_t arity = (int16_t)read_uint16(vm);
-            if (vm->error) return;
+            int16_t arity = (int16_t)read_uint16(vm, r);
+            READ_CHECK();
 
-            uint16_t name_idx = read_uint16(vm);
-            if (vm->error) return;
+            uint16_t name_idx = read_uint16(vm, r);
+            READ_CHECK();
 
-            LOG_TRACE("PC=%04u OP=%02X (OP_MAKE_CLOSURE) code_offset=%u n_locals=%u n_closed=%u arity=%d name_idx=%u sp=%d",
+            TRACE_OP("PC=%04u OP=%02X (OP_MAKE_CLOSURE) code_offset=%u n_locals=%u n_closed=%u arity=%d name_idx=%u sp=%d",
                       pc_at_opcode, op, code_offset, n_locals, n_closed, arity, name_idx, vm->stack_pointer);
 
-            /* Get function name from constants */
+            /* name_idx names a string constant, or for a multi-arity fn
+             * the template function: its name and arity table */
             const char* fn_name = "anonymous-fn";
+            Value template_fn = VALUE_NIL;
             if (name_idx < (uint16_t)vm->num_constants) {
                 Value name_val = vm->constants[name_idx];
                 if (is_pointer(name_val) && object_type(name_val) == TYPE_STRING) {
                     fn_name = string_cstr(name_val);
+                } else if (is_function(name_val)) {
+                    template_fn = name_val;
+                    fn_name = function_name(name_val);
                 }
             }
 
@@ -1748,6 +1793,10 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                 vm_error(vm, "MAKE_CLOSURE: failed to create closure");
                 return;
             }
+            if (!is_nil(template_fn)) {
+                Function* t = (Function*)untag_pointer(template_fn);
+                function_set_arities(closure, t->arities, t->n_arities);
+            }
 
             /* Make closure self-contained (store bytecode + constants pointers) */
             function_set_code(closure, vm->code, vm->code_size,
@@ -1774,10 +1823,10 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
 
         /* Exception handling */
         case OP_PUSH_HANDLER: {
-            uint32_t catch_offset = read_uint32(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_PUSH_HANDLER) catch_offset=%u sp=%d",
+            uint32_t catch_offset = read_uint32(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_PUSH_HANDLER) catch_offset=%u sp=%d",
                       pc_at_opcode, op, catch_offset, vm->stack_pointer);
-            if (vm->error) return;
+            READ_CHECK();
 
             if (vm->handler_count >= vm->handler_capacity) {
                 vm_error(vm, "Exception handler stack overflow");
@@ -1792,7 +1841,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_POP_HANDLER: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_POP_HANDLER) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_POP_HANDLER) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->handler_count <= 0) {
                 vm_error(vm, "No exception handler to pop");
                 return;
@@ -1802,7 +1851,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_THROW: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_THROW) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_THROW) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 1) {
                 vm_error(vm, "THROW: stack underflow");
                 return;
@@ -1844,7 +1893,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                 }
                 /* Restore caller context */
                 vm->code = frame->caller_code;
-                vm->code_size = frame->caller_code_size;
+                vm->code_size = frame->caller_code_size; r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
                 vm->constants = frame->caller_constants;
                 vm->num_constants = frame->caller_num_constants;
             }
@@ -1859,28 +1908,28 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
             vm->exception = exc;
 
             /* Jump to catch block */
-            vm->pc = h->catch_pc;
+            r->pc = h->catch_pc;
             break;
         }
 
         case OP_LOAD_EXCEPTION: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_LOAD_EXCEPTION) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_LOAD_EXCEPTION) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             vm_push(vm, vm->exception);
             break;
         }
 
         /* Concurrency operations */
         case OP_YIELD: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_YIELD) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_YIELD) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             vm->yielded = true;
             vm_push(vm, VALUE_NIL);
             break;
         }
 
         case OP_SPAWN: {
-            uint16_t n_args = read_uint16(vm);
-            LOG_TRACE("PC=%04u OP=%02X (OP_SPAWN) n_args=%u sp=%d", pc_at_opcode, op, n_args, vm->stack_pointer);
-            if (vm->error) return;
+            uint16_t n_args = read_uint16(vm, r);
+            TRACE_OP("PC=%04u OP=%02X (OP_SPAWN) n_args=%u sp=%d", pc_at_opcode, op, n_args, vm->stack_pointer);
+            READ_CHECK();
 
             if (vm->stack_pointer < (int)n_args + 1) {
                 vm_error(vm, "SPAWN: not enough values on stack");
@@ -1910,7 +1959,7 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
         }
 
         case OP_AWAIT: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_AWAIT) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_AWAIT) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 1) {
                 vm_error(vm, "AWAIT: stack underflow");
                 return;
@@ -1932,14 +1981,14 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                 if (is_pointer(result)) object_release(result);
             } else {
                 /* Inside a task — yield and re-execute when resumed */
-                vm->pc = pc_at_opcode;
+                r->pc = pc_at_opcode;
                 vm->yielded = true;
             }
             break;
         }
 
         case OP_CHAN_SEND: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_CHAN_SEND) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_CHAN_SEND) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 2) {
                 vm_error(vm, "CHAN_SEND: requires channel and value");
                 return;
@@ -1973,14 +2022,14 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
             } else {
                 /* Blocked — rewind PC, push val back for retry */
                 vm_push(vm, val);
-                vm->pc = pc_at_opcode;
+                r->pc = pc_at_opcode;
                 vm->yielded = true;
             }
             break;
         }
 
         case OP_CHAN_RECV: {
-            LOG_TRACE("PC=%04u OP=%02X (OP_CHAN_RECV) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_CHAN_RECV) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             if (vm->stack_pointer < 1) {
                 vm_error(vm, "CHAN_RECV: requires channel");
                 return;
@@ -2007,29 +2056,49 @@ static VM_ALWAYS_INLINE void step(VM* vm) {
                 if (is_pointer(out)) object_release(out);
             } else {
                 /* Blocked — rewind PC for retry */
-                vm->pc = pc_at_opcode;
+                r->pc = pc_at_opcode;
                 vm->yielded = true;
             }
             break;
         }
 
         case OP_HALT:
-            LOG_TRACE("PC=%04u OP=%02X (OP_HALT) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (OP_HALT) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             vm->running = false;
             break;
 
         default:
-            LOG_TRACE("PC=%04u OP=%02X (INVALID) sp=%d", pc_at_opcode, op, vm->stack_pointer);
+            TRACE_OP("PC=%04u OP=%02X (INVALID) sp=%d", pc_at_opcode, op, vm->stack_pointer);
             vm_error(vm, "Invalid opcode");
             break;
     }
+}
+
+/* Code loaded with vm_load_code/vm_load_constants is verified the first
+ * time it runs; resumed tasks don't pay again. False (with vm->error set)
+ * if it is rejected. */
+static bool verify_loaded(VM* vm) {
+    if (!vm->needs_verify) return true;
+    char err[200];
+    if (!bytecode_verify(vm->code, vm->code_size, vm->constants, vm->num_constants,
+                         err, sizeof(err))) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "invalid bytecode: %s", err);
+        vm_error(vm, msg);
+        return false;
+    }
+    vm->needs_verify = false;
+    return true;
 }
 
 void vm_step(VM* vm) {
     if (!vm->running || vm->error) {
         return;
     }
-    step(vm);
+    if (!verify_loaded(vm)) return;
+    Regs r = { vm->pc, vm->code, (uint32_t)vm->code_size };
+    step(vm, &r);
+    vm->pc = r.pc;
 }
 
 /* A runtime error with a try/catch handler active: turn it into a
@@ -2068,12 +2137,30 @@ void vm_run(VM* vm) {
     vm->yielded = false;
     /* Don't reset pc - allow caller to set starting position */
 
-    while (vm->running && !vm->error && !vm->yielded) {
-        step(vm);
-        if (VM_UNLIKELY(vm->error) && vm->handler_count > 0) {
-            error_to_exception(vm);
-        }
+    if (!verify_loaded(vm)) {
+        fprintf(stderr, "VM Error: %s\n", vm->error_msg);
+        return;
     }
+
+    /* One compare per instruction: running, no error, not yielded */
+    const uint32_t go = vm_run_state_go();
+    Regs r = { vm->pc, vm->code, (uint32_t)vm->code_size };
+    for (;;) {
+        while (vm->run_state == go) {
+            step(vm, &r);
+        }
+        /* A runtime error with a try/catch active becomes an exception */
+        if (vm->error && vm->handler_count > 0) {
+            vm->pc = r.pc;
+            error_to_exception(vm);
+            r.pc = vm->pc;
+            r.code = vm->code;
+            r.code_size = (uint32_t)vm->code_size;
+            continue;
+        }
+        break;
+    }
+    vm->pc = r.pc;
 
     if (vm->error) {
         fprintf(stderr, "VM Error: %s\n", vm->error_msg ? vm->error_msg : "Unknown error");

@@ -162,6 +162,7 @@ static void write_bytes_prefixed(FILE* f, const char* data, size_t len) {
 #define BEERC_KEYWORD  0x12
 #define BEERC_BIGINT   0x13
 #define BEERC_FUNCTION 0x20
+#define BEERC_MULTI_FUNCTION 0x21   /* + u16 n, n x (i32 arity, u32 offset) */
 
 static int write_constant(FILE* f, Value v) {
     switch (v.tag) {
@@ -222,12 +223,20 @@ static int write_constant(FILE* f, Value v) {
             uint16_t nloc   = function_n_locals(v);
             uint16_t nclos  = function_n_closed(v);
             const char* nm  = function_name(v);
-            write_u8(f, BEERC_FUNCTION);
+            const Function* fobj = (const Function*)untag_pointer(v);
+            write_u8(f, fobj->n_arities > 0 ? BEERC_MULTI_FUNCTION : BEERC_FUNCTION);
             write_u32le(f, (uint32_t)(int32_t)arity);
             write_u32le(f, offset);
             write_u16le(f, nloc);
             write_u16le(f, nclos);
             write_bytes_prefixed(f, nm, strlen(nm));
+            if (fobj->n_arities > 0) {
+                write_u16le(f, fobj->n_arities);
+                for (uint16_t i = 0; i < fobj->n_arities; i++) {
+                    write_u32le(f, (uint32_t)(int32_t)fobj->arities[i].arity);
+                    write_u32le(f, fobj->arities[i].code_offset);
+                }
+            }
             return 0;
         }
         /* Unserializable heap type (e.g. vector, cons) — store as nil.

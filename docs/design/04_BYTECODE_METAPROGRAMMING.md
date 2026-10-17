@@ -240,26 +240,44 @@ The `asm` special form takes a bytecode data structure and returns an executable
 
 #### Safety and Validation
 
-**Type Safety:**
-- `asm` validates instruction operands
-- Checks stack depth consistency
-- Verifies jump targets exist
-- Ensures local variable indices are valid
+The interpreter trusts the bytecode it runs: release builds don't re-check
+opcodes, operand bounds, the end of the code or constant indices on every
+instruction. That trust is earned once, by the verifier (`src/vm/verify.c`),
+before any code can run:
 
-**Invalid bytecode:**
+- `asm` verifies what it assembled and throws instead of returning a function
+- code loaded with `vm_load_code`/`vm_load_constants` (compiled units,
+  embedders, tests) is verified on its first `vm_run`
+- only the call stubs the runtime builds itself in C
+  (`PUSH_CONST… CALL n HALT`) skip it, via `vm_trust_loaded_code`
+- the AOT loader, when it exists, must verify `.beerc` units the same way
+
+What the verifier checks, per code unit (one linear sweep; every opcode has
+a fixed size):
+
+- every opcode is one the VM executes (`INC`/`DEC`/`OVER` are in the opcode
+  table but have no handler) and its operands fit in the code
+- `JUMP`/`JUMP_IF_FALSE` targets, `PUSH_HANDLER` catch targets,
+  `MAKE_CLOSURE` entries and function entries (all arities) are instruction
+  starts
+- the last instruction is `RETURN`, `HALT`, `JUMP` or `THROW`, so execution
+  can't run past the end
+- `PUSH_CONST`, `LOAD_VAR`, `STORE_VAR` and `MAKE_CLOSURE` name constants
+  that exist; `LOAD_VAR`/`STORE_VAR` constants are symbols
+
+Not verified, still checked at run time: stack depth (underflow/overflow)
+and local variable indices. Doing those statically needs a stack-depth
+analysis per function.
+
+Debug and sanitizer builds (`make debug`, `make asan`) keep every run-time
+check as a safety net, and only they carry per-opcode tracing (`--trace`).
 
 ```clojure
-;; Error: stack underflow
-(asm [[ADD]         ; No values on stack!
-      [RETURN]])
+(asm {:code [[:ENTER 0] [:PUSH_INT 1]] :constants [] :arity 0})
+;; => asm: invalid bytecode: the last instruction (offset 3) falls through past the end of the code
 
-;; Error: undefined label
-(asm [[JUMP :nowhere]
-      [RETURN]])
-
-;; Error: invalid operand
-(asm [[PUSH_INT "not a number"]
-      [RETURN]])
+(asm {:code [[:ENTER 0] [:LOAD_VAR 0] [:RETURN]] :constants [42] :arity 0})
+;; => asm: invalid bytecode: LOAD_VAR at offset 3: constant 0 is not a symbol
 ```
 
 **Sandboxing:**

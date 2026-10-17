@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 61 unit tests
-- 589 REPL smoke tests
+- 601 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -90,6 +90,10 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
   (bumped on var/refer/alias create or remove). With cached `beer.core` and
   per-function home ns, an empty `loop` iteration went 946 → 245 ns
 - Trace/debug logging gated on a global level (no `ulog_log` call per opcode)
+- Bytecode verifier (`src/vm/verify.c`): all code is verified before it runs
+  (`asm`, and loaded units on first run), so release builds skip
+  per-instruction opcode/operand/end-of-code/constant checks; debug builds
+  keep them and the per-opcode trace
 - `make bench`: micro-benchmark set (`tests/integration/benchmarks/run.beer`, `beer.bench` runner) with a "vs previous run" column; `nano-time`, `current-time-millis`, `time`
 - Strings: O(1) char indexing when the string is pure ASCII
 
@@ -166,7 +170,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - **Map**: `assoc-in`, `get-in`, `update`, `update-in`, `merge`, `select-keys`
 - **Sorting**: `sort`, `sort-by` (merge sort)
 - **Exception**: `ex-info`
-- **Multi-arity dispatch**: `defn` supports multiple arities with `cond` dispatch on `(count args)`
+- **Multi-arity functions**: `fn` (and `defn`) take `([params] body...)` clauses; one function object with an arity table, chosen by argument count in `CALL`/`TAIL_CALL`
 - **Destructuring**: nested vector patterns (`[a [b c] & rest :as all]`) in `let`, `fn` and `defn` params (rewritten to `let` by the compiler)
 - **Namespaces**: `require`/`ns` with `:as` and `:refer [syms]` / `:refer :all`; `keyword`/`symbol` take an optional namespace, `namespace`
 
