@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include "scheduler.h"
 #include "io_reactor.h"
+#include "channel.h"
 #include "task.h"
 #include "vm.h"
 #include "memory.h"
@@ -26,6 +27,7 @@ Scheduler* scheduler_new(int quota) {
     sched->ready_head.prev = NULL;
     sched->ready_count = 0;
     sched->current = NULL;
+    sched->foreground = NULL;
     sched->io_reactor = io_reactor_new();
     sched->blocked_count = 0;
     sched->sleep_list = NULL;
@@ -105,6 +107,7 @@ void scheduler_wake(Scheduler* sched, Task* task) {
 /* Block a task on I/O (tracked separately for scheduler loop) */
 void scheduler_block_io(Scheduler* sched, Task* task) {
     task->state = TASK_BLOCKED;
+    task->io_blocked = true;
     sched->blocked_count++;
     /* Retain to keep task alive while IO-blocked — paired release in scheduler_wake_io.
      * Without this, scheduler_run_one_tick releases the dequeue ref after blocking,
@@ -123,6 +126,7 @@ void scheduler_wake_io(Scheduler* sched, Task* task) {
         return;
     }
     sched->blocked_count--;
+    task->io_blocked = false;
     scheduler_enqueue(sched, task);  /* enqueue retains */
     /* Release the retain from scheduler_block_io */
     Value task_val = tag_pointer(task);
@@ -277,8 +281,28 @@ void scheduler_fire_watchers(Scheduler* sched, Task* task) {
     object_release(result_map);  /* Release our original ref */
 }
 
+/* Hand a requested interrupt to the foreground task, waking it if it is
+ * blocked. With no foreground task it stays pending (the REPL clears it at
+ * the prompt). */
+static void scheduler_deliver_interrupt(Scheduler* sched) {
+    Task* task = sched->foreground;
+    if (!task || task->state == TASK_DONE) return;
+    vm_interrupt_requested = 0;
+    task->interrupt_pending = true;
+    if (task->state != TASK_BLOCKED) return;
+    if (task->wait_queue) {
+        scheduler_wake(sched, task);  /* enqueue retains before the queue's ref goes */
+        channel_cancel_wait(task);
+    } else if (task->io_blocked) {
+        scheduler_cancel_timer(sched, task);
+        if (sched->io_reactor) io_reactor_forget(sched->io_reactor, task);
+        scheduler_wake_io(sched, task);
+    }
+}
+
 /* Run one task for one quantum */
 bool scheduler_run_one_tick(Scheduler* sched) {
+    if (vm_interrupt_requested) scheduler_deliver_interrupt(sched);
     scheduler_check_timers(sched);
     /* A kevent/epoll_wait per tick would be a syscall every quantum */
     if ((++sched->ticks & (IO_CHECK_EVERY - 1)) == 0 || !scheduler_has_ready(sched)) {
@@ -310,9 +334,39 @@ bool scheduler_run_one_tick(Scheduler* sched) {
     return true;
 }
 
+bool scheduler_run_nested(VM* caller, VM* temp) {
+    Scheduler* sched = caller->scheduler;
+    bool fg = sched && sched->current && sched->current->foreground;
+    int quota = fg ? sched->quota : 0;
+    temp->yield_countdown = quota;
+    vm_run(temp);
+    /* Out of quota (not a yield or a parked native): check, then resume */
+    while (fg && temp->yielded && !temp->error && temp->yield_countdown == 0) {
+        if (vm_interrupt_requested) {
+            vm_interrupt_requested = 0;
+            vm_raise_interrupt(temp);
+            if (temp->error) break;
+        }
+        temp->yield_countdown = quota;
+        vm_run(temp);
+    }
+    if (temp->error && vm_is_interrupt(temp->thrown_exception)) {
+        vm_rethrow(caller, vm_interrupt_exception());
+        return false;
+    }
+    return true;
+}
+
 /* Run a specific task to completion, also running other ready tasks */
 void scheduler_run_task_to_completion(Scheduler* sched, Task* target) {
     Task* saved_current = sched->current;
+    Task* saved_foreground = sched->foreground;
+    /* Called from C, or from a foreground task (a require inside the REPL's
+     * form): an interrupt stops target. Not from a background task. */
+    if (!saved_current || saved_current->foreground) {
+        target->foreground = true;
+        sched->foreground = target;
+    }
     scheduler_enqueue(sched, target);
     while (target->state != TASK_DONE) {
         if (scheduler_run_one_tick(sched)) continue;
@@ -320,6 +374,7 @@ void scheduler_run_task_to_completion(Scheduler* sched, Task* target) {
         scheduler_wait(sched, -1);
     }
     sched->current = saved_current;
+    sched->foreground = saved_foreground;
 }
 
 /* Non-blocking counterpart to scheduler_run_until_done: wakes tasks whose
@@ -343,6 +398,7 @@ void scheduler_run_until_done(Scheduler* sched) {
 
 void scheduler_run_until_readable(Scheduler* sched, int fd) {
     for (;;) {
+        if (vm_interrupt_requested && !sched->foreground) return;
         bool ready = false;
         if (scheduler_has_ready(sched)) {
             io_reactor_poll(sched->io_reactor, sched, 0, fd, &ready);

@@ -506,6 +506,42 @@ CREATE → READY → RUNNING → YIELDED → RUNNING → ... → COMPLETED
                  FAILED
 ```
 
+#### Interrupts
+
+`vm_request_interrupt()` (C, safe from a signal or IRQ handler) or
+`(request-interrupt!)` stops the **foreground** task: the innermost target
+of `scheduler_run_task_to_completion` reached from C or from another
+foreground task — the REPL's form, and loads (`require`, `load-string`)
+it runs. Background tasks (`spawn`) are never interrupted, and a
+`run_task_to_completion` from a background task (its own `eval` or
+`require`) is not foreground.
+
+- The request is a flag. `scheduler_run_one_tick` checks it before each
+  quantum, so the VM's inner loop pays nothing; the delay is at most one
+  quantum. A blocked foreground task is woken: taken off its channel
+  queue (a pending send is dropped), or its timer and reactor wait are
+  cancelled.
+- When the task next runs, `vm_raise_interrupt` unwinds it with the
+  interrupt exception `{:type :interrupt :message "interrupted"}` (one
+  immortal map, recognised by identity). Catch handlers are skipped and
+  `finally` blocks run (`OP_PUSH_FINALLY`); a finally's rethrow is the
+  same map, so outer catches stay skipped. With no finally left the task
+  ends with the error "interrupted".
+- A nested load (`core_load_source`, `eval`) passes the interrupt to its
+  caller unchanged instead of wrapping it in a "load: error in ..."
+  exception.
+- With no foreground task the request stays pending. The REPL clears it
+  at the prompt (Ctrl-C there drops the partial form) and before each
+  form; SIGINT sets it, and a second SIGINT while it is still pending
+  (a task stuck in a blocking native) exits the process.
+- Natives that run a fn in a temp VM (`apply`, `swap!`, `reduce-kv`,
+  `alter-meta!`, macroexpansion) use `scheduler_run_nested`: for a
+  foreground caller the temp VM counts safe points and checks the flag
+  when its quota runs out, raises the interrupt inside (its finally blocks
+  run) and rethrows it in the caller. Other tasks don't run meanwhile, so
+  only a request from outside the scheduler (SIGINT, an IRQ) or from the
+  fn itself reaches it there.
+
 #### Performance Characteristics
 
 **Lightweight tasks:**

@@ -109,6 +109,9 @@ extern NamespaceRegistry* global_namespace_registry;
 
 /* Initialize global registry (call once at startup) */
 void namespace_init(void);
+/* namespace_init without loading lib/core.beer, for embedders that load
+ * it themselves */
+void namespace_init_bare(void);
 
 /* Shutdown global registry (call once at shutdown) */
 void namespace_shutdown(void);

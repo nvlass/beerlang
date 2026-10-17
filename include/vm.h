@@ -5,6 +5,7 @@
 #define BEERLANG_VM_H
 
 #include <stdbool.h>
+#include <signal.h>
 #include "value.h"
 
 /* Bytecode instructions */
@@ -59,6 +60,8 @@ typedef enum {
     OP_POP_HANDLER = 0x71,     /* Pop exception handler */
     OP_THROW = 0x72,           /* Throw exception (value on stack, must be hashmap) */
     OP_LOAD_EXCEPTION = 0x73,  /* Push current exception onto stack */
+    OP_PUSH_FINALLY = 0x74,    /* Push a finally handler (uint32: handler PC); an
+                                  interrupt unwinds to these, skipping catches */
 
     /* Functions & Closures (0x80 - 0x8F) */
     OP_MAKE_CLOSURE = 0x80,
@@ -76,6 +79,7 @@ typedef struct ExceptionHandler {
     uint32_t catch_pc;       /* PC of catch block (absolute) */
     int stack_pointer;       /* SP to restore on throw */
     int frame_count;         /* Frame count to restore on throw */
+    bool is_finally;         /* Pushed by OP_PUSH_FINALLY */
 } ExceptionHandler;
 
 #define DEFAULT_HANDLER_CAPACITY 16
@@ -182,5 +186,22 @@ void vm_error(VM* vm, const char* msg);
  * If no handler is active, falls back to vm_error (fatal). */
 void vm_throw_error(VM* vm, const char* msg);
 void vm_rethrow(VM* vm, Value exc); /* Re-throw an already-owned exception Value */
+
+/* Interrupts: stop the foreground task (the one the REPL or a load waits
+ * on). vm_request_interrupt only sets a flag, so it is safe from a signal
+ * or IRQ handler; the scheduler delivers it between quanta. The task
+ * unwinds with the interrupt exception {:type :interrupt}, which runs
+ * finally blocks but skips catch. With no foreground task the request
+ * stays pending; clear vm_interrupt_requested before starting one if a
+ * stale request shouldn't stop it. */
+extern volatile sig_atomic_t vm_interrupt_requested;
+void vm_request_interrupt(void);
+Value vm_interrupt_exception(void);   /* the one interrupt map (immortal) */
+static inline bool vm_is_interrupt(Value exc) {
+    return is_pointer(exc) && exc.as.object == vm_interrupt_exception().as.object;
+}
+/* Unwind vm to its innermost finally handler with the interrupt exception,
+ * or end it with an "interrupted" error when there is none */
+void vm_raise_interrupt(VM* vm);
 
 #endif /* BEERLANG_VM_H */

@@ -40,6 +40,12 @@ typedef struct Task {
 
     /* Channel blocking info */
     Value blocked_value;    /* Value being sent (for blocked senders) */
+    struct Task* wait_queue; /* Sentinel of the channel queue it waits in */
+    bool io_blocked;        /* Blocked via scheduler_block_io (I/O or sleep) */
+
+    /* Interrupts (see vm_request_interrupt) */
+    bool foreground;        /* A run_task_to_completion target outside any background task */
+    bool interrupt_pending; /* Raise the interrupt when it next runs */
 
     /* Completion watchers */
     WatcherNode* watchers;

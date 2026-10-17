@@ -175,6 +175,7 @@ size_t disassemble_instruction_to_file(FILE* fp, const uint8_t* code, size_t off
 
         /* Exception handling */
         case OP_PUSH_HANDLER: return uint32_instruction(fp, "PUSH_HANDLER", code, offset, code_size);
+        case OP_PUSH_FINALLY: return uint32_instruction(fp, "PUSH_FINALLY", code, offset, code_size);
         case OP_POP_HANDLER:  return simple_instruction(fp, "POP_HANDLER", offset);
         case OP_THROW:        return simple_instruction(fp, "THROW", offset);
         case OP_LOAD_EXCEPTION: return simple_instruction(fp, "LOAD_EXCEPTION", offset);
@@ -258,6 +259,7 @@ static const OpcodeInfo opcode_table[] = {
     { OP_HALT,           "HALT",           1 },
     /* Exception handling */
     { OP_PUSH_HANDLER,   "PUSH_HANDLER",   5 },
+    { OP_PUSH_FINALLY,   "PUSH_FINALLY",   5 },
     { OP_POP_HANDLER,    "POP_HANDLER",    1 },
     { OP_THROW,          "THROW",          1 },
     { OP_LOAD_EXCEPTION, "LOAD_EXCEPTION", 1 },

@@ -92,6 +92,7 @@ Note: `JUMP_IF_FALSE` peeks at the stack (does not consume the value). The compi
 | 0x71 | `POP_HANDLER` | — | Remove the top exception handler (normal exit from try block) |
 | 0x72 | `THROW` | — | Pop a value (must be a hashmap) and throw it as an exception |
 | 0x73 | `LOAD_EXCEPTION` | — | Push the current exception (`vm->exception`) onto the stack |
+| 0x74 | `PUSH_FINALLY` | `u32` handler_pc | Like `PUSH_HANDLER`, for a `finally`: an interrupt unwinds to the innermost of these, dropping catch handlers on the way |
 
 #### Functions & Closures (0x80 - 0x8F)
 

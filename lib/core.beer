@@ -487,18 +487,117 @@
 ; Exception helpers
 (defn ex-info [msg data] {:type :error :message msg :data data})
 
+;; --- Files and loading ---
+; File access goes through *fs* when an embedder sets it:
+;   (def beer.core/*fs* {:read (fn [path] ...) :write! (fn [path s append?] ...)})
+; :read returns the contents as a string, or nil if path can't be read.
+; nil means the host file system.
+(def *fs* nil)
+
+(defn __read-file [path]
+  (if *fs* ((get *fs* :read) path) (__file-read path)))
+
+(defn slurp [path]
+  (if *fs*
+    (let* [s ((get *fs* :read) path)]
+      (if (nil? s)
+        (throw (ex-info (str "slurp: failed to read '" path "'") {:path path}))
+        s))
+    (__slurp path)))
+
+(defn spit [path content & opts]
+  (if *fs*
+    ((get *fs* :write!) path content (if (= (first opts) :append) (second opts) false))
+    (apply __spit path content opts)))
+
+(defn load-file [path]
+  (let* [src (__read-file path)]
+    (if (nil? src)
+      (throw (ex-info (str "load: cannot open '" path "'") {:path path}))
+      (load-string src path))))
+
+(def load load-file)
+
 ; --- Namespace support ---
+(def __requiring (atom []))
+
+; [source name] for foo/bar.beer: *load-path* (through *fs*), then the
+; BEERPATH tar index
+(defn __require-source [rel]
+  (let* [found (some (fn [dir]
+                       (let* [path (str dir rel)
+                              src (__read-file path)]
+                         (if src [src path] nil)))
+                     *load-path*)]
+    (if found
+      found
+      (let* [src (__tar-read rel)]
+        (if src [src rel] nil)))))
+
+(defn __load-lib [ns-sym]
+  (let* [k (keyword (name ns-sym))]
+    (if (get *loaded-libs* k)
+      nil
+      (let* [rel (str (beer.string/replace (name ns-sym) "." "/") ".beer")
+             found (__require-source rel)
+             saved (__current-ns)]
+        (if (nil? found)
+          (throw (ex-info (str "require: cannot find file for '" ns-sym "'") {:ns ns-sym})))
+        (if (some (fn [n] (= n ns-sym)) @__requiring)
+          (throw (ex-info (str "require: circular dependency detected for '" ns-sym "'") {:ns ns-sym})))
+        (swap! __requiring conj ns-sym)
+        (try
+          (in-ns ns-sym)
+          (load-string (first found) (second found))
+          (finally
+            (in-ns saved)
+            (swap! __requiring pop)))
+        (def beer.core/*loaded-libs* (assoc *loaded-libs* k true))
+        nil))))
+
+; Group require's args into specs: 'a :as 'x '[b :refer [y]] 'c
+; => [[a :as x] [b :refer [y]] [c]]. An option keyword leaves its spec
+; with an even count until its value arrives.
+(defn __require-specs [args]
+  (reduce (fn [specs a]
+            (cond
+              (and (not (empty? specs)) (even? (count (peek specs))))
+                (conj (pop specs) (conj (peek specs) a))
+              (vector? a) (conj specs a)
+              (symbol? a) (conj specs [a])
+              (and (keyword? a) (not (empty? specs)))
+                (conj (pop specs) (conj (peek specs) a))
+              :else (throw (ex-info (str "require: unexpected argument " (pr-str a)) {:arg a}))))
+          [] args))
+
+(defn __require-one [spec]
+  (let* [ns-sym (first spec)
+         opts (rest spec)]
+    (if (not (symbol? ns-sym))
+      (throw (ex-info (str "require: expected a namespace symbol, got " (pr-str ns-sym)) {:spec spec})))
+    (if (even? (count spec))
+      (throw (ex-info (str "require: option without a value in " (pr-str spec)) {:spec spec})))
+    (let* [opts (apply hash-map opts)
+           alias (get opts :as)
+           refer (get opts :refer)]
+      (if (some (fn [k] (not (or (= k :as) (= k :refer)))) (keys opts))
+        (throw (ex-info "require: unknown option (expected :as or :refer)" {:spec spec})))
+      (if (and alias (not (symbol? alias)))
+        (throw (ex-info "require: :as alias must be a symbol" {:spec spec})))
+      (__load-lib ns-sym)
+      (if alias (__alias! alias ns-sym))
+      (if refer (__refer! ns-sym refer)))))
+
+; (require 'foo.bar), (require 'foo.bar :as 'fb :refer '[x]),
+; (require '[foo.bar :as fb] '[baz :refer :all] 'qux)
+(defn require [& args]
+  (reduce (fn [_ spec] (__require-one spec)) nil (__require-specs args))
+  nil)
+
 ; ns macro: (ns foo.bar (:require [baz :as b :refer [x]] other))
-; Expands to: (do (in-ns 'foo.bar) (require 'baz :as 'b :refer '[x]) (require 'other))
+; Expands to: (do (in-ns 'foo.bar) (require '[baz :as b :refer [x]] 'other))
 (defn __ns-require-clause [clause]
-  (if (vector? clause)
-    ; [foo.bar :as fb :refer [x]] => (require 'foo.bar :as 'fb :refer '[x])
-    (cons 'require
-          (cons (list 'quote (first clause))
-                (mapcat (fn [kv] (list (first kv) (list 'quote (second kv))))
-                        (partition 2 (rest clause)))))
-    ; bare symbol => (require 'sym)
-    (list 'require (list 'quote clause))))
+  (list 'quote clause))
 
 (defmacro ns [name & clauses]
   (let* [in-ns-form (list 'in-ns (list 'quote name))
@@ -508,7 +607,7 @@
              '()
              (let* [clause (first list-clauses)]
                (if (= (first clause) :require)
-                 (map __ns-require-clause (rest clause))
+                 (list (cons 'require (map __ns-require-clause (rest clause))))
                  '())))]
     (cons 'do (cons in-ns-form require-forms))))
 

@@ -196,12 +196,78 @@ void vm_rethrow(VM* vm, Value exc) {
          * This handles nested temp-VMs (e.g. multi-arity inside multi-arity). */
         if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
         vm->thrown_exception = exc;  /* transfer ownership — do NOT release */
-        vm_error(vm, "Unhandled exception");
+        vm_error(vm, vm_is_interrupt(exc) ? "interrupted" : "Unhandled exception");
         return;
     }
     if (is_pointer(vm->exception)) object_release(vm->exception);
     vm->exception    = exc;  /* transfer ownership */
     vm->native_throw = true;
+}
+
+volatile sig_atomic_t vm_interrupt_requested = 0;
+
+void vm_request_interrupt(void) {
+    vm_interrupt_requested = 1;
+}
+
+Value vm_interrupt_exception(void) {
+    static Value exc;
+    static bool made = false;
+    if (!made) {
+        Value m = hashmap_create_default();
+        Value m2 = hashmap_assoc(m, keyword_intern("type"), keyword_intern("interrupt"));
+        object_release(m);
+        Value msg = string_from_cstr("interrupted");
+        exc = hashmap_assoc(m2, keyword_intern("message"), msg);
+        object_release(msg);
+        object_release(m2);
+        object_make_immortal(exc);
+        made = true;
+    }
+    return exc;
+}
+
+static CallFrame* pop_frame(VM* vm);
+
+/* Pop the handler that receives exc: the innermost one, or for the
+ * interrupt the innermost finally (catch handlers above it are dropped).
+ * NULL when none is left. */
+static ExceptionHandler* pop_handler_for(VM* vm, Value exc) {
+    if (vm_is_interrupt(exc)) {
+        while (vm->handler_count > 0 && !vm->handlers[vm->handler_count - 1].is_finally)
+            vm->handler_count--;
+    }
+    if (vm->handler_count <= 0) return NULL;
+    return &vm->handlers[--vm->handler_count];
+}
+
+/* Pop frames and stack down to handler h */
+static void unwind_to_handler(VM* vm, ExceptionHandler* h) {
+    while (vm->frame_count > h->frame_count) {
+        CallFrame* frame = pop_frame(vm);
+        if (!frame) break;
+        while (vm->stack_pointer > frame->base_pointer) vm_pop(vm);
+        vm->code = frame->caller_code;
+        vm->code_size = frame->caller_code_size;
+        vm->constants = frame->caller_constants;
+        vm->num_constants = frame->caller_num_constants;
+    }
+    while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
+}
+
+void vm_raise_interrupt(VM* vm) {
+    Value exc = vm_interrupt_exception();
+    ExceptionHandler* h = pop_handler_for(vm, exc);
+    if (!h) {
+        if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
+        vm->thrown_exception = exc;  /* immortal */
+        vm_error(vm, "interrupted");
+        return;
+    }
+    unwind_to_handler(vm, h);
+    if (is_pointer(vm->exception)) object_release(vm->exception);
+    vm->exception = exc;
+    vm->pc = h->catch_pc;
 }
 
 /* Release builds run only verified bytecode (verify.c: valid opcodes,
@@ -1031,21 +1097,20 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 if (vm->native_throw) {
                     vm->native_throw = false;
                     if (is_pointer(result)) object_release(result);
-                    if (vm->handler_count <= 0) {
-                        vm_error(vm, "Unhandled exception");
+                    ExceptionHandler* h = pop_handler_for(vm, vm->exception);
+                    if (!h) {
+                        if (vm_is_interrupt(vm->exception)) {
+                            if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
+                            vm->thrown_exception = vm->exception;
+                            vm->exception = VALUE_NIL;
+                            vm_error(vm, "interrupted");
+                        } else {
+                            vm_error(vm, "Unhandled exception");
+                        }
                         return;
                     }
-                    ExceptionHandler* h = &vm->handlers[--vm->handler_count];
-                    while (vm->frame_count > h->frame_count) {
-                        CallFrame* fr = pop_frame(vm);
-                        if (!fr) break;
-                        while (vm->stack_pointer > fr->base_pointer) vm_pop(vm);
-                        vm->code = fr->caller_code;
-                        vm->code_size = fr->caller_code_size; r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
-                        vm->constants = fr->caller_constants;
-                        vm->num_constants = fr->caller_num_constants;
-                    }
-                    while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
+                    unwind_to_handler(vm, h);
+                    r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
                     r->pc = h->catch_pc;
                     break;
                 }
@@ -1222,21 +1287,20 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 if (vm->native_throw) {
                     vm->native_throw = false;
                     if (is_pointer(result)) object_release(result);
-                    if (vm->handler_count <= 0) {
-                        vm_error(vm, "Unhandled exception");
+                    ExceptionHandler* h = pop_handler_for(vm, vm->exception);
+                    if (!h) {
+                        if (vm_is_interrupt(vm->exception)) {
+                            if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
+                            vm->thrown_exception = vm->exception;
+                            vm->exception = VALUE_NIL;
+                            vm_error(vm, "interrupted");
+                        } else {
+                            vm_error(vm, "Unhandled exception");
+                        }
                         return;
                     }
-                    ExceptionHandler* h = &vm->handlers[--vm->handler_count];
-                    while (vm->frame_count > h->frame_count) {
-                        CallFrame* fr = pop_frame(vm);
-                        if (!fr) break;
-                        while (vm->stack_pointer > fr->base_pointer) vm_pop(vm);
-                        vm->code = fr->caller_code;
-                        vm->code_size = fr->caller_code_size; r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
-                        vm->constants = fr->caller_constants;
-                        vm->num_constants = fr->caller_num_constants;
-                    }
-                    while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
+                    unwind_to_handler(vm, h);
+                    r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
                     r->pc = h->catch_pc;
                     break;
                 }
@@ -1822,7 +1886,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
         }
 
         /* Exception handling */
-        case OP_PUSH_HANDLER: {
+        case OP_PUSH_HANDLER:
+        case OP_PUSH_FINALLY: {
             uint32_t catch_offset = read_uint32(vm, r);
             TRACE_OP("PC=%04u OP=%02X (OP_PUSH_HANDLER) catch_offset=%u sp=%d",
                       pc_at_opcode, op, catch_offset, vm->stack_pointer);
@@ -1837,6 +1902,7 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
             h->catch_pc = catch_offset;
             h->stack_pointer = vm->stack_pointer;
             h->frame_count = vm->frame_count;
+            h->is_finally = (op == OP_PUSH_FINALLY);
             break;
         }
 
@@ -1869,7 +1935,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
             if (is_pointer(exc)) object_retain(exc);
             vm_pop(vm);
 
-            if (vm->handler_count <= 0) {
+            ExceptionHandler* h = pop_handler_for(vm, exc);
+            if (!h) {
                 /* No handler — save the exception value so a parent VM (e.g. apply's
                  * temp VM) can re-throw it rather than losing it behind "apply: ..." */
                 if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
@@ -1881,27 +1948,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 return;
             }
 
-            ExceptionHandler* h = &vm->handlers[--vm->handler_count];
-
-            /* Unwind frames */
-            while (vm->frame_count > h->frame_count) {
-                CallFrame* frame = pop_frame(vm);
-                if (!frame) break;
-                /* Clean up stack for this frame (locals and args) */
-                while (vm->stack_pointer > frame->base_pointer) {
-                    vm_pop(vm);
-                }
-                /* Restore caller context */
-                vm->code = frame->caller_code;
-                vm->code_size = frame->caller_code_size; r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
-                vm->constants = frame->caller_constants;
-                vm->num_constants = frame->caller_num_constants;
-            }
-
-            /* Clean up remaining stack down to handler's SP */
-            while (vm->stack_pointer > h->stack_pointer) {
-                vm_pop(vm);
-            }
+            unwind_to_handler(vm, h);
+            r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
 
             /* Store exception for OP_LOAD_EXCEPTION */
             if (is_pointer(vm->exception)) object_release(vm->exception);
@@ -2113,16 +2161,7 @@ static VM_NOINLINE void error_to_exception(VM* vm) {
     object_release(s);
 
     ExceptionHandler* h = &vm->handlers[--vm->handler_count];
-    while (vm->frame_count > h->frame_count) {
-        CallFrame* frame = pop_frame(vm);
-        if (!frame) break;
-        while (vm->stack_pointer > frame->base_pointer) vm_pop(vm);
-        vm->code = frame->caller_code;
-        vm->code_size = frame->caller_code_size;
-        vm->constants = frame->caller_constants;
-        vm->num_constants = frame->caller_num_constants;
-    }
-    while (vm->stack_pointer > h->stack_pointer) vm_pop(vm);
+    unwind_to_handler(vm, h);
     if (is_pointer(vm->exception)) object_release(vm->exception);
     vm->exception = exc2;
     vm->pc  = h->catch_pc;

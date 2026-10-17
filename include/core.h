@@ -72,4 +72,9 @@ void core_register_bytes(void);
 #include "vm.h"
 Value native_load(VM* vm, int argc, Value* argv);
 
+/* Read, compile and run every form of source in the current namespace;
+ * errors are thrown in vm (fatal when it has no handler) and name the
+ * source and the form */
+Value core_load_source(VM* vm, const char* source, const char* name);
+
 #endif /* BEERLANG_CORE_H */

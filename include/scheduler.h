@@ -34,6 +34,10 @@ typedef struct Scheduler {
     /* Currently running task */
     Task* current;
 
+    /* Innermost foreground run_task_to_completion target: the task an
+     * interrupt stops */
+    Task* foreground;
+
     /* I/O reactor (async fd monitoring) */
     IOReactor* io_reactor;
     int blocked_count;      /* Tasks blocked on I/O */
@@ -71,8 +75,16 @@ void scheduler_run_until_done(Scheduler* sched);
 void scheduler_run_ready(Scheduler* sched);
 
 /* Run tasks until fd (e.g. stdin) is readable. Ready tasks keep running
- * while waiting, and fd is checked between batches of ticks. */
+ * while waiting, and fd is checked between batches of ticks. Also returns
+ * when an interrupt is requested with no foreground task to stop. */
 void scheduler_run_until_readable(Scheduler* sched, int fd);
+
+/* Run a native's temp VM (apply, swap!, ...) to completion. When the
+ * calling task is foreground, temp counts safe points like a task and an
+ * interrupt raised meanwhile unwinds it (running its finally blocks) and
+ * is rethrown in caller; returns false then, and the native should just
+ * return. Otherwise the same as vm_run(temp). */
+bool scheduler_run_nested(VM* caller, VM* temp);
 
 /* Run a specific task to completion (may run other tasks too).
  * Saves/restores sched->current for safe re-entrant use from natives. */

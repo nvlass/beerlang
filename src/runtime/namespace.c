@@ -320,7 +320,7 @@ Namespace* namespace_registry_get_core(NamespaceRegistry* reg) {
  * Global Initialization
  * ================================================================= */
 
-void namespace_init(void) {
+void namespace_init_bare(void) {
     if (global_namespace_registry) {
         return;  /* Already initialized */
     }
@@ -383,8 +383,10 @@ void namespace_init(void) {
 
     /* Initialize global scheduler */
     global_scheduler = scheduler_new(DEFAULT_TASK_QUOTA);
+}
 
-    /* Load core macros from lib/core.beer */
+void namespace_init(void) {
+    namespace_init_bare();
     core_register_macros();
 }
 

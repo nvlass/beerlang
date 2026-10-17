@@ -1,0 +1,3 @@
+(ns test_ns.spin)
+(def started true)
+(loop [] (recur))

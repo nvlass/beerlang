@@ -1,0 +1,2 @@
+(ns test_ns.circ_b (:require test_ns.circ_a))
+(def b 2)

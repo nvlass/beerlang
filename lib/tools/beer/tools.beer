@@ -70,20 +70,27 @@
 ;; beer build / beer ubertar
 ;; ----------------------------------------------------------------
 
+;; Entries are stored relative to their :paths root ("src/foo/core.beer"
+;; => "foo/core.beer"), the path `require` looks up in a tar.
 (defn collect-beer-files [paths]
   (reduce
     (fn [m dir]
       (let [result (shell/exec "find" dir "-name" "*.beer" "-type" "f")
+            root   (if (str/ends-with? dir "/") dir (str dir "/"))
             files  (filter (fn [s] (not (= s "")))
                      (str/split (:out result) "\n"))]
-        (reduce (fn [m2 f] (assoc m2 f (slurp f))) m files)))
+        (reduce (fn [m2 f]
+                  (assoc m2 (if (str/starts-with? f root) (subs f (count root)) f)
+                         (slurp f)))
+                m files)))
     {} paths))
 
 (defn build []
   (let [config (read-config)]
     (prepend-paths! (:paths config))
     (let [name  (:name config)
-          files (collect-beer-files (:paths config))]
+          files (assoc (collect-beer-files (:paths config))
+                       "beer.edn" (slurp "beer.edn"))]
       (tar/create (str name ".tar") files)
       (println (str "Built " name ".tar (" (count files) " files)")))))
 
@@ -100,7 +107,8 @@
                                               (tar/read-entry dep-tar (:name entry))))
                                    m entries)))
                        {} (:dependencies config))
-        all-files    (merge project-files dep-files)]
+        all-files    (assoc (merge project-files dep-files)
+                            "beer.edn" (slurp "beer.edn"))]
     (tar/create (str name "-standalone.tar") all-files)
     (println (str "Built " name "-standalone.tar"))))
 

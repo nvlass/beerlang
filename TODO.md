@@ -6,12 +6,14 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 551 (`bash tests/smoke_test.sh`)
-- **Last Updated:** 2026-10-12
+- REPL smoke tests: 625 (`bash tests/smoke_test.sh`)
+- **Last Updated:** 2026-10-17
 
 ## Open Items at a Glance
 
 Small / concrete:
+- beeros requests still open: `beer run app.tar`, tar index from memory,
+  `*fs*` for `open`/`beer.tar` — see "beeros requests" below
 - `::kw` isn't auto-resolved (reads as a keyword named `:kw`). Resolving
   at read time needs `load`, the file runner and `beerc` to read
   form-by-form instead of `reader_read_all` up front, or the file's
@@ -76,8 +78,14 @@ Performance — investigate / optimize:
     verification (would drop push/pop and local-index checks)
   - [todo] force-inline push_value/pop_value: clang keeps an out-of-line copy
     that costs 5-6%
-  - [investigate] phase 1 (pc/code in registers) is 1-4% faster on clang but
-    3-8% slower on GCC; get a Linux `perf` breakdown before the sp phase
+  - [investigate] Register caching through a Regs struct passed into the
+    inlined step(): phase 1 (pc/code, on main since 23c6ce8) was 1-4% faster
+    on clang but 3-8% slower on GCC; phase 2 (sp/stack, branch
+    vm-sp-registers, 6ae2029, not merged) was mixed on clang and +6% to +19%
+    slower on GCC. Likely GCC keeps the struct in memory inside the huge
+    function. Next: try plain locals in one function (no struct pointer),
+    check GCC's output with `perf annotate`, and measure reverting phase 1
+    on GCC
 - [investigate] Inline core fns at compile time: `OP_ADD`/`OP_LT`/… exist in
   the VM but the compiler never emits them, so `(+ k 1)` is LOAD_VAR + CALL
   of a native. Clojure inlines via `:inline` metadata on core vars
@@ -372,9 +380,94 @@ The full smoke suite under ASAN now reports no memory errors.
 - DMA: `addr` — raw pointer to `data[0]`
 - No opcode/compiler/reader changes — pure native-function surface
 - `tests/types/test_bytebuffer.c`; verified end-to-end at the REPL
-- **Not yet wired**: beeros's `mem/addr-of` dispatching on ByteBuffer
-  alongside String — follow-up once beeros driver work (post-filesystem)
-  actually needs it
+- beeros's `mem/addr-of` now dispatches on ByteBuffer alongside String
+  (beeros `90ce99f`)
+- **Likely needed: an aligned constructor**, e.g. `(bytes/alloc-aligned n
+  align)` with `data[0]` on an `align` boundary. `data[]` sits right after
+  the header (36 bytes in), so a plain `alloc` is only ~4-byte aligned, and
+  DMA ring memory isn't: virtio descriptor tables need 16-byte alignment,
+  other devices want 64 or a page. beeros's beerlang virtio-blk driver
+  starts by over-allocating and rounding the address up inside the buffer
+  (works, no runtime change, but every access carries an offset). Revisit
+  once a second driver needs it. Note: aligning `data[0]` means a variable
+  gap between header and data, so `bytebuffer_data()` can't stay a fixed
+  offset — e.g. store the data offset in the object.
+
+### beeros requests: file system hook, loading, packages, interrupts
+
+Context: beeros (bare-metal, `beerlang/` as an unmodified submodule) has
+a filesystem written in beerlang (`beer.ext2` + `beer.fs`, mounted at
+`/`) but no host libc filesystem: `fopen` finds nothing. Today beeros
+works around that by wrapping things on its side, which makes the same
+code behave differently on a host and on beeros. The goal of the items
+below is to remove those wrappers so beeros stays plain beerlang. Each
+item is independent; host builds must behave exactly as now when no hook
+is installed. Workarounds currently in beeros (to delete afterwards):
+`beer.fs/load-file` (read-string + eval), a `beer.core/require` wrapper
+(loads `/lib/foo/bar.beer`, marks `*loaded-libs*`, then calls the native),
+and the boot loader marking embedded namespaces in `*loaded-libs*`.
+
+**Done (2026-10-17), option (b): loading moved into `lib/core.beer`.**
+- `beer.core/*fs*`, nil by default (host), or `{:read (fn [path]
+  string-or-nil) :write! (fn [path s append?])}`. `slurp`, `spit`,
+  `load-file`/`load` and `require`'s `*load-path*` search go through it;
+  the tar index stays the fallback. beeros: `(def beer.core/*fs* ...)`.
+- `require`, `load-file`, `slurp`, `spit` are beerlang fns on small natives
+  (`__file-read`, `__tar-read`, `__slurp`, `__spit`, `__current-ns`,
+  `__alias!`, `__refer!`). `require` takes Clojure vector specs and flat
+  options, several per call; `ns` emits vector specs. `*ns*` is restored
+  with `finally` when a load fails; circular requires are detected.
+- `load-string` native (`core_load_source`, public for embedders: beeros's
+  `beer_load_blob` can use it). Load errors are catchable (`vm_throw_error`)
+  and name the file and form; a failing script now exits 1.
+- `(def x "doc" v)` attaches the docstring like `defn`.
+- `namespace_init_bare()` skips the `lib/core.beer` search (no NOTE).
+- `beer build`/`ubertar` store entries relative to their `:paths` root
+  (they were `src/foo/core.beer`, so `require` never found them in a built
+  tar) and include `beer.edn`.
+- beeros can delete: `beer.fs/load-file`, the `beer.core/require` wrapper,
+  and probably the `*loaded-libs*` marking for embedded namespaces (still
+  needed if those have no file under `*load-path*`).
+
+Still open from item 1: `open`/streams on files, `beer.tar/*` and the
+`BEERPATH` tar scan still use libc; `:read-bytes`/`:exists?`/`:list` hook
+keys wait for a caller that needs them. `require` now needs `core.beer`
+(was native): a runtime without it has no `require`.
+
+4. **Interrupting the running task — done (2026-10-17).** Options taken:
+   delivered by the scheduler between quanta (no VM hot-path cost), skips
+   `catch` but runs `finally`, foreground task only. `vm_request_interrupt()`
+   (signal/IRQ safe) or `(request-interrupt!)` from beerlang; the REPL maps
+   Ctrl-C to it (a second Ctrl-C while one is pending exits). New opcode
+   `OP_PUSH_FINALLY` marks finally handlers. Blocked foreground tasks
+   (channel, sleep, I/O) are woken; nested loads pass it through; temp-VM
+   natives (`apply`, `swap!`, ...) check it via `scheduler_run_nested`.
+   Design notes in `docs/design/08_MULTITASKING.md` "Interrupts".
+   beeros: call `vm_request_interrupt()` from the UART break / keyboard
+   chord; its own wait loop must return when `vm_interrupt_requested` is
+   set, and clear the flag at its prompt.
+   Not covered: a task stuck inside a blocking C call (e.g. `read-line` on
+   the still-blocking stdin), and a background `request-interrupt!` while
+   the foreground runs inside a temp VM (nothing else runs then).
+
+5. **Tar packages that know their entry point.** beeros wants to run a
+   `.tar` the same way `beer run` runs a project:
+   - ~~Include `beer.edn` in what `beer build` / `beer ubertar` write~~
+     (done); still to do: let `beer run app.tar` read `:main` (and later
+     other keys) from it.
+     The project file doubles as the package description; no new
+     manifest format.
+   - Index a tar from memory: `tar_index_add_buffer(idx, name, data,
+     len)` or a native `(beer.tar/index! bytebuffer)`, since beeros
+     reads the tar from its own filesystem, not through `FILE*`.
+   - ~~Entries stored as `src/foo/core.beer`~~: fixed, see above.
+
+6. **Small ones.** `(def x "doc" v)` and the core.beer NOTE are done (see
+   above). Open: aligned ByteBuffer constructor, see the ByteBuffer
+   section.
+
+Related: `::kw` resolution needs form-by-form reading in `load`; a
+`load-string` built on `core_load_source` inherits that.
 
 ---
 

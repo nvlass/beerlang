@@ -1141,6 +1141,31 @@ static void compile_def(Compiler* c, Value form) {
         return;
     }
 
+    int64_t n = list_length(form);
+    if (n > 4 || (n == 4 && !is_string(value_expr))) {
+        compile_error(c, "def: usage (def name value) or (def name \"doc\" value)");
+        return;
+    }
+    if (n == 4) {
+        /* (def x "doc" v) => (do (def x v) (alter-meta! 'x assoc :doc "doc") x),
+         * the same expansion defn uses */
+        Value def_items[3] = { symbol_intern("def"), symbol, list_nth_or_nil(form, 3) };
+        Value def_form = list_from_array(def_items, 3);
+        Value quote_items[2] = { symbol_intern("quote"), symbol };
+        Value quoted = list_from_array(quote_items, 2);
+        Value meta_items[5] = { symbol_intern("alter-meta!"), quoted,
+                                symbol_intern("assoc"), keyword_intern("doc"), value_expr };
+        Value meta_form = list_from_array(meta_items, 5);
+        Value do_items[4] = { symbol_intern("do"), def_form, meta_form, symbol };
+        Value do_form = list_from_array(do_items, 4);
+        compile_expr(c, do_form, false);
+        object_release(do_form);
+        object_release(meta_form);
+        object_release(quoted);
+        object_release(def_form);
+        return;
+    }
+
     /* Compile the value expression */
     compile_expr(c, value_expr, false);
 
@@ -2147,7 +2172,7 @@ static void compile_try(Compiler* c, Value form, bool in_tail_pos) {
      * so an exception escaping either still runs finally (then rethrows). */
     size_t finally_handler_operand = 0;
     if (has_finally) {
-        bytecode_emit_byte(c->bytecode, OP_PUSH_HANDLER);
+        bytecode_emit_byte(c->bytecode, OP_PUSH_FINALLY);
         finally_handler_operand = bytecode_current_offset(c->bytecode);
         bytecode_emit_uint32(c->bytecode, 0);  /* Placeholder */
     }

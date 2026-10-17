@@ -489,6 +489,97 @@ check_multi "$SETLP
 (ns my.app (:require [test_ns.greeter :as g]))
 (g/greet \"beer\")" '"hello, beer!"' "ns macro"
 
+# --- require: Clojure vector specs, several per call ---
+check_multi "$SETLP
+(require '[test_ns.greeter :as g :refer [greet]] '[test_ns.extra :as cf] 'test_ns.greeter)
+[(greet \"v\") cf/c]" '["hello, v!" 3]' "require vector specs"
+check_multi "$SETLP
+(require '[test_ns.greeter :refer :all])
+greeting" '"hello"' "require vector :refer :all"
+check_multi "$SETLP
+(try (require 'test_ns.greeter :as) (catch e (get e :message)))" \
+    '"require: option without a value in [test_ns.greeter :as]"' "require option without value"
+check_multi "$SETLP
+(try (require 'no.such.lib) (catch e nil))
+*ns*" "user" "failed require leaves *ns*"
+check_multi "$SETLP
+(try (require 'test_ns.circ_a) (catch e (get e :message)))" \
+    "\"load: error in tests/fixtures/lib/test_ns/circ_a.beer (form 1): load: error in tests/fixtures/lib/test_ns/circ_b.beer (form 1): require: circular dependency detected for 'test_ns.circ_a'\"" \
+    "require circular dependency"
+
+# --- load-string / load-file ---
+check '(load-string "(def ls-x 20) (+ ls-x 1)")' '21'
+check '(try (load-string "(+ 1" "x.beer") (catch e (get e :message)))' \
+    '"load: read error in x.beer: x.beer:1:4: Expected '"')'"' but got EOF"'
+check '(try (load-string "1\n(nope)" "y.beer") (catch e (get e :message)))' \
+    "\"load: error in y.beer (form 2): LOAD_VAR: undefined var 'nope'\""
+check_multi "(spit \"$TMPFILE\" \"(def lf-y 5) (* lf-y 2)\")
+(load-file \"$TMPFILE\")" '10' "load-file"
+
+# --- *fs* hook: require, slurp, spit and load-file go through it ---
+FSHOOK="(def fs-files (atom {\"tests/fixtures/lib/hooked/mod.beer\" \"(ns hooked.mod) (def v 42)\"}))
+(def beer.core/*fs* {:read (fn [p] (get @fs-files p))
+                     :write! (fn [p s app] (swap! fs-files assoc p (if app (str (get @fs-files p) s) s)))})"
+check_multi "$SETLP
+$FSHOOK
+(require '[hooked.mod :as hm])
+hm/v" '42' "*fs* hook: require"
+check_multi "$FSHOOK
+(spit \"/virt.txt\" \"ab\")
+(spit \"/virt.txt\" \"cd\" :append true)
+(slurp \"/virt.txt\")" '"abcd"' "*fs* hook: spit/slurp"
+check_multi "$FSHOOK
+(spit \"/virt.beer\" \"(+ 40 2)\")
+(load-file \"/virt.beer\")" '42' "*fs* hook: load-file"
+check_multi "$FSHOOK
+(try (slurp \"/missing\") (catch e (get e :message)))" \
+    "\"slurp: failed to read '/missing'\"" "*fs* hook: slurp missing"
+
+# --- Interrupts: request-interrupt! stops the foreground form ---
+# A background task requests it while the REPL's form spins or blocks.
+INTR="(spawn (fn [] (sleep 30) (request-interrupt!)))"
+check_multi "(def ilog (atom []))
+$INTR
+(try (loop [] (recur)) (catch e (swap! ilog conj :caught)) (finally (swap! ilog conj :finally)))
+@ilog" '[:finally]' "interrupt: skips catch, runs finally"
+check_multi "(def ilog (atom []))
+$INTR
+(try (try (loop [] (recur)) (finally (swap! ilog conj :inner))) (catch e nil) (finally (swap! ilog conj :outer)))
+@ilog" '[:inner :outer]' "interrupt: nested finally, rethrow skips catch"
+check_multi "$INTR
+(sleep 5000)
+(+ 1 2)" '3' "interrupt: sleeping form, REPL continues"
+check_multi "$INTR
+(try (<! (chan)) (catch e :caught))
+:after" ':after' "interrupt: blocked channel receive"
+check_multi "(def bg (atom 0))
+(spawn (fn [] (loop [i 0] (if (< i 200) (do (sleep 1) (reset! bg i) (recur (inc i))) nil))))
+$INTR
+(loop [] (recur))
+(sleep 400)
+@bg" '199' "interrupt: background task keeps running"
+check_multi "$SETLP
+$INTR
+(try (require 'test_ns.spin) (catch e nil))
+[*ns* (get *loaded-libs* :test_ns.spin) @beer.core/__requiring]" '[user nil []]' \
+    "interrupt: require restores *ns*, not marked loaded"
+check_multi "$INTR
+(load-string \"(def lsi 1) (loop [] (recur)) (def lsi 2)\" \"spin.beer\")
+lsi" '1' "interrupt: load-string stops mid-file"
+
+# Natives running fns in a temp VM (swap!, apply): requested from inside
+check_multi '(def ia (atom 5))
+(try (swap! ia (fn [x] (request-interrupt!) (loop [] (recur)))) (catch e :caught))
+@ia' '5' "interrupt: inside swap! fn, atom unchanged"
+check_multi '(def ilog (atom []))
+(try (apply (fn [& xs] (request-interrupt!) (try (loop [] (recur)) (finally (swap! ilog conj :in)))) [1]) (catch e :caught) (finally (swap! ilog conj :out)))
+@ilog' '[:in :out]' "interrupt: inside apply, finally on both sides"
+
+# --- def with a docstring ---
+check_multi '(def dd "the doc" 7)
+[dd (get (meta (quote dd)) :doc)]' '[7 "the doc"]' "def docstring"
+check '(def dd2)' 'nil'
+
 # --- Concurrency: spawn/await ---
 check '(yield)' 'nil'
 check '(await (spawn (fn [] (+ 1 2))))' '3'

@@ -65,6 +65,10 @@ Value task_new(Value fn, int argc, Value* argv, Scheduler* sched) {
     task->prev = NULL;
     task->blocked_value = VALUE_NIL;
     task->watchers = NULL;
+    task->wait_queue = NULL;
+    task->io_blocked = false;
+    task->foreground = false;
+    task->interrupt_pending = false;
 
     /* Create a VM for this task */
     VM* vm = vm_new(256);
@@ -130,6 +134,10 @@ Value task_new_from_code(uint8_t* code, int code_size,
     task->prev = NULL;
     task->blocked_value = VALUE_NIL;
     task->watchers = NULL;
+    task->wait_queue = NULL;
+    task->io_blocked = false;
+    task->foreground = false;
+    task->interrupt_pending = false;
 
     VM* vm = vm_new(256);
     vm->scheduler = sched;
@@ -168,7 +176,11 @@ void task_run(Task* task) {
         vm->yield_countdown = vm->scheduler->quota;
     }
 
-    vm_run(vm);
+    if (task->interrupt_pending) {
+        task->interrupt_pending = false;
+        vm_raise_interrupt(vm);
+    }
+    if (!vm->error) vm_run(vm);
 
     if (vm->error) {
         /* Task errored — treat as done with nil result */

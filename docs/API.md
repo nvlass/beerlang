@@ -9,6 +9,7 @@ Define a var in the current namespace.
 ```clojure
 (def x 42)
 (def greeting "hello")
+(def answer "The answer." 42)   ; docstring → (meta 'answer)
 ```
 
 ### `if`
@@ -72,6 +73,9 @@ Exception handling. Only maps can be thrown.
   (catch e (println (:msg e)))
   (finally (println "done")))
 ```
+An interrupt (Ctrl-C at the REPL, `request-interrupt!`) unwinds the
+foreground form with `{:type :interrupt :message "interrupted"}`: `finally`
+blocks run, `catch` doesn't see it.
 
 ### `defmacro`
 Define a macro.
@@ -253,6 +257,22 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 
 `spit` supports `:append true`: `(spit "f.txt" "more" :append true)`
 
+#### File system hook (`*fs*`)
+
+`slurp`, `spit`, `load`/`load-file` and `require`'s `*load-path*` search
+read and write through `beer.core/*fs*` when it is set; `nil` (the
+default) means the host file system. An embedder with its own file system
+installs a map:
+
+```clojure
+(def beer.core/*fs*
+  {:read   (fn [path] ...)            ; contents as a string, or nil if unreadable
+   :write! (fn [path s append?] ...)})
+```
+
+`require` still falls back to the `BEERPATH` tar index when no
+`*load-path*` entry has the file. `open` and streams stay on the host.
+
 ### Utility
 
 | Function | Description | Example |
@@ -271,12 +291,14 @@ Strings also work as sequences with `first`, `rest`, `nth`, `count`, `empty?`, a
 | `macroexpand` | Fully expand macros | `(macroexpand '(when true 1))` |
 | `set-macro!` | Mark a var as a macro | `(set-macro! 'my-macro)` |
 | `in-ns` | Switch/create namespace | `(in-ns 'my.ns)` |
-| `require` | Load namespace with optional alias | `(require 'foo.bar :as 'fb)` |
+| `require` | Load namespaces, with optional alias/refer; specs as vectors or flat | `(require '[foo.bar :as fb :refer [x]] 'baz)`, `(require 'foo.bar :as 'fb)` |
 | `eval` | Compile and execute a form | `(eval '(+ 1 2))` → `3` |
 | `read-string` | Parse a string into a beerlang value (one form) | `(read-string "(+ 1 2)")` → `(+ 1 2)` |
 | `keyword` | Create keyword from string | `(keyword "foo")` → `:foo` |
 | `name` | Get name of symbol or keyword as string | `(name :foo)` → `"foo"` |
-| `load` | Load and execute a .beer file | `(load "path/to/file.beer")` |
+| `load-file` | Load and execute a .beer file (`load` is the same fn) | `(load-file "path/to/file.beer")` |
+| `load-string` | Load and execute every form in a string; optional name for errors | `(load-string "(def x 1) x" "x.beer")` → `1` |
+| `request-interrupt!` | Interrupt the foreground form (what Ctrl-C does at the REPL); background tasks keep running | `(request-interrupt!)` |
 | `ns-publics` | List symbols defined in a namespace | `(ns-publics 'beer.core)` |
 
 ### Concurrency

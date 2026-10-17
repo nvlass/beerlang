@@ -44,6 +44,10 @@ bool channel_send(Value ch_val, Value val, Scheduler* sched, Task* task);
  * false if task was blocked. */
 bool channel_recv(Value ch_val, Scheduler* sched, Task* task, Value* out);
 
+/* Take a blocked task out of the channel queue it waits in (dropping a
+ * pending send). The caller wakes it. */
+void channel_cancel_wait(Task* task);
+
 /* Close the channel. Wakes all blocked tasks. */
 void channel_close(Value ch_val, Scheduler* sched);
 

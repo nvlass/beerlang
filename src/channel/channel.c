@@ -69,6 +69,7 @@ Value channel_new(int capacity) {
 static void queue_push(Task* sentinel, Task* task) {
     Value task_val = tag_pointer(task);
     object_retain(task_val);
+    task->wait_queue = sentinel;
     task->next = NULL;
     if (!sentinel->next) {
         sentinel->next = task;
@@ -89,8 +90,23 @@ static Task* queue_pop(Task* sentinel) {
     if (task->next) task->next->prev = NULL;
     task->next = NULL;
     task->prev = NULL;
+    task->wait_queue = NULL;
     /* Caller takes ownership of the retain from queue_push */
     return task;
+}
+
+void channel_cancel_wait(Task* task) {
+    Task* sentinel = task->wait_queue;
+    if (!sentinel) return;
+    if (task->prev) task->prev->next = task->next;
+    else sentinel->next = task->next;
+    if (task->next) task->next->prev = task->prev;
+    task->next = NULL;
+    task->prev = NULL;
+    task->wait_queue = NULL;
+    if (is_pointer(task->blocked_value)) object_release(task->blocked_value);
+    task->blocked_value = VALUE_NIL;
+    object_release(tag_pointer(task));  /* the retain from queue_push */
 }
 
 /* Helper: check if queue is empty */

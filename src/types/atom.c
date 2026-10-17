@@ -7,6 +7,7 @@
 #include "vm.h"
 #include "function.h"
 #include "native.h"
+#include "scheduler.h"
 
 /* Atom destructor */
 static void atom_destroy(struct Object* obj) {
@@ -120,10 +121,12 @@ Value atom_swap(VM* vm, Value atom_val, Value fn, int extra_argc, Value* extra_a
     vm_load_code(temp_vm, code, (int)pc);
     vm_load_constants(temp_vm, consts, n_consts);
     vm_trust_loaded_code(temp_vm);  /* generated call stub */
-    vm_run(temp_vm);
 
     Value result = VALUE_NIL;
-    if (temp_vm->error) {
+    bool completed = scheduler_run_nested(vm, temp_vm);
+    if (!completed) {
+        /* interrupted: rethrown in vm, the atom keeps its value */
+    } else if (temp_vm->error) {
         char errbuf[256];
         snprintf(errbuf, sizeof(errbuf), "swap!: %s", temp_vm->error_msg);
         vm_error(vm, errbuf);
@@ -136,7 +139,7 @@ Value atom_swap(VM* vm, Value atom_val, Value fn, int extra_argc, Value* extra_a
     free(code);
     free(consts);
 
-    if (!vm->error) {
+    if (completed && !vm->error) {
         /* Store result in atom */
         Value old = atom->value;
         atom->value = result;

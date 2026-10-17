@@ -416,7 +416,11 @@ Uses the need_frame pattern at top level. Compilation:
 7. Compile catch body.
 8. Patch the skip jump.
 
-Note: `finally` is not yet implemented.
+With `finally`, an `OP_PUSH_FINALLY` handler is pushed first, around the
+body and the catch. Normal exit pops it and runs the finally body;
+its handler stores the exception in a hidden local, runs the finally body
+and rethrows. It is a separate opcode so an interrupt can tell it from a
+catch: the interrupt exception skips catch handlers but runs every finally.
 
 ## Macro Expansion
 

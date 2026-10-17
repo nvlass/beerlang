@@ -41,7 +41,8 @@
 
 /* Forward declarations */
 Value native_load(VM* vm, int argc, Value* argv);
-static Value load_from_buffer(VM* caller_vm, const char* source, const char* name);
+static Value native_load_string(VM* vm, int argc, Value* argv);
+static Value native_request_interrupt(VM* vm, int argc, Value* argv);
 static Value native_eval(VM* vm, int argc, Value* argv);
 static Value native_macroexpand_1(VM* vm, int argc, Value* argv);
 static Value native_macroexpand(VM* vm, int argc, Value* argv);
@@ -1923,220 +1924,103 @@ static Value native_in_ns(VM* vm, int argc, Value* argv) {
     return sym;
 }
 
-/* require: (require 'foo.bar) or (require 'foo.bar :as 'fb)
- * Loads a namespace from file if not already loaded, optionally aliases it. */
-/* Circular require detection */
-#define MAX_REQUIRE_DEPTH 64
-static const char* requiring_stack[MAX_REQUIRE_DEPTH];
-static int requiring_depth = 0;
-
-static bool is_currently_requiring(const char* ns_name) {
-    for (int i = 0; i < requiring_depth; i++) {
-        if (strcmp(requiring_stack[i], ns_name) == 0) return true;
-    }
-    return false;
-}
+/* Primitives under beer.core/require, load-file, slurp and spit (lib/core.beer),
+ * which route file access through the *fs* var in beer.core when an embedder sets it. */
 
 static bool is_keyword_named(Value v, const char* name) {
     return is_pointer(v) && object_type(v) == TYPE_KEYWORD &&
            !keyword_has_namespace(v) && strcmp(keyword_name(v), name) == 0;
 }
 
-/* (require 'ns :as 'alias :refer '[a b]) — options in any order;
- * :refer also takes :all */
-static Value native_require(VM* vm, int argc, Value* argv) {
-    if (argc < 1 || argc % 2 == 0) {
-        vm_error(vm, "require: usage (require 'ns :as 'alias :refer '[syms])");
+static bool is_symbol_value(Value v) {
+    return is_pointer(v) && object_type(v) == TYPE_SYMBOL;
+}
+
+/* (__file-read path) => contents, or nil if it can't be read */
+static Value native_file_read(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_string(argv[0])) {
+        vm_error(vm, "__file-read: requires a path string");
         return VALUE_NIL;
     }
+    return stream_slurp(string_cstr(argv[0]));
+}
 
-    Value ns_sym = argv[0];
-    if (!is_pointer(ns_sym) || object_type(ns_sym) != TYPE_SYMBOL) {
-        vm_error(vm, "require: first argument must be a symbol");
+/* (__tar-read "foo/bar.beer") => source from the BEERPATH tar index, or nil */
+static Value native_tar_read(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_string(argv[0])) {
+        vm_error(vm, "__tar-read: requires a path string");
         return VALUE_NIL;
     }
+    TarEntry* entry = tar_index_lookup(&global_tar_index, string_cstr(argv[0]));
+    if (!entry) return VALUE_NIL;
+    char* src = tar_index_read_entry(entry);
+    if (!src) return VALUE_NIL;
+    Value result = string_from_cstr(src);
+    free(src);
+    return result;
+}
 
-    Value alias_sym = VALUE_NIL;
-    Value refer = VALUE_NIL;
-    for (int i = 1; i < argc; i += 2) {
-        Value opt = argv[i], val = argv[i + 1];
-        if (is_keyword_named(opt, "as")) {
-            if (!is_pointer(val) || object_type(val) != TYPE_SYMBOL) {
-                vm_error(vm, "require: :as alias must be a symbol");
-                return VALUE_NIL;
-            }
-            alias_sym = val;
-        } else if (is_keyword_named(opt, "refer")) {
-            bool ok = is_keyword_named(val, "all") ||
-                      (is_pointer(val) && object_type(val) == TYPE_VECTOR);
-            for (size_t j = 0; ok && !is_keyword_named(val, "all") && j < vector_length(val); j++) {
-                Value s = vector_get(val, j);
-                ok = is_pointer(s) && object_type(s) == TYPE_SYMBOL;
-            }
-            if (!ok) {
-                vm_error(vm, "require: :refer takes a vector of symbols or :all");
-                return VALUE_NIL;
-            }
-            refer = val;
-        } else {
-            vm_error(vm, "require: unknown option (expected :as or :refer)");
-            return VALUE_NIL;
-        }
+/* (__current-ns) => symbol naming the current namespace */
+static Value native_current_ns(VM* vm, int argc, Value* argv) {
+    (void)argv;
+    if (argc != 0) {
+        vm_error(vm, "__current-ns: takes no arguments");
+        return VALUE_NIL;
     }
+    Namespace* ns = namespace_registry_current(global_namespace_registry);
+    return ns ? symbol_intern(ns->name) : VALUE_NIL;
+}
 
-    const char* ns_name = symbol_str(ns_sym);
-
-    /* Check *loaded-libs* (core ns always owns this) */
-    Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
-    Namespace* current_ns = namespace_registry_current(global_namespace_registry);
-    Value loaded_sym = symbol_intern("*loaded-libs*");
-    Var* loaded_var = namespace_lookup(core_ns, loaded_sym);
-    Value loaded_libs = loaded_var ? var_get_value(loaded_var) : VALUE_NIL;
-
-    Value ns_key = keyword_intern(ns_name);
-    bool already_loaded = false;
-    if (!is_nil(loaded_libs)) {
-        Value check = hashmap_get(loaded_libs, ns_key);
-        if (!is_nil(check)) already_loaded = true;
+/* (__alias! 'alias 'target-ns) in the current namespace */
+static Value native_alias(VM* vm, int argc, Value* argv) {
+    if (argc != 2 || !is_symbol_value(argv[0]) || !is_symbol_value(argv[1])) {
+        vm_error(vm, "__alias!: requires an alias symbol and a namespace symbol");
+        return VALUE_NIL;
     }
-
-    if (!already_loaded) {
-        /* Build file path: dot → slash + .beer */
-        char rel_path[512];
-        size_t j = 0;
-        for (size_t i = 0; ns_name[i] && j < sizeof(rel_path) - 6; i++) {
-            rel_path[j++] = (ns_name[i] == '.') ? '/' : ns_name[i];
-        }
-        rel_path[j] = '\0';
-        strcat(rel_path, ".beer");
-
-        /* Search *load-path* — check current ns, then beer.core, then user */
-        Value lp_sym = symbol_intern("*load-path*");
-        Var* lp_var = namespace_lookup(current_ns, lp_sym);
-        if (!lp_var && core_ns) lp_var = namespace_lookup(core_ns, lp_sym);
-        if (!lp_var) {
-            Namespace* user_ns = namespace_registry_get(global_namespace_registry, "user");
-            if (user_ns) lp_var = namespace_lookup(user_ns, lp_sym);
-        }
-        Value load_path = lp_var ? var_get_value(lp_var) : VALUE_NIL;
-
-        bool found = false;
-        char full_path[1024];
-
-        if (!is_nil(load_path)) {
-            size_t n = vector_length(load_path);
-            for (size_t i = 0; i < n; i++) {
-                Value dir = vector_get(load_path, i);
-                if (!is_string(dir)) continue;
-                snprintf(full_path, sizeof(full_path), "%s%s", string_cstr(dir), rel_path);
-                FILE* f = fopen(full_path, "r");
-                if (f) {
-                    fclose(f);
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        /* Fallback: check tar index */
-        TarEntry* tar_entry = NULL;
-        if (!found) {
-            tar_entry = tar_index_lookup(&global_tar_index, rel_path);
-            if (tar_entry) found = true;
-        }
-
-        if (!found) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "require: cannot find file for '%s'", ns_name);
-            vm_error(vm, buf);
-            return VALUE_NIL;
-        }
-
-        /* Circular require detection */
-        if (is_currently_requiring(ns_name)) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "require: circular dependency detected for '%s'", ns_name);
-            vm_error(vm, buf);
-            return VALUE_NIL;
-        }
-        if (requiring_depth >= MAX_REQUIRE_DEPTH) {
-            vm_error(vm, "require: maximum nesting depth exceeded");
-            return VALUE_NIL;
-        }
-        requiring_stack[requiring_depth++] = ns_name;
-
-        /* Save current namespace, switch to target, load, restore */
-        Namespace* saved_ns = namespace_registry_current(global_namespace_registry);
-        Namespace* target_ns = namespace_registry_get_or_create(global_namespace_registry, ns_name);
-        namespace_registry_set_current(global_namespace_registry, target_ns);
-
-        if (tar_entry) {
-            char* src = tar_index_read_entry(tar_entry);
-            if (!src) {
-                namespace_registry_set_current(global_namespace_registry, saved_ns);
-                requiring_depth--;
-                vm_error(vm, "require: failed to read tar entry");
-                return VALUE_NIL;
-            }
-            load_from_buffer(vm, src, tar_entry->ns_path);
-            free(src);
-        } else {
-            Value path_str = string_from_cstr(full_path);
-            Value load_argv[1] = { path_str };
-            native_load(vm, 1, load_argv);
-            object_release(path_str);
-        }
-
-        namespace_registry_set_current(global_namespace_registry, saved_ns);
-        requiring_depth--;
-
-        if (vm->error) return VALUE_NIL;
-
-        /* Mark as loaded */
-        if (!loaded_var) {
-            loaded_var = namespace_define(core_ns, loaded_sym, VALUE_NIL);
-        }
-        if (is_nil(loaded_libs)) {
-            loaded_libs = hashmap_create_default();
-        } else {
-            object_retain(loaded_libs);
-        }
-        hashmap_set(loaded_libs, ns_key, VALUE_TRUE);
-        var_set_value(loaded_var, loaded_libs);
-        object_release(loaded_libs);
-    }
-
     Namespace* current = namespace_registry_current(global_namespace_registry);
-    if (!is_nil(alias_sym)) {
-        namespace_add_alias(current, alias_sym, ns_name);
-    }
+    namespace_add_alias(current, argv[0], symbol_str(argv[1]));
+    return VALUE_NIL;
+}
 
-    if (!is_nil(refer)) {
-        Namespace* target = namespace_registry_get(global_namespace_registry, ns_name);
-        if (!target) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "require: namespace '%s' not found after loading", ns_name);
-            vm_error(vm, buf);
+/* (__refer! 'target-ns '[a b]) or (__refer! 'target-ns :all) into the current namespace */
+static Value native_refer(VM* vm, int argc, Value* argv) {
+    char buf[256];
+    if (argc != 2 || !is_symbol_value(argv[0])) {
+        vm_error(vm, "__refer!: requires a namespace symbol and a vector or :all");
+        return VALUE_NIL;
+    }
+    const char* ns_name = symbol_str(argv[0]);
+    Value refer = argv[1];
+    bool all = is_keyword_named(refer, "all");
+    bool ok = all || (is_pointer(refer) && object_type(refer) == TYPE_VECTOR);
+    for (size_t j = 0; ok && !all && j < vector_length(refer); j++) {
+        ok = is_symbol_value(vector_get(refer, j));
+    }
+    if (!ok) {
+        vm_throw_error(vm, "require: :refer takes a vector of symbols or :all");
+        return VALUE_NIL;
+    }
+    Namespace* target = namespace_registry_get(global_namespace_registry, ns_name);
+    if (!target) {
+        snprintf(buf, sizeof(buf), "require: namespace '%s' not found after loading", ns_name);
+        vm_throw_error(vm, buf);
+        return VALUE_NIL;
+    }
+    Namespace* current = namespace_registry_current(global_namespace_registry);
+    Value syms = all ? hashmap_keys(target->vars) : refer;
+    for (size_t i = 0; i < vector_length(syms); i++) {
+        Value sym = vector_get(syms, i);
+        Value var_val = hashmap_get(target->vars, sym);
+        if (is_nil(var_val)) {
+            snprintf(buf, sizeof(buf), "require: %s does not exist in '%s'",
+                     symbol_str(sym), ns_name);
+            if (all) object_release(syms);
+            vm_throw_error(vm, buf);
             return VALUE_NIL;
         }
-        bool all = is_keyword_named(refer, "all");
-        Value syms = all ? hashmap_keys(target->vars) : refer;
-        for (size_t i = 0; i < vector_length(syms); i++) {
-            Value sym = vector_get(syms, i);
-            Value var_val = hashmap_get(target->vars, sym);
-            if (is_nil(var_val)) {
-                char buf[256];
-                snprintf(buf, sizeof(buf), "require: %s does not exist in '%s'",
-                         symbol_str(sym), ns_name);
-                if (all) object_release(syms);
-                vm_error(vm, buf);
-                return VALUE_NIL;
-            }
-            namespace_refer(current, sym, (Var*)untag_pointer(var_val));
-        }
-        if (all) object_release(syms);
+        namespace_refer(current, sym, (Var*)untag_pointer(var_val));
     }
-
+    if (all) object_release(syms);
     return VALUE_NIL;
 }
 
@@ -2211,9 +2095,10 @@ static void reduce_kv_bytecode_cb(Value key, Value value, void* ctx_ptr) {
     vm_load_code(temp_vm, code, (int)pc);
     vm_load_constants(temp_vm, consts, 4);
     vm_trust_loaded_code(temp_vm);  /* generated call stub */
-    vm_run(temp_vm);
 
-    if (temp_vm->error) {
+    if (!scheduler_run_nested(ctx->vm, temp_vm)) {
+        ctx->error = true;
+    } else if (temp_vm->error) {
         char errbuf[256];
         snprintf(errbuf, sizeof(errbuf), "reduce-kv: %s", temp_vm->error_msg);
         vm_error(ctx->vm, errbuf);
@@ -2373,9 +2258,10 @@ static Value native_apply(VM* vm, int argc, Value* argv) {
         vm_load_code(temp_vm, code, (int)pc);
         vm_load_constants(temp_vm, consts, n_consts);
         vm_trust_loaded_code(temp_vm);  /* generated call stub */
-        vm_run(temp_vm);
 
-        if (temp_vm->error) {
+        if (!scheduler_run_nested(vm, temp_vm)) {
+            result = VALUE_NIL;
+        } else if (temp_vm->error) {
             /* If OP_THROW saved the original exception value, re-throw it
              * in the calling VM so try/catch sees the original map, not a
              * wrapped "apply: Unhandled exception" string. */
@@ -2534,7 +2420,7 @@ static Value native_disasm(VM* vm, int argc, Value* argv) {
             }
             if (!found && n_labels < MAX_LABELS)
                 label_pcs[n_labels++] = target;
-        } else if (op == OP_PUSH_HANDLER) {
+        } else if (op == OP_PUSH_HANDLER || op == OP_PUSH_FINALLY) {
             /* Absolute uint32 PC */
             uint32_t target = 0;
             if (pc + 5 <= (size_t)code_size) {
@@ -2653,7 +2539,7 @@ static Value native_disasm(VM* vm, int argc, Value* argv) {
             } else {
                 vector_push(instr, make_fixnum(offset));
             }
-        } else if (op == OP_PUSH_HANDLER) {
+        } else if (op == OP_PUSH_HANDLER || op == OP_PUSH_FINALLY) {
             uint32_t target = 0;
             for (int i = 0; i < 4; i++)
                 target |= ((uint32_t)code[pc + 1 + i]) << (i * 8);
@@ -2918,7 +2804,7 @@ static Value native_asm(VM* vm, int argc, Value* argv) {
             }
             for (int b = 0; b < 4; b++)
                 bytecode[pc + 1 + b] = (uint8_t)((offset >> (b * 8)) & 0xFF);
-        } else if (info->opcode == OP_PUSH_HANDLER) {
+        } else if (info->opcode == OP_PUSH_HANDLER || info->opcode == OP_PUSH_FINALLY) {
             /* Operand: label keyword → resolve to absolute PC */
             if (vector_length(instr) < 2) {
                 vm_error(vm, "asm: PUSH_HANDLER requires a label operand");
@@ -3426,14 +3312,20 @@ void core_register_utility(void) {
     register_native(core_ns, "macroexpand", native_macroexpand);
     register_native(core_ns, "in-ns", native_in_ns);
     register_native(core_ns, "eval", native_eval);
-    register_native(core_ns, "load", native_load);
+    register_native(core_ns, "__load", native_load);
+    register_native(core_ns, "load-string", native_load_string);
+    register_native(core_ns, "request-interrupt!", native_request_interrupt);
+    register_native(core_ns, "__file-read", native_file_read);
+    register_native(core_ns, "__tar-read", native_tar_read);
+    register_native(core_ns, "__current-ns", native_current_ns);
+    register_native(core_ns, "__alias!", native_alias);
+    register_native(core_ns, "__refer!", native_refer);
     register_native(core_ns, "pr-str", native_pr_str);
     register_native(core_ns, "prn", native_prn);
     register_native(core_ns, "read-string", native_read_string);
     register_native(core_ns, "disasm", native_disasm);
     register_native(core_ns, "asm", native_asm);
     register_native(core_ns, "subs", native_subs);
-    register_native(core_ns, "require", native_require);
     register_native(core_ns, "ns-publics", native_ns_publics);
 
     /* Initialize *loaded-libs* as empty map */
@@ -3855,8 +3747,8 @@ void core_register_streams(void) {
     register_native(core_ns, "write", native_write_stream);
     register_native(core_ns, "write-bytes", native_write_bytes);
     register_native(core_ns, "flush", native_flush);
-    register_native(core_ns, "slurp", native_slurp);
-    register_native(core_ns, "spit", native_spit);
+    register_native(core_ns, "__slurp", native_slurp);
+    register_native(core_ns, "__spit", native_spit);
     register_native(core_ns, "stream?", native_stream_q);
 }
 
@@ -4388,8 +4280,9 @@ static Value native_alter_meta(VM* vm, int argc, Value* argv) {
         temp->num_constants = n_consts;
         temp->scheduler = vm->scheduler;
 
-        vm_run(temp);
-        if (temp->error) {
+        if (!scheduler_run_nested(vm, temp)) {
+            result = VALUE_NIL;
+        } else if (temp->error) {
             char buf[256];
             snprintf(buf, sizeof(buf), "alter-meta!: %s", temp->error_msg);
             vm_error(vm, buf);
@@ -4537,10 +4430,11 @@ static Value do_macroexpand_1(VM* vm, Value form) {
     vm_load_code(tmp_vm, code, (int)pc);
     vm_load_constants(tmp_vm, consts, n_consts);
     vm_trust_loaded_code(tmp_vm);  /* generated call stub */
-    vm_run(tmp_vm);
 
     Value result = VALUE_NIL;
-    if (tmp_vm->error) {
+    if (!scheduler_run_nested(vm, tmp_vm)) {
+        /* interrupted: rethrown in vm */
+    } else if (tmp_vm->error) {
         char buf[256];
         snprintf(buf, sizeof(buf), "macroexpand failed: %s", tmp_vm->error_msg);
         vm_error(vm, buf);
@@ -4659,7 +4553,9 @@ static Value native_eval(VM* caller_vm, int argc, Value* argv) {
     scheduler_run_task_to_completion(global_scheduler, task);
 
     Value result = VALUE_NIL;
-    if (task->vm->error) {
+    if (task->vm->error && vm_is_interrupt(task->vm->thrown_exception)) {
+        vm_rethrow(caller_vm, vm_interrupt_exception());
+    } else if (task->vm->error) {
         char buf[256];
         snprintf(buf, sizeof(buf), "eval: %s", task->vm->error_msg);
         vm_error(caller_vm, buf);
@@ -4675,14 +4571,19 @@ static Value native_eval(VM* caller_vm, int argc, Value* argv) {
     return result;
 }
 
-static Value load_from_buffer(VM* caller_vm, const char* source, const char* name) {
-    (void)caller_vm;
+/* Read, compile and run every form of source in the current namespace.
+ * Errors are thrown in caller_vm (catchable when it has a handler) and
+ * name the source and the form. */
+Value core_load_source(VM* caller_vm, const char* source, const char* name) {
+    char buf[512];
     Reader* reader = reader_new(source, name);
     Value forms = reader_read_all(reader);
 
     if (reader_has_error(reader)) {
-        fprintf(stderr, "load: read error in %s: %s\n", name, reader_error_msg(reader));
+        snprintf(buf, sizeof(buf), "load: read error in %s: %s", name, reader_error_msg(reader));
         reader_free(reader);
+        if (is_pointer(forms)) object_release(forms);
+        vm_throw_error(caller_vm, buf);
         return VALUE_NIL;
     }
     reader_free(reader);
@@ -4697,10 +4598,13 @@ static Value load_from_buffer(VM* caller_vm, const char* source, const char* nam
         CompiledCode* code = compile(compiler, form);
 
         if (compiler_has_error(compiler)) {
-            fprintf(stderr, "load: compile error in %s (form %zu): %s\n", name, i, compiler_error_msg(compiler));
+            snprintf(buf, sizeof(buf), "load: compile error in %s (form %zu): %s",
+                     name, i + 1, compiler_error_msg(compiler));
             compiled_code_free(code);
             compiler_free(compiler);
             object_release(forms);
+            if (is_pointer(last_result)) object_release(last_result);
+            vm_throw_error(caller_vm, buf);
             return VALUE_NIL;
         }
         compiler_free(compiler);
@@ -4733,11 +4637,17 @@ static Value load_from_buffer(VM* caller_vm, const char* source, const char* nam
         scheduler_run_task_to_completion(global_scheduler, task);
 
         if (task->vm->error) {
-            fprintf(stderr, "load: runtime error in %s: %s\n", name, task->vm->error_msg);
+            bool interrupted = vm_is_interrupt(task->vm->thrown_exception);
+            snprintf(buf, sizeof(buf), "load: error in %s (form %zu): %s",
+                     name, i + 1, task->vm->error_msg);
             object_release(task_val);
-            compiled_code_free(code);
-            free(constants);
+            /* Functions from this unit may already be stored in vars */
+            core_retain_unit(code, constants);
             object_release(forms);
+            if (is_pointer(last_result)) object_release(last_result);
+            /* An interrupt passes through unchanged so it keeps skipping catch */
+            if (interrupted) vm_rethrow(caller_vm, vm_interrupt_exception());
+            else vm_throw_error(caller_vm, buf);
             return VALUE_NIL;
         }
 
@@ -4754,119 +4664,44 @@ static Value load_from_buffer(VM* caller_vm, const char* source, const char* nam
     return last_result;
 }
 
+/* (request-interrupt!) — stop the foreground task, like Ctrl-C at the REPL */
+static Value native_request_interrupt(VM* vm, int argc, Value* argv) {
+    (void)argv;
+    if (argc != 0) {
+        vm_error(vm, "request-interrupt!: takes no arguments");
+        return VALUE_NIL;
+    }
+    vm_request_interrupt();
+    return VALUE_NIL;
+}
+
+/* load-string: (load-string s) or (load-string s name) */
+static Value native_load_string(VM* vm, int argc, Value* argv) {
+    if (argc < 1 || argc > 2 || !is_string(argv[0]) || (argc == 2 && !is_string(argv[1]))) {
+        vm_error(vm, "load-string: usage (load-string s) or (load-string s name)");
+        return VALUE_NIL;
+    }
+    return core_load_source(vm, string_cstr(argv[0]),
+                            argc == 2 ? string_cstr(argv[1]) : "<string>");
+}
+
+/* Host-filesystem load; beer.core/load and load-file go through *fs* */
 Value native_load(VM* caller_vm, int argc, Value* argv) {
-    if (argc != 1) {
-        vm_error(caller_vm, "load: requires exactly 1 argument (filename)");
+    if (argc != 1 || !is_string(argv[0])) {
+        vm_error(caller_vm, "load: requires exactly 1 string argument (filename)");
         return VALUE_NIL;
     }
-    Value path = argv[0];
-    if (!is_pointer(path) || object_type(path) != TYPE_STRING) {
-        vm_error(caller_vm, "load: argument must be a string");
+    const char* filename = string_cstr(argv[0]);
+    Value source = stream_slurp(filename);
+    if (is_nil(source)) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "load: cannot open '%s': %s", filename, strerror(errno));
+        vm_throw_error(caller_vm, buf);
         return VALUE_NIL;
     }
-
-    const char* filename = string_cstr(path);
-
-    /* Read file into memory */
-    FILE* f = fopen(filename, "r");
-    if (!f) {
-        vm_error(caller_vm, "load: cannot open file");
-        return VALUE_NIL;
-    }
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char* source = malloc((size_t)fsize + 1);
-    if (fsize > 0) {
-        size_t read_n = fread(source, 1, (size_t)fsize, f);
-        source[read_n] = '\0';
-    } else {
-        source[0] = '\0';
-    }
-    fclose(f);
-
-    /* Read all forms */
-    Reader* reader = reader_new(source, filename);
-    Value forms = reader_read_all(reader);
-
-    if (reader_has_error(reader)) {
-        fprintf(stderr, "load: read error in %s: %s\n", filename, reader_error_msg(reader));
-        reader_free(reader);
-        free(source);
-        return VALUE_NIL;
-    }
-    reader_free(reader);
-    free(source);
-
-    /* Compile and execute each form */
-    size_t n_forms = vector_length(forms);
-    Value last_result = VALUE_NIL;
-
-    for (size_t i = 0; i < n_forms; i++) {
-        Value form = vector_get(forms, i);
-
-        /* Compile */
-        Compiler* compiler = compiler_new(filename);
-        CompiledCode* code = compile(compiler, form);
-
-        if (compiler_has_error(compiler)) {
-            fprintf(stderr, "load: compile error in %s (form %zu): %s\n", filename, i, compiler_error_msg(compiler));
-            compiled_code_free(code);
-            compiler_free(compiler);
-            object_release(forms);
-            return VALUE_NIL;
-        }
-        compiler_free(compiler);
-
-        /* Build constants array */
-        int n_constants = (int)vector_length(code->constants);
-        Value* constants = malloc((size_t)n_constants * sizeof(Value));
-        for (int j = 0; j < n_constants; j++) {
-            constants[j] = vector_get(code->constants, (size_t)j);
-            if (is_pointer(constants[j])) object_retain(constants[j]);
-        }
-
-        /* Set execution context on function objects */
-        Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
-        const char* cur_ns_name = cur_ns ? cur_ns->name : NULL;
-        for (int j = 0; j < n_constants; j++) {
-            if (is_function(constants[j])) {
-                function_set_code(constants[j],
-                                  code->bytecode, (int)code->code_size,
-                                  constants, n_constants);
-                function_set_ns_name(constants[j], cur_ns_name);
-                object_make_immortal(constants[j]);
-            }
-        }
-
-        /* Execute as task */
-        Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
-                                             constants, n_constants, global_scheduler);
-        Task* task = task_get(task_val);
-        scheduler_run_task_to_completion(global_scheduler, task);
-
-        if (task->vm->error) {
-            fprintf(stderr, "load: runtime error in %s: %s\n", filename, task->vm->error_msg);
-            object_release(task_val);
-            compiled_code_free(code);
-            free(constants);
-            object_release(forms);
-            return VALUE_NIL;
-        }
-
-        /* Capture last result */
-        if (is_pointer(last_result)) object_release(last_result);
-        last_result = task->result;
-        if (is_pointer(last_result)) object_retain(last_result);
-
-        object_release(task_val);
-
-        /* Keep compiled code alive (functions reference it) */
-        core_retain_unit(code, constants);
-    }
-
-    object_release(forms);
-    return last_result;
+    Value result = core_load_source(caller_vm, string_cstr(source), filename);
+    object_release(source);
+    return result;
 }
 
 /* ns-publics: (ns-publics 'some-ns) => list of symbols defined in namespace */

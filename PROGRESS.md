@@ -1,6 +1,6 @@
 # Beerlang Implementation Progress
 
-**Last Updated:** 2026-10-16
+**Last Updated:** 2026-10-17
 
 ## Current Status
 
@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 61 unit tests
-- 601 REPL smoke tests
+- 625 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -113,7 +113,19 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
   - Atoms: `atom`, `deref`, `reset!`, `swap!`, `compare-and-set!`
   - Metadata: `meta`, `with-meta`, `alter-meta!`
   - Bytecode: `disasm`, `asm`
-  - Namespace: `in-ns`, `require`, `load`, `set-macro!`, `macroexpand-1`, `macroexpand`, `ns-publics`
+  - Namespace: `in-ns`, `load-string`, `set-macro!`, `macroexpand-1`, `macroexpand`, `ns-publics`
+- **Loading in beerlang** (`lib/core.beer`): `require` (Clojure vector specs
+  or flat options, several per call), `load-file`/`load`, `slurp`, `spit`, on
+  small natives (`__file-read`, `__tar-read`, `__alias!`, `__refer!`, ...).
+  File access goes through `beer.core/*fs*` when an embedder sets it
+  (beeros). Load errors are catchable and name the file and form
+- `(def x "doc" v)` attaches the docstring like `defn`
+- **Interrupts**: Ctrl-C at the REPL / `vm_request_interrupt()` /
+  `(request-interrupt!)` stop the foreground form between scheduler quanta;
+  the interrupt skips `catch` and runs `finally` (`OP_PUSH_FINALLY`);
+  blocked foreground tasks are woken, background tasks keep running
+- Embedding: `core_load_source(vm, src, name)` runs a source buffer;
+  `namespace_init_bare()` skips the `lib/core.beer` search
 
 ### Cooperative Multitasking
 - Task (TYPE_TASK), Channel (TYPE_CHANNEL) heap types
@@ -143,7 +155,9 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 ### Project Tooling
 - `beer` CLI with subcommands: `new`, `run`, `build`, `ubertar`, `repl`
-- `beer.edn` project configuration
+- `beer.edn` project configuration; `beer build`/`ubertar` store entries
+  relative to their `:paths` root (`foo/core.beer`, what `require` looks up)
+  and include `beer.edn`
 - Tar-based library distribution with `BEERPATH` environment variable
 - `beer.tar` namespace for tar manipulation
 - `beer.shell/exec` — fork/exec/pipe with `{:exit :out :err}` result

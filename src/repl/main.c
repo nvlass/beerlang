@@ -10,6 +10,7 @@
 #include <sys/select.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 #include "beerlang.h"
 #include "memory.h"
 #include "symbol.h"
@@ -393,8 +394,21 @@ static int cmd_check(const char* path) {
  * REPL mode
  * ================================================================ */
 
+/* Ctrl-C interrupts the running form. A second one before the first is
+ * delivered means the task is stuck in a blocking native: exit. */
+static void repl_sigint(int sig) {
+    (void)sig;
+    if (vm_interrupt_requested) _exit(130);
+    vm_request_interrupt();
+}
+
 static int run_repl(void) {
     char input[INPUT_BUFFER_SIZE];
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = repl_sigint;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);  /* no SA_RESTART: wake the reactor wait */
     /* Unbuffered, so stdio never holds lines the fd-readiness wait below
      * can't see (pasted input), nor input meant for *in* */
     setvbuf(stdin, NULL, _IONBF, 0);
@@ -424,7 +438,17 @@ static int run_repl(void) {
         if (global_scheduler) {
             scheduler_run_until_readable(global_scheduler, STDIN_FILENO);
         }
-        if (!fgets(input, INPUT_BUFFER_SIZE, stdin)) {
+        bool got_line = !vm_interrupt_requested && fgets(input, INPUT_BUFFER_SIZE, stdin);
+        if (!got_line && (vm_interrupt_requested || (ferror(stdin) && errno == EINTR))) {
+            /* Ctrl-C at the prompt: drop the partial form */
+            vm_interrupt_requested = 0;
+            clearerr(stdin);
+            accum_len = 0;
+            accum[0] = '\0';
+            printf("\n");
+            continue;
+        }
+        if (!got_line) {
             printf("\n");
             goto repl_exit;
         }
@@ -511,6 +535,7 @@ static int run_repl(void) {
             Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
                                                  constants, n_constants, global_scheduler);
             Task* repl_task = task_get(task_val);
+            vm_interrupt_requested = 0;
             scheduler_run_task_to_completion(global_scheduler, repl_task);
             /* Do NOT call scheduler_run_until_done here — background tasks (server loops,
              * actors, etc.) should persist across REPL prompts and get CPU time during
