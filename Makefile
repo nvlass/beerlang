@@ -9,10 +9,10 @@ ifeq ($(CFFI),1)
   UNAME_S := $(shell uname -s)
   ifeq ($(UNAME_S),Darwin)
     SDKROOT := $(shell xcrun --show-sdk-path 2>/dev/null)
-    EXTRA_CFLAGS  += -DBEER_CFFI -I$(SDKROOT)/usr/include/ffi
+    EXTRA_CFLAGS  += -I$(SDKROOT)/usr/include/ffi
     EXTRA_LDFLAGS += -lffi
   else
-    EXTRA_CFLAGS  += -DBEER_CFFI $(shell pkg-config --cflags libffi 2>/dev/null)
+    EXTRA_CFLAGS  += $(shell pkg-config --cflags libffi 2>/dev/null)
     EXTRA_LDFLAGS += $(shell pkg-config --libs libffi 2>/dev/null || echo -lffi) -ldl
   endif
 endif
@@ -29,32 +29,14 @@ TEST_DIR = tests
 BUILD_DIR = build
 BIN_DIR = bin
 
-# Source files
-VM_SRCS = $(wildcard $(SRC_DIR)/vm/*.c)
-TYPES_SRCS = $(wildcard $(SRC_DIR)/types/*.c)
-MEMORY_SRCS = $(wildcard $(SRC_DIR)/memory/*.c)
-READER_SRCS = $(wildcard $(SRC_DIR)/reader/*.c)
-COMPILER_SRCS = $(wildcard $(SRC_DIR)/compiler/*.c)
-RUNTIME_SRCS = $(wildcard $(SRC_DIR)/runtime/*.c)
-SCHEDULER_SRCS = $(wildcard $(SRC_DIR)/scheduler/*.c)
-TASK_SRCS = $(wildcard $(SRC_DIR)/task/*.c)
-CHANNEL_SRCS = $(wildcard $(SRC_DIR)/channel/*.c)
-IO_SRCS = $(wildcard $(SRC_DIR)/io/*.c)
+# Runtime sources and feature switches, shared with wasm/ and embedders
+# (see beerlang.mk): make BEER_NET=0, make BEER_PLATFORM=none, ...
+BEER_CFFI := $(CFFI)
+include beerlang.mk
+EXTRA_CFLAGS += $(BEER_DEFS)
+
 REPL_SRCS = $(wildcard $(SRC_DIR)/repl/*.c)
-LIB_SRCS = $(wildcard $(SRC_DIR)/lib/*.c)
-VENDOR_SRCS = vendor/mini-gmp.c vendor/ulog.c
-
-# CFFI sources only included when CFFI=1
-ifeq ($(CFFI),1)
-  CFFI_SRCS = $(wildcard $(SRC_DIR)/cffi/*.c)
-else
-  CFFI_SRCS =
-endif
-
-ALL_SRCS = $(VM_SRCS) $(TYPES_SRCS) $(MEMORY_SRCS) $(READER_SRCS) \
-           $(COMPILER_SRCS) $(RUNTIME_SRCS) $(SCHEDULER_SRCS) \
-           $(TASK_SRCS) $(CHANNEL_SRCS) $(IO_SRCS) $(REPL_SRCS) $(LIB_SRCS) \
-           $(CFFI_SRCS)
+ALL_SRCS = $(BEER_SRCS) $(REPL_SRCS)
 
 # Object files
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(ALL_SRCS))

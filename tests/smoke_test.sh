@@ -691,6 +691,32 @@ check_multi '(def sa (atom 0))
 check '(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2})' '3'
 check '(reduce-kv (fn [acc k v] acc) 5 nil)' '5'
 
+# --- Exception handler stack grows: deep try nesting ---
+check_multi '(defn tdeep [n] (if (= n 0) :ok (try (tdeep (dec n)) (finally nil))))
+(tdeep 5000)' ':ok' "deep try nesting"
+
+# --- Freeing a long list doesn't recurse per cell (used to crash at ~1M) ---
+check '(count (apply list (range 1000000)))' '1000000'
+check_multi '(def lkeep (apply list (range 10)))
+(def ltail (rest lkeep))
+(def lkeep nil)
+ltail' '(1 2 3 4 5 6 7 8 9)' "freeing a list keeps a shared tail"
+
+# --- offer! / poll!: non-blocking channel put and take ---
+check_multi '(def oc (chan 2))
+[(offer! oc 1) (offer! oc 2) (offer! oc 3) (poll! oc) (poll! oc) (poll! oc)]' '[true true false 1 2 nil]' "offer!/poll! on a buffered channel"
+check_multi '(def orc (chan))
+(def ot (spawn (fn [] (<! orc))))
+(sleep 5)
+[(offer! (chan) :x) (offer! orc :y) (await ot)]' '[false true :y]' "offer! to a waiting taker"
+check_multi '(def osc (chan))
+(spawn (fn [] (>! osc :from-task)))
+(sleep 5)
+(poll! osc)' ':from-task' "poll! from a blocked sender"
+check_multi '(def occ (chan 1))
+(close! occ)
+[(offer! occ 1) (poll! occ)]' '[false nil]' "offer!/poll! on a closed channel"
+
 # --- def with a docstring ---
 check_multi '(def dd "the doc" 7)
 [dd (get (meta (quote dd)) :doc)]' '[7 "the doc"]' "def docstring"

@@ -6,7 +6,7 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 664 (`bash tests/smoke_test.sh`)
+- REPL smoke tests: 671 (`bash tests/smoke_test.sh`)
 - **Last Updated:** 2026-10-17
 
 ## Open Items at a Glance
@@ -24,9 +24,6 @@ Small / concrete:
   nREPL (whose sessions bind `*ns*` but not `*out*`), need one
 - Destructuring is vectors only: no map destructuring (`{:keys [a]}`) in
   `let` or `fn`; `loop` doesn't destructure
-- Freeing a very long list recurses once per cons cell
-  (`cons_destructor` → `object_release`): `(sort (reverse (range 20000)))`
-  overflows the C stack under ASAN
 - `make asan` races under `-j` (`asan: clean all` runs clean in parallel);
   run it as `make asan -j1` or twice
 - stdin/stdout/stderr stay blocking fds: `(read-line *in*)` inside a task
@@ -394,6 +391,21 @@ The full smoke suite under ASAN now reports no memory errors.
 
 ### beeros requests: file system hook, loading, packages, interrupts
 
+**Boundary (2026-10-18): configure, don't patch — see docs/EMBEDDING.md.**
+`beerlang.mk` lists the runtime's sources for every build (host, WASM,
+beeros), with `BEER_PLATFORM` (posix/none) and feature switches
+(`BEER_NET`, `BEER_SHELL`, `BEER_CRYPTO`, `BEER_AOT`, `BEER_CFFI`; off adds
+`-DBEER_NO_<X>` and namespace_init skips it). `src/platform/none/` has the
+stub I/O reactor that WASM and beeros used to copy. `core_load_source_ns`
+loads a source into a namespace (replaces beeros's `blob_loader.c`). WASM
+now builds from beerlang.mk (no hand-listed sources, no `stubs.c`).
+beeros migration checklist: docs/EMBEDDING.md §5. Language vs platform:
+drivers, `beer.mem`, `beer.gfx`, console/term, fs/ext2/ustar, packages
+stay in beeros. Open in beerlang: `*fs*` doesn't cover `open`/streams/
+`beer.tar`; `beer.hive` requires `beer.tcp`/`beer.crypto` even for local
+actors, so it doesn't load on `BEER_PLATFORM=none`; ByteBuffer raw-address
+ops (`addr`, `blit-*-addr!`) could move behind an opt-in.
+
 Context: beeros (bare-metal, `beerlang/` as an unmodified submodule) has
 a filesystem written in beerlang (`beer.ext2` + `beer.fs`, mounted at
 `/`) but no host libc filesystem: `fopen` finds nothing. Today beeros
@@ -525,6 +537,48 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
    returned nil when f yielded. VM stack/frames now grow on demand (were
    256 values / 64 frames: non-tail recursion ~64 deep failed). Only
    macroexpansion still uses a temp VM.
+
+9. **Exception handler stack is fixed at 16 — done (2026-10-18):** it
+   grows on demand like the frames (cap 100k); `(deep 5000)` with a
+   `try` per level works. require still pushes 3 handlers per nesting
+   level, which no longer matters. Also added for beeros input backends
+   (docs/input.md there): `offer!` / `poll!`, non-blocking channel put and
+   take (core.async names). And freeing a long list no longer recurses
+   per cons cell (a 1M-element list crashed the process; ASAN overflowed
+   at 20k). Original report: Found in
+   beeros running a package from the window REPL: `(beer.pkg/run "hello")`
+   failed with `load: error in /pkg/hello.tar/hello/core.beer (form 1):
+   load: error in /pkg/hello.tar/hello/fmt.beer (form 1): Exception
+   handler stack overflow`.
+   - `vm->handlers` is allocated with `DEFAULT_HANDLER_CAPACITY` (16,
+     `include/vm.h:92`, `src/vm/vm.c:83`) and `OP_PUSH_HANDLER` /
+     `OP_PUSH_FINALLY` / `OP_PUSH_INTERRUPT_CATCH` throw when it's full
+     (`src/vm/vm.c:2022`). The value stack and call frames grow on demand
+     since 2d89270; the handler stack doesn't. Every dynamically active
+     `try` clause holds an entry, so the limit is on `try` nesting depth
+     across calls, not per function.
+   - `require` alone costs 3 entries per level of nesting: `__load-lib`'s
+     `try`/`finally`, `load-string`'s outer `try`/`finally` and its
+     per-form `try`/`catch`. `(ns a (:require [b]))` → `b` requires `c`
+     ... so a dependency chain 5 deep needs 15 entries before any user
+     code, and a library whose forms use `try` themselves needs more.
+   - The beeros case: the window REPL's loop held 4 entries (outer
+     `try`/`finally`, inner `catch :interrupt` + `catch` + `finally`),
+     then `run` → `require hello.core` (3) → `require hello.fmt` (3) →
+     the forms inside. Plain `(beer.pkg/run "hello")` fit with ~3 to
+     spare; wrapping it in 4 more `try` levels overflowed. Measured:
+     `(defn deep [n] (if (= n 0) :ok (try (deep (dec n)) (finally nil))))`
+     — on the serial REPL `(deep 15)` works and `(deep 16)` overflows;
+     inside the window REPL the limit was 11. beeros 3398c19 cut its
+     loop to the two catches (limit now 12), which only buys one level.
+   - Host repro: `(deep 16)` at the REPL, or a chain of ~6 libs where
+     each `(ns ...)` requires the next.
+   - Wanted: grow `vm->handlers` like `grow_frames` (double up to a cap
+     such as `MAX_FRAME_CAPACITY`, "Exception handler stack overflow"
+     only past that). Nothing should hold a pointer into `vm->handlers`
+     across a push (check `pop_handler`, vm.c:283, and the unwinding
+     code). Also check that temp VMs (macroexpansion) and task VMs get
+     the same growth.
 
 Related: `::kw` resolution needs form-by-form reading in `load`; a
 `load-string` built on `core_load_source` inherits that.

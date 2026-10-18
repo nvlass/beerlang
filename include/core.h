@@ -76,5 +76,8 @@ Value native_load(VM* vm, int argc, Value* argv);
  * errors are thrown in vm (fatal when it has no handler) and name the
  * source and the form */
 Value core_load_source(VM* vm, const char* source, const char* name);
+/* The same, in namespace ns (created if needed), restoring the current one
+ * afterwards: how an embedder loads lib/core.beer into beer.core */
+Value core_load_source_ns(VM* vm, const char* source, const char* name, const char* ns);
 
 #endif /* BEERLANG_CORE_H */

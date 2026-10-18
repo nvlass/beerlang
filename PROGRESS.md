@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 329 unit tests (26 suites)
-- 664 REPL smoke tests
+- 671 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -139,6 +139,12 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
   `apply`, `swap!`, `reduce-kv`, `alter-meta!` (the last three now beerlang)
   yield and are interrupted like any code; `swap!` retries with
   `compare-and-set!`
+- Exception handler stack grows on demand (was 16 nested `try`s);
+  `offer!`/`poll!` non-blocking channel put/take; freeing a long list is
+  iterative (a 1M-element list crashed the process)
+- Embedding: `beerlang.mk` (sources + `BEER_PLATFORM` posix/none + feature
+  switches) shared by the host, WASM and embedders; `src/platform/none/`
+  stub reactor; `core_load_source_ns`; docs/EMBEDDING.md
 - **Interrupts**: Ctrl-C at the REPL / `vm_request_interrupt()` /
   `(request-interrupt!)` stop the foreground form between scheduler quanta;
   the interrupt skips `catch` and runs `finally` (`OP_PUSH_FINALLY`);

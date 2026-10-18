@@ -48,6 +48,8 @@ static bool to_double(Value v, double* out) {
  * on demand up to these, which only runaway recursion reaches */
 #define MAX_STACK_SIZE (1 << 20)
 #define MAX_FRAME_CAPACITY 100000
+/* Each dynamically active try clause holds one handler */
+#define MAX_HANDLER_CAPACITY 100000
 
 /* Create a new VM */
 VM* vm_new(int stack_size) {
@@ -468,6 +470,25 @@ static VM_NOINLINE bool grow_frames(VM* vm) {
     }
     vm->frames = frames;
     vm->frame_capacity = cap;
+    return true;
+}
+
+/* Room for one more exception handler. Handler pointers are only held
+ * between a pop and the unwind that follows it, never across a push. */
+static VM_NOINLINE bool grow_handlers(VM* vm) {
+    int cap = vm->handler_capacity * 2;
+    if (cap > MAX_HANDLER_CAPACITY) cap = MAX_HANDLER_CAPACITY;
+    if (vm->handler_count >= cap) {
+        vm_error(vm, "Exception handler stack overflow");
+        return false;
+    }
+    ExceptionHandler* handlers = realloc(vm->handlers, sizeof(ExceptionHandler) * (size_t)cap);
+    if (!handlers) {
+        vm_error(vm, "Exception handler stack overflow (out of memory)");
+        return false;
+    }
+    vm->handlers = handlers;
+    vm->handler_capacity = cap;
     return true;
 }
 
@@ -2019,10 +2040,7 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                       pc_at_opcode, op, catch_offset, vm->stack_pointer);
             READ_CHECK();
 
-            if (vm->handler_count >= vm->handler_capacity) {
-                vm_error(vm, "Exception handler stack overflow");
-                return;
-            }
+            if (vm->handler_count >= vm->handler_capacity && !grow_handlers(vm)) return;
 
             ExceptionHandler* h = &vm->handlers[vm->handler_count++];
             h->catch_pc = catch_offset;

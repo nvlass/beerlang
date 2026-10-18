@@ -109,6 +109,7 @@ Beerlang supports **tar-based library bundles** — place a `.tar` file in any `
 
 - [API Reference](docs/API.md) — native functions and standard library
 - [Quick Start](docs/QUICKSTART.md) — getting started with the REPL
+- [Embedding](docs/EMBEDDING.md) — building the runtime into another program (`beerlang.mk`, feature switches, hooks)
 - [Design Documents](docs/design/) — language architecture and internals
 
 ## Credits

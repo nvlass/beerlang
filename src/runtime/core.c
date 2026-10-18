@@ -3778,6 +3778,32 @@ static Value native_chan(VM* vm, int argc, Value* argv) {
 /* >! and <! are now special forms (OP_CHAN_SEND/OP_CHAN_RECV) */
 
 /* close!: (close! ch) — close channel */
+/* (offer! ch v) — put v only if it can go in now (a waiting taker, or room
+ * in the buffer); never blocks. true if put, false otherwise (also when
+ * the channel is closed) */
+static Value native_offer(VM* vm, int argc, Value* argv) {
+    if (argc != 2 || !is_channel(argv[0])) {
+        vm_error(vm, "offer!: requires a channel and a value");
+        return VALUE_NIL;
+    }
+    if (channel_get(argv[0])->closed) return VALUE_FALSE;
+    Scheduler* sched = vm->scheduler ? vm->scheduler : global_scheduler;
+    /* No task: channel_send never blocks, it just reports whether it sent */
+    return channel_send(argv[0], argv[1], sched, NULL) ? VALUE_TRUE : VALUE_FALSE;
+}
+
+/* (poll! ch) — a value if one can be taken now, else nil; never blocks */
+static Value native_poll(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_channel(argv[0])) {
+        vm_error(vm, "poll!: requires a channel");
+        return VALUE_NIL;
+    }
+    Scheduler* sched = vm->scheduler ? vm->scheduler : global_scheduler;
+    Value out = VALUE_NIL;
+    if (!channel_recv(argv[0], sched, NULL, &out)) return VALUE_NIL;
+    return out;  /* channel_recv hands over its reference */
+}
+
 static Value native_chan_close(VM* vm, int argc, Value* argv) {
     if (argc != 1) {
         vm_error(vm, "close!: requires 1 argument (channel)");
@@ -4027,6 +4053,8 @@ void core_register_concurrency(void) {
     register_native(core_ns, "chan", native_chan);
     /* >! and <! are now special forms (OP_CHAN_SEND/OP_CHAN_RECV) */
     register_native(core_ns, "close!", native_chan_close);
+    register_native(core_ns, "offer!", native_offer);
+    register_native(core_ns, "poll!", native_poll);
     register_native(core_ns, "channel?", native_channel_q);
     register_native(core_ns, "task?", native_task_q);
     register_native(core_ns, "task-watch", native_task_watch);
@@ -4474,6 +4502,20 @@ Value core_load_source(VM* caller_vm, const char* source, const char* name) {
     Value result = load_forms(caller_vm, source, name);
     if (saved && namespace_registry_current(global_namespace_registry) != saved)
         set_current_ns(saved);
+    return result;
+}
+
+/* core_load_source in namespace ns (created if needed) */
+Value core_load_source_ns(VM* caller_vm, const char* source, const char* name, const char* ns) {
+    Namespace* saved = namespace_registry_current(global_namespace_registry);
+    Namespace* target = namespace_registry_get_or_create(global_namespace_registry, ns);
+    if (!target) {
+        vm_error(caller_vm, "load: failed to create namespace");
+        return VALUE_NIL;
+    }
+    set_current_ns(target);
+    Value result = load_forms(caller_vm, source, name);
+    if (saved) set_current_ns(saved);
     return result;
 }
 

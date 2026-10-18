@@ -318,6 +318,8 @@ installs a map:
 |----------|-------------|---------|
 | `chan` | Create channel (unbuffered or buffered) | `(chan)`, `(chan 10)` |
 | `close!` | Close channel | `(close! ch)` |
+| `offer!` | Put a value only if it can go in now (waiting taker or buffer room); never blocks; `true`/`false` (`false` on a closed channel) | `(offer! ch ev)` |
+| `poll!` | Take a value only if one is available now, else `nil`; never blocks | `(poll! ch)` |
 | `sleep` | Suspend the current task for n milliseconds | `(sleep 500)` |
 | `task-watch` | Watch a task; calls callback with result on completion | `(task-watch t (fn [v] (println v)))` |
 

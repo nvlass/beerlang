@@ -13,19 +13,32 @@ typedef struct {
     Value cdr;  /* Rest of list */
 } Cons;
 
-/* Destructor - release car and cdr */
+/* Destructor - release car and cdr. The cdr chain is freed in a loop, not
+ * by recursing once per cell: a list of a million elements overflowed the
+ * C stack. Each following cell held only by this list has its cdr detached
+ * and is destroyed on the spot (its own destructor then only releases its
+ * car); a shared cell just loses one reference and ends the walk. */
 static void cons_destructor(struct Object* obj) {
     Cons* c = (Cons*)obj;
 
-    /* Release car if it's a heap object */
-    if (is_pointer(c->car)) {
-        object_release(c->car);
-    }
+    if (is_pointer(c->car)) object_release(c->car);
 
-    /* Release cdr if it's a heap object */
-    if (is_pointer(c->cdr)) {
-        object_release(c->cdr);
+    Value next = c->cdr;
+    c->cdr = VALUE_NIL;
+    while (is_pointer(next) && object_type(next) == TYPE_CONS) {
+        struct Object* o = (struct Object*)untag_pointer(next);
+        if (o->refcount == REFCOUNT_IMMORTAL) return;
+        if (o->refcount > 1) {
+            o->refcount--;
+            return;
+        }
+        Cons* cell = (Cons*)o;
+        next = cell->cdr;
+        cell->cdr = VALUE_NIL;
+        o->refcount = 0;
+        object_destroy(o);
     }
+    if (is_pointer(next)) object_release(next);
 }
 
 /* Initialize cons type (idempotent - safe to call multiple times) */

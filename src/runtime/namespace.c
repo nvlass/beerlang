@@ -438,13 +438,22 @@ void namespace_init_bare(void) {
     core_register_metadata();
     core_register_tar();
     core_register_bytes();
+    /* Optional features (beerlang.mk: BEER_SHELL, BEER_NET, ...) */
+#ifndef BEER_NO_SHELL
     core_register_shell();
+#endif
+#ifndef BEER_NO_NET
     core_register_tcp();
     core_register_udp();
+#endif
     core_register_bits();
+#ifndef BEER_NO_CRYPTO
     core_register_crypto();
+#endif
     core_register_json();
+#ifndef BEER_NO_AOT
     core_register_aot();
+#endif
 
 #ifdef BEER_CFFI
     cpointer_init();

@@ -9,41 +9,22 @@ EMCC    = emcc
 OUT_DIR = out
 ROOT    = ..
 
-# Source groups (mirror the main Makefile, but exclude platform I/O)
-VM_SRCS      = $(wildcard $(ROOT)/src/vm/*.c)
-TYPES_SRCS   = $(wildcard $(ROOT)/src/types/*.c)
-MEMORY_SRCS  = $(wildcard $(ROOT)/src/memory/*.c)
-READER_SRCS  = $(wildcard $(ROOT)/src/reader/*.c)
-COMPILER_SRCS= $(wildcard $(ROOT)/src/compiler/*.c)
-SCHEDULER_SRCS=$(wildcard $(ROOT)/src/scheduler/*.c)
-TASK_SRCS    = $(wildcard $(ROOT)/src/task/*.c)
-CHANNEL_SRCS = $(wildcard $(ROOT)/src/channel/*.c)
-LIB_SRCS     = $(ROOT)/src/lib/beer.c  # embed API (no aot.c)
+# Runtime sources from beerlang.mk: no fd readiness in the browser, and no
+# tcp/udp/shell (platform none), crypto or .beerc files
+BEER_ROOT     := $(ROOT)
+BEER_PLATFORM := none
+BEER_CRYPTO   := 0
+BEER_AOT      := 0
+include $(ROOT)/beerlang.mk
 
-# Runtime: portable sources only — tcp/udp/shell/crypto/aot come from
-# stubs.c. A new src/runtime file must be added here or stubbed there.
-RUNTIME_SRCS = $(ROOT)/src/runtime/core.c \
-               $(ROOT)/src/runtime/bits.c \
-               $(ROOT)/src/runtime/bytes.c \
-               $(ROOT)/src/runtime/json.c \
-               $(ROOT)/src/runtime/namespace.c
+WASM_SRCS    = wasm_repl.c
 
-# IO: stream.c + tarindex.c; reactor replaced by stub
-IO_SRCS = $(ROOT)/src/io/stream.c \
-          $(ROOT)/src/io/tarindex.c
-
-VENDOR_SRCS  = $(ROOT)/vendor/mini-gmp.c $(ROOT)/vendor/ulog.c
-
-WASM_SRCS    = io_reactor_stub.c stubs.c wasm_repl.c
-
-ALL_SRCS = $(VM_SRCS) $(TYPES_SRCS) $(MEMORY_SRCS) $(READER_SRCS) \
-           $(COMPILER_SRCS) $(SCHEDULER_SRCS) $(TASK_SRCS) $(CHANNEL_SRCS) \
-           $(RUNTIME_SRCS) $(IO_SRCS) $(LIB_SRCS) $(VENDOR_SRCS) $(WASM_SRCS)
+ALL_SRCS = $(BEER_SRCS) $(BEER_VENDOR_SRCS) $(WASM_SRCS)
 
 CFLAGS = -std=c11 -D_DEFAULT_SOURCE -DWASM_BUILD \
          -Wall -Wextra \
          -O2 -fno-strict-aliasing \
-         -I$(ROOT)/include -I$(ROOT)/vendor -I$(ROOT)
+         $(BEER_CFLAGS)
 
 # Emscripten link flags
 EMFLAGS = \
