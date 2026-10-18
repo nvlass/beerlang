@@ -535,6 +535,11 @@ check_multi "$FSHOOK
 (try (slurp \"/missing\") (catch e (get e :message)))" \
     "\"slurp: failed to read '/missing'\"" "*fs* hook: slurp missing"
 
+# --- REPL with stdin from a regular file exits at EOF (no (exit)) ---
+printf '(+ 1 2)\n' > "$TMPFILE"
+actual=$(perl -e 'alarm 5; exec @ARGV' "$BEER" < "$TMPFILE" 2>/dev/null | sed -n 's/^user:1> //p')
+if [ "$actual" = "3" ]; then PASS=$((PASS + 1)); else echo "FAIL: REPL stdin from file => '$actual'"; FAIL=$((FAIL + 1)); fi
+
 # --- Interrupts: request-interrupt! stops the foreground form ---
 # A background task requests it while the REPL's form spins or blocks.
 INTR="(spawn (fn [] (sleep 30) (request-interrupt!)))"
@@ -567,6 +572,51 @@ check_multi "$INTR
 (load-string \"(def lsi 1) (loop [] (recur)) (def lsi 2)\" \"spin.beer\")
 lsi" '1' "interrupt: load-string stops mid-file"
 
+# --- interrupt! a given task ---
+check_multi '(def ilog (atom []))
+(def it1 (spawn (fn [] (try (loop [] (recur)) (catch e (swap! ilog conj :caught)) (finally (swap! ilog conj :fin))))))
+(sleep 10)
+[(interrupt! it1) (await it1) @ilog (interrupt! it1)]' '[true nil [:fin] false]' "interrupt!: spinning task"
+check_multi '(def ilog (atom []))
+(def it2 (spawn (fn [] (try (sleep 100000) (finally (swap! ilog conj :slept))))))
+(sleep 5)
+(interrupt! it2)
+(sleep 5)
+@ilog' '[:slept]' "interrupt!: sleeping task"
+# Blocked on a channel while other tasks are ready: the task must leave the
+# channel queue before joining the ready queue (both use next/prev)
+check_multi '(def ilog (atom []))
+(def ic (chan))
+(def stop (atom false))
+(def busy (spawn (fn [] (loop [] (if @stop :done (do (yield) (recur)))))))
+(def it3 (spawn (fn [] (>! ic 1) (swap! ilog conj :sent))))
+(sleep 5)
+(interrupt! it3)
+(sleep 5)
+(reset! stop true)
+[(await busy) (await it3) @ilog]' '[:done nil []]' "interrupt!: blocked send, busy ready queue"
+check '(task? (current-task))' 'true'
+
+# --- (catch :interrupt e ...): opt-in, for REPL loops written in beerlang ---
+check_multi "(def rout (atom []))
+(def rforms (chan 10))
+(defn rloop [] (binding [*ns* 'user] (loop [] (let [f (<! rforms)] (if (nil? f) :bye (do (swap! rout conj (try (eval f) (catch :interrupt e :interrupted) (catch e [:error (get e :message)]))) (recur)))))))
+(def rt (spawn rloop))
+(>! rforms '(+ 1 2))
+(>! rforms '(loop [] (recur)))
+(sleep 10)
+(interrupt! rt)
+(>! rforms '(throw {:message \"boom\"}))
+(>! rforms '(in-ns 'rloop.ns))
+(close! rforms)
+[(await rt) @rout *ns*]" '[:bye [3 :interrupted [:error "boom"] rloop.ns] user]' "catch :interrupt: REPL loop survives"
+check '(try (throw {:message "x"}) (catch :interrupt e :wrong) (catch e :right))' ':right'
+check '(try (throw {:message "y"}) (catch :interrupt e :wrong))' 'Runtime error: y'
+check_multi '(def il2 (atom []))
+(try (try (request-interrupt!) (loop [] (recur)) (finally (swap! il2 conj :inner))) (catch :interrupt e (swap! il2 conj :caught) :ok))
+@il2' '[:inner :caught]' "catch :interrupt after an inner finally"
+check '(try 1 (catch :foo e 2))' 'Compile error: try: catch takes a binding symbol, or :interrupt and a symbol'
+
 # Natives running fns in a temp VM (swap!, apply): requested from inside
 check_multi '(def ia (atom 5))
 (try (swap! ia (fn [x] (request-interrupt!) (loop [] (recur)))) (catch e :caught))
@@ -574,6 +624,72 @@ check_multi '(def ia (atom 5))
 check_multi '(def ilog (atom []))
 (try (apply (fn [& xs] (request-interrupt!) (try (loop [] (recur)) (finally (swap! ilog conj :in)))) [1]) (catch e :caught) (finally (swap! ilog conj :out)))
 @ilog' '[:in :out]' "interrupt: inside apply, finally on both sides"
+
+# --- def inside a fn defines in the fn's namespace (Clojure) ---
+check_multi "(ns defin.lib)
+(defn setup [] (def made 1) made)
+(ns user)
+(defin.lib/setup)
+[defin.lib/made (contains? (set (ns-publics 'user)) 'made)]" '[1 false]' "def in fn: fn's namespace"
+
+# --- load-file / load-string restore *ns* ---
+check_multi "(spit \"$TMPFILE\" \"(ns loaded.ns) (def v 9)\")
+(load-file \"$TMPFILE\")
+[*ns* loaded.ns/v]" '[user 9]' "load-file restores *ns*"
+check_multi "(try (load-string \"(in-ns 'ls.err) (boom)\") (catch e nil))
+*ns*" 'user' "failed load-string restores *ns*"
+check_multi "(eval '(in-ns 'ev.stays))
+*ns*" 'ev.stays' "eval of in-ns persists"
+
+# --- Dynamic vars: ^:dynamic, binding, set! ---
+check_multi '(def ^:dynamic *dx* 1)
+(defn dshow [] *dx*)
+[(dshow) (binding [*dx* 2] (dshow)) (dshow)]' '[1 2 1]' "binding: scoped value"
+check_multi '(def ^:dynamic *dx* 1)
+(binding [*dx* 5] (await (spawn (fn [] *dx*))))' '5' "binding: spawned task inherits"
+check_multi '(def ^:dynamic *dx* 1)
+(binding [*dx* 3] (sleep 5) (set! *dx* 4) *dx*)' '4' "binding: yield inside, set!"
+check_multi '(def ^:dynamic *dx* 1)
+(try (binding [*dx* 2] (throw {:k 1})) (catch e nil))
+*dx*' '1' "binding: restored after throw"
+check_multi '(def ^:dynamic *dx* 1)
+(try (set! *dx* 9) (catch e (get e :message)))' \
+    '"set!: can'"'"'t change/establish root binding of *dx* (not bound with binding)"' "set! needs a binding"
+check_multi '(def dplain 1)
+(try (binding [dplain 2] dplain) (catch e (get e :message)))' \
+    '"binding: can'"'"'t dynamically bind non-dynamic var: dplain"' "binding: non-dynamic var"
+check_multi "(binding [*ns* 'user] (in-ns 'dyn.bound) *ns*)
+*ns*" 'user' "binding *ns*: in-ns stays inside"
+check_multi "(def f (open \"$TMPFILE\" :write))
+(binding [*out* f] (println \"to file\") (await (spawn (fn [] (println \"child\")))))
+(close f)
+(slurp \"$TMPFILE\")" '"to file\nchild\n"' "binding *out*"
+check_multi '(defn ^:private dsecret "doc here" [] 42)
+[(dsecret) (get (meta (quote dsecret)) :private) (get (meta (quote dsecret)) :doc)]' '[42 true "doc here"]' "defn ^:private with docstring"
+check '(let [y 1] ^:x y)' 'Compile error: metadata on a symbol (^...) is only supported on a def name'
+
+# --- The VM stack and frames grow: deep non-tail recursion ---
+check_multi '(defn deep [n] (if (= n 0) 0 (+ 1 (deep (- n 1)))))
+(deep 50000)' '50000' "deep non-tail recursion"
+check_multi '(defn deep2 [n] (+ 1 (deep2 n)))
+(try (deep2 1) (catch e (get e :message)))' '"Call stack overflow"' "runaway recursion still stops"
+
+# --- apply / swap! / reduce-kv run the fn in the caller's VM ---
+check '(apply (fn [& xs] (count xs)) (range 100000))' '100000'
+check '(apply :a [{:a 7}])' '7'
+check_multi '(defn aev? [n] (if (= n 0) true (apply aod? [(- n 1)])))
+(defn aod? [n] (if (= n 0) false (apply aev? [(- n 1)])))
+(aev? 100001)' 'false' "apply in tail position is a tail call"
+check '(try (apply (fn [] (throw {:k 1})) []) (catch e e))' '{:k 1}'
+check '(apply 5 [])' 'Runtime error: apply: first argument must be a function (or a keyword, map, vector or set)'
+check_multi "(spawn (fn [] (sleep 30) (request-interrupt!)))
+(apply (fn [] (loop [] (recur))) [])
+:after" ':after' "apply: background request-interrupt! reaches it"
+check_multi '(def sa (atom 0))
+(def sts (vec (map (fn [i] (spawn (fn [] (swap! sa (fn [x] (yield) (inc x)))))) (range 50))))
+(do (reduce (fn [_ t] (await t)) nil sts) @sa)' '50' "swap!: fn yields, concurrent updates all land"
+check '(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2})' '3'
+check '(reduce-kv (fn [acc k v] acc) 5 nil)' '5'
 
 # --- def with a docstring ---
 check_multi '(def dd "the doc" 7)
@@ -767,6 +883,15 @@ check '(eval 42)'                              '42'         "eval literal"
 check '(eval (list (quote vector) 1 2 3))'     '[1 2 3]'    "eval vector"
 check_multi '(eval (quote (def evtmp 99)))
 evtmp' '99' "eval def"
+check '(try (eval (quote (throw {:k 1}))) (catch e e))' '{:k 1}' "eval keeps the thrown map"
+check_multi "(eval '(do (in-ns 'evdo.ns) (def y 1)))
+(in-ns 'user)
+evdo.ns/y" '1' "eval splits a top-level do"
+# eval runs in the caller's VM: a background eval isn't held up by a
+# longer foreground eval that started after it
+check_multi "(def t0 (nano-time))
+(def bgt (atom nil))
+(do (spawn (fn [] (eval '(sleep 20)) (reset! bgt (- (nano-time) t0)))) (sleep 5) (eval '(sleep 300)) (and @bgt (< @bgt 200000000)))" 'true' "eval doesn't nest scheduler loops"
 
 # --- doseq ---
 check '(do (doseq [x [1 2 3]] x) nil)' 'nil'
@@ -789,6 +914,19 @@ check_script() {
         FAIL=$((FAIL + 1))
     fi
 }
+
+# nREPL (simple): each connection has its own *ns*, println goes to it
+check_script "(require 'beer.nrepl.simple)
+(require 'beer.tcp)
+(def port (beer.nrepl.simple/start! 0))
+(defn ask [c line] (write c (str line \"\\n\")) (flush c) (read-line c))
+(def r (await (spawn (fn []
+  (let [a (beer.tcp/connect \"127.0.0.1\" port)
+        b (beer.tcp/connect \"127.0.0.1\" port)]
+    [(ask a \"(in-ns 'sess.a)\") (ask b \"*ns*\") (ask a \"*ns*\")
+     (ask a \"(println 42)\") (read-line a)])))))
+(beer.nrepl.simple/stop!)
+(println r *ns*)" '[sess.a user sess.a 42 nil] user' "nREPL sessions"
 
 check_script '(require (quote beer.test) :as (quote t))
 (t/deftest math (t/is (= 2 (+ 1 1))) (t/is (= 6 (* 2 3))))

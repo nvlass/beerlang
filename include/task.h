@@ -7,6 +7,7 @@
 #ifndef BEERLANG_TASK_H
 #define BEERLANG_TASK_H
 
+#include <signal.h>
 #include "value.h"
 
 /* Forward declarations */
@@ -45,7 +46,16 @@ typedef struct Task {
 
     /* Interrupts (see vm_request_interrupt) */
     bool foreground;        /* A run_task_to_completion target outside any background task */
+    bool caller_reports;    /* A run_task_to_completion target: its caller reports errors */
+
+    /* Dynamic var bindings: hashmap var key -> value, or nil. Inherited
+     * (shared, persistent) by tasks created while this one runs. */
+    Value bindings;
+    struct Namespace* ns_cache;  /* namespace for the bound *ns* symbol below */
+    Value ns_cache_sym;
     bool interrupt_pending; /* Raise the interrupt when it next runs */
+    volatile sig_atomic_t interrupt_requested; /* set by vm_request_interrupt_task */
+    struct Task* waiting_on; /* target of a run_task_to_completion it is inside */
 
     /* Completion watchers */
     WatcherNode* watchers;

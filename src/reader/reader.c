@@ -654,6 +654,48 @@ static Value read_anon_fn(Reader* r) {
  * # dispatch — #( #{ #' #_ #"
  * ================================================================ */
 
+/* ^meta form. ^:kw is {:kw true}, ^Sym / ^"s" is {:tag Sym}. Symbols are
+ * interned and can't carry metadata, so ^m sym reads as (__meta-sym m sym),
+ * which def understands ((def ^:dynamic *x* 1)); collections don't carry
+ * metadata, so it is dropped there. */
+static Value read_meta(Reader* r) {
+    advance(r);
+    Value m = read_form(r);
+    if (r->error) return VALUE_NIL;
+    Value meta;
+    if (is_pointer(m) && object_type(m) == TYPE_KEYWORD) {
+        Value empty = hashmap_create_default();
+        meta = hashmap_assoc(empty, m, VALUE_TRUE);
+        object_release(empty);
+    } else if (is_pointer(m) && object_type(m) == TYPE_HASHMAP) {
+        meta = m;
+        object_retain(meta);
+    } else if (is_pointer(m) && (object_type(m) == TYPE_SYMBOL || object_type(m) == TYPE_STRING)) {
+        Value empty = hashmap_create_default();
+        meta = hashmap_assoc(empty, keyword_intern("tag"), m);
+        object_release(empty);
+    } else {
+        if (is_pointer(m)) object_release(m);
+        reader_error(r, "Metadata must be a keyword, symbol, string or map");
+        return VALUE_NIL;
+    }
+    if (is_pointer(m)) object_release(m);
+
+    Value target = read_form(r);
+    if (r->error) {
+        object_release(meta);
+        return VALUE_NIL;
+    }
+    if (is_pointer(target) && object_type(target) == TYPE_SYMBOL) {
+        Value items[3] = { symbol_intern("__meta-sym"), meta, target };
+        Value form = list_from_array(items, 3);
+        object_release(meta);
+        return form;
+    }
+    object_release(meta);
+    return target;
+}
+
 static Value read_hash_dispatch(Reader* r) {
     advance(r);  /* consume '#' */
 
@@ -760,6 +802,9 @@ static Value read_form(Reader* r) {
 
         case '#':
             return read_hash_dispatch(r);
+
+        case '^':
+            return read_meta(r);
 
         default:
             if (ch == '/' && !is_symbol_char(peek_next(r))) {

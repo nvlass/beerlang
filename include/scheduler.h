@@ -79,6 +79,15 @@ void scheduler_run_ready(Scheduler* sched);
  * when an interrupt is requested with no foreground task to stop. */
 void scheduler_run_until_readable(Scheduler* sched, int fd);
 
+/* Interrupt a given task (same semantics as vm_request_interrupt: skips
+ * catch, runs finally). vm_request_interrupt_task only sets flags, so it
+ * is safe from a signal or IRQ handler; the caller keeps the task alive
+ * until it is delivered (next quantum; at most 16 pending at once).
+ * scheduler_interrupt_task delivers at once, from scheduler context;
+ * false if the task is already done. */
+void vm_request_interrupt_task(Task* task);
+bool scheduler_interrupt_task(Scheduler* sched, Task* task);
+
 /* Run a native's temp VM (apply, swap!, ...) to completion. When the
  * calling task is foreground, temp counts safe points like a task and an
  * interrupt raised meanwhile unwinds it (running its finally blocks) and

@@ -49,6 +49,7 @@ Var* var_new(Value name) {
 
     var->value = VALUE_NIL;
     var->is_macro = false;
+    var->is_dynamic = false;
     var->meta = VALUE_NIL;
 
     return var;
@@ -152,6 +153,73 @@ Var* namespace_define(Namespace* ns, Value symbol, Value value) {
     var_set_value(var, value);
 
     return var;
+}
+
+/* ---- Dynamic bindings ---- */
+
+static Task* binding_task(void) {
+    return global_scheduler ? global_scheduler->current : NULL;
+}
+
+/* Marks "not bound" in hashmap_get_default (a binding may be nil) */
+static Value unbound_marker(void) {
+    static Value marker;
+    static bool made = false;
+    if (!made) { marker = keyword_intern("beer.core/unbound"); made = true; }
+    return marker;
+}
+
+static bool lookup_binding(Task* t, Var* var, Value* out) {
+    if (!t || !is_pointer(t->bindings)) return false;
+    Value v = hashmap_get_default(t->bindings, var_binding_key(var), unbound_marker());
+    if (is_pointer(v) && v.as.object == unbound_marker().as.object) return false;
+    *out = v;
+    return true;
+}
+
+Value var_dynamic_value(Var* var) {
+    Value v;
+    if (lookup_binding(binding_task(), var, &v)) return v;
+    return var->value;
+}
+
+bool var_is_bound(Var* var) {
+    Value v;
+    return lookup_binding(binding_task(), var, &v);
+}
+
+void var_set_binding(Var* var, Value v) {
+    Task* t = binding_task();
+    if (!t || !is_pointer(t->bindings)) return;
+    Value updated = hashmap_assoc(t->bindings, var_binding_key(var), v);
+    object_release(t->bindings);
+    t->bindings = updated;
+}
+
+Var* namespace_ns_var(void) {
+    static Var* ns_var = NULL;
+    if (!ns_var && global_namespace_registry) {
+        Namespace* core = namespace_registry_get_core(global_namespace_registry);
+        if (core) ns_var = namespace_lookup(core, symbol_intern("*ns*"));
+    }
+    return ns_var;
+}
+
+Namespace* namespace_registry_current(NamespaceRegistry* reg) {
+    if (!reg) return NULL;
+    Task* t = binding_task();
+    if (t && is_pointer(t->bindings)) {
+        Var* nv = namespace_ns_var();
+        Value sym;
+        if (nv && lookup_binding(t, nv, &sym) && is_pointer(sym) && object_type(sym) == TYPE_SYMBOL) {
+            if (!t->ns_cache || t->ns_cache_sym.as.object != sym.as.object) {
+                t->ns_cache = namespace_registry_get_or_create(reg, symbol_str(sym));
+                t->ns_cache_sym = sym;  /* interned: no retain needed */
+            }
+            if (t->ns_cache) return t->ns_cache;
+        }
+    }
+    return reg->current;
 }
 
 Var* namespace_lookup(Namespace* ns, Value symbol) {
@@ -320,6 +388,8 @@ Namespace* namespace_registry_get_core(NamespaceRegistry* reg) {
  * Global Initialization
  * ================================================================= */
 
+static void mark_core_dynamic_vars(void);
+
 void namespace_init_bare(void) {
     if (global_namespace_registry) {
         return;  /* Already initialized */
@@ -383,6 +453,17 @@ void namespace_init_bare(void) {
 
     /* Initialize global scheduler */
     global_scheduler = scheduler_new(DEFAULT_TASK_QUOTA);
+    mark_core_dynamic_vars();
+}
+
+/* Vars that binding can give a task-local value (REPL sessions, loads) */
+static void mark_core_dynamic_vars(void) {
+    Namespace* core = namespace_registry_get_core(global_namespace_registry);
+    const char* names[] = { "*ns*", "*out*", "*in*", "*err*", "*load-path*" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        Var* var = namespace_lookup(core, symbol_intern(names[i]));
+        if (var) var->is_dynamic = true;
+    }
 }
 
 void namespace_init(void) {

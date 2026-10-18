@@ -9,8 +9,8 @@
 Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperative multitasking, async I/O, actor system, and comprehensive standard library. The language supports interactive REPL-driven development, project tooling, and library distribution.
 
 **Test suite: all passing (100% pass rate)**
-- 61 unit tests
-- 625 REPL smoke tests
+- 329 unit tests (26 suites)
+- 664 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -119,7 +119,26 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
   small natives (`__file-read`, `__tar-read`, `__alias!`, `__refer!`, ...).
   File access goes through `beer.core/*fs*` when an embedder sets it
   (beeros). Load errors are catchable and name the file and form
-- `(def x "doc" v)` attaches the docstring like `defn`
+- `(def x "doc" v)` attaches the docstring like `defn`; `def` inside a fn
+  defines in the fn's namespace (Clojure); `load-file`/`load-string`
+  restore `*ns*`; runtime errors print once
+- `eval`/`load-string`/`load-file`/`require` run in the calling task
+  (`__compile` returns a 0-arg fn per form), not in a child task under a
+  nested scheduler loop
+- **Dynamic vars**: `(def ^:dynamic *x* ...)`, `binding` (task-local,
+  inherited by spawned tasks), `set!`; `*ns*`/`*out*`/`*in*`/`*err*` are
+  dynamic, so REPL sessions (nREPL connections) have their own namespace;
+  reader `^` metadata on def names
+- `(interrupt! task)` / `vm_request_interrupt_task` interrupt a given task
+  (skip `catch`, run `finally`); `(current-task)`; `(catch :interrupt e ...)`
+  opts in to catching it (REPL loops)
+- VM value stack and call frames grow on demand (were fixed at 256 values
+  / 64 frames, so non-tail recursion ~64 deep failed); capped at 1M values /
+  100k frames
+- `apply` makes its call in the caller's VM (`vm_request_call`): fns given to
+  `apply`, `swap!`, `reduce-kv`, `alter-meta!` (the last three now beerlang)
+  yield and are interrupted like any code; `swap!` retries with
+  `compare-and-set!`
 - **Interrupts**: Ctrl-C at the REPL / `vm_request_interrupt()` /
   `(request-interrupt!)` stop the foreground form between scheduler quanta;
   the interrupt skips `catch` and runs `finally` (`OP_PUSH_FINALLY`);

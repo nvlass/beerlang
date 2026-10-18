@@ -6,7 +6,7 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 625 (`bash tests/smoke_test.sh`)
+- REPL smoke tests: 664 (`bash tests/smoke_test.sh`)
 - **Last Updated:** 2026-10-17
 
 ## Open Items at a Glance
@@ -20,9 +20,8 @@ Small / concrete:
   `(ns ...)` hasn't run yet
 - Maps aren't seqable: `seq`/`map`/`reduce`/`doseq` over a map fail
   (`reduce-kv` works)
-- No `binding`: `*out*` is a plain var, redirected with `(def *out* s)`.
-  Task-local dynamic bindings need a design decision (tasks yield
-  inside a binding)
+- No string output stream: `with-out-str`, and `:out` messages in the EDN
+  nREPL (whose sessions bind `*ns*` but not `*out*`), need one
 - Destructuring is vectors only: no map destructuring (`{:keys [a]}`) in
   `let` or `fn`; `loop` doesn't destructure
 - Freeing a very long list recurses once per cons cell
@@ -465,6 +464,67 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
 6. **Small ones.** `(def x "doc" v)` and the core.beer NOTE are done (see
    above). Open: aligned ByteBuffer constructor, see the ByteBuffer
    section.
+
+7. **Follow-ups from beeros using 9aa8590 — done (2026-10-18).**
+   - `load-file`/`load-string` restore the current namespace afterwards,
+     also on error (`core_load_source`); `eval` of `in-ns` still sticks.
+   - Errors print once: `vm_run` no longer writes `VM Error:`; callers
+     report, and a spawned task with no caller prints `Task error: msg`.
+   Not beerlang: an interrupt map that turned into nil was beeros's linker
+   script overlapping `.bss` with the TLS block (`errno` writes).
+   Found on the way: the REPL hung at EOF when stdin was a regular file
+   (`beerlang < file`; kqueue never reports EOF there). Fixed.
+
+8. **Several REPLs in one image (2026-10-18).** beeros is adding a
+   framebuffer terminal whose REPL runs as a spawned task next to the
+   serial REPL (the foreground). Sharing every definition is the point;
+   two things are not meant to be shared:
+   - **Current namespace per task.** The registry's current ns and
+     `beer.core/*ns*` are global, so `(in-ns 'foo)` in one REPL moves the
+     other. Clojure gets this from `binding` on `*ns*`; beerlang has no
+     dynamic vars yet. Either `binding` (thread-local, i.e. task-local,
+     values for `^:dynamic` vars, which would also give `*out*`, `*args*`
+     and friends) or, smaller, a per-task current namespace that `in-ns`,
+     `*ns*` and compilation read, inherited by `spawn`.
+   - **Interrupting a given task.** `vm_request_interrupt()` only reaches
+     the foreground task, so a runaway form in the window REPL can't be
+     stopped. Wanted: `vm_request_interrupt_task(task)` /
+     `(interrupt! task)`, same semantics (skip `catch`, run `finally`),
+     delivered between quanta; the foreground variant stays as is.
+   - ~~`def` of an unqualified name inside a fn used the namespace
+     current when the fn runs~~: done (2026-10-18), it uses the fn's home
+     namespace, as in Clojure (qualified `def` aliases resolve there too).
+     beeros can drop the `beer.pkg/*args*` qualification.
+   Done (2026-10-18): (2) `eval`/`load-string`/`load-file`/`require` run
+   each form in the caller's VM (`__compile` + a beerlang loop) instead of
+   a child task + nested scheduler loop, which made two REPLs evaluating at
+   once stall each other. `eval` splits a top-level `do` and lets thrown
+   maps through unchanged (was "eval: ..." text).
+   (3) Done (2026-10-18): dynamic vars. `(def ^:dynamic *x* ..)`, `binding`
+   (values live in the task, inherited by spawned tasks, so bodies may
+   yield), `set!`. `*ns*`, `*out*`, `*in*`, `*err*`, `*fs*`, `*load-path*`
+   are dynamic; with `*ns*` bound, `in-ns` changes only the binding and the
+   current namespace follows it. nREPL connections bind `*ns*` (the simple
+   one also `*out*` to the socket). Reader takes `^` metadata (on def
+   names; symbols can't carry it elsewhere). beeros: run the window REPL
+   inside `(binding [*ns* 'user *out* term *in* kbd] ...)`.
+   (4) Done (2026-10-18): `(interrupt! task)` / `vm_request_interrupt_task`
+   (signal/IRQ safe), same semantics as the foreground interrupt;
+   `(current-task)`. Fixed on the way: waking a channel-blocked task for an
+   interrupt (also the foreground one, since 2526809) enqueued it before
+   unlinking it from the channel queue, which corrupts the ready queue
+   when other tasks are ready (both queues use next/prev).
+   Done too: `(catch :interrupt e ...)` (opt-in, takes only the interrupt;
+   new `OP_PUSH_INTERRUPT_CATCH`), so a REPL loop in beerlang survives
+   `interrupt!` on its own task: `(try (eval f) (catch :interrupt e ...)
+   (catch e ...))`.
+   Done (2026-10-18), option B: no temp VMs for fns given to natives.
+   `apply` asks the VM to make the call (`vm_request_call`; ~38% faster,
+   tail calls through apply, >65535 args); `swap!` (compare-and-set! retry
+   loop), `reduce-kv`, `alter-meta!` are beerlang. The old native `swap!`
+   returned nil when f yielded. VM stack/frames now grow on demand (were
+   256 values / 64 frames: non-tail recursion ~64 deep failed). Only
+   macroexpansion still uses a temp VM.
 
 Related: `::kw` resolution needs form-by-form reading in `load`; a
 `load-string` built on `core_load_source` inherits that.

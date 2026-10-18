@@ -1,6 +1,23 @@
 ; Beerlang Core Macros
 ; Loaded at startup by the runtime.
 
+; Fns that call a fn they're given are beerlang (on apply), not natives: the
+; fn then runs in the caller's VM, where it can yield and be interrupted.
+; Defined first: def/defn docstrings expand to alter-meta!.
+
+(def alter-meta!
+  (fn alter-meta! [sym f & args]
+    (__set-meta! sym (apply f (meta sym) args))))
+
+; Retries if another task changed the atom while f ran (f may run more
+; than once, as in Clojure)
+(def swap!
+  (fn swap! [a f & args]
+    (loop []
+      (let* [old (deref a)
+             new (apply f old args)]
+        (if (compare-and-set! a old new) new (recur))))))
+
 ; defn: convenience for (def name (fn name ...))
 ; Single arity:  (defn name [params] body...)
 ; Multi-arity:   (defn name ([params1] body1...) ([params2] body2...) ...)
@@ -9,12 +26,15 @@
   (let* [has-doc (string? (first fdecl))
          docstring (if has-doc (first fdecl) nil)
          fdecl (if has-doc (rest fdecl) fdecl)
+         ; ^meta name reads as (__meta-sym meta name): def takes it as is,
+         ; fn and alter-meta! want the symbol
+         sym (if (list? name) (first (rest (rest name))) name)
          ; fn handles both [params] body... and ([params] body...) clauses
-         base (list (quote def) name (cons (quote fn) (cons name fdecl)))]
+         base (list (quote def) name (cons (quote fn) (cons sym fdecl)))]
     (if has-doc
       (list (quote do) base
-            (list (quote alter-meta!) (list (quote quote) name) (quote assoc) :doc docstring)
-            name)
+            (list (quote alter-meta!) (list (quote quote) sym) (quote assoc) :doc docstring)
+            sym)
       base)))
 
 ; doc: print documentation for a symbol
@@ -198,6 +218,12 @@
       (if (empty? s)
         acc
         (recur (f acc (first s)) (rest s))))))
+
+; (f acc k v) for each entry of a map (or nil)
+(defn reduce-kv [f init m]
+  (if (or (nil? m) (map? m))
+    (reduce (fn [acc k] (f acc k (get m k))) init (keys m))
+    (throw {:message "reduce-kv: third argument must be a map or nil"})))
 
 (defn map [f coll]
   (loop [s   (__seq coll)
@@ -484,6 +510,26 @@
           (cons 'do body)
           (list 'recur (list 'rest s)))))))
 
+; (binding [*x* 1 *y* 2] body...): while body runs, the running task (and
+; tasks it spawns) sees its own values for these dynamic vars
+; ((def ^:dynamic *x* ...)); they are restored afterwards, also on throw.
+; Bindings live in the task, so body may yield.
+(defmacro binding [bindings & body]
+  (if (odd? (count bindings))
+    (throw {:message "binding: requires an even number of forms in the binding vector"}))
+  (let* [g (gensym "prev-bindings")
+         pairs (loop [bs bindings acc []]
+                 (if (empty? bs)
+                   acc
+                   (recur (rest (rest bs))
+                          (conj (conj acc (list 'quote (first bs))) (second bs)))))]
+    (list 'let* [g (list '__push-bindings pairs)]
+          (list 'try (cons 'do body) (list 'finally (list '__pop-bindings g))))))
+
+; (set! *x* v) changes the running task's binding of a dynamic var
+(defmacro set! [sym v]
+  (list '__set! (list 'quote sym) v))
+
 ; Exception helpers
 (defn ex-info [msg data] {:type :error :message msg :data data})
 
@@ -492,7 +538,7 @@
 ;   (def beer.core/*fs* {:read (fn [path] ...) :write! (fn [path s append?] ...)})
 ; :read returns the contents as a string, or nil if path can't be read.
 ; nil means the host file system.
-(def *fs* nil)
+(def ^:dynamic *fs* nil)
 
 (defn __read-file [path]
   (if *fs* ((get *fs* :read) path) (__file-read path)))
@@ -509,6 +555,38 @@
   (if *fs*
     ((get *fs* :write!) path content (if (= (first opts) :append) (second opts) false))
     (apply __spit path content opts)))
+
+;; eval and load-string compile each form into a fn (__compile) and call it
+;; in the caller's VM: no child task, so they yield like any other code and
+;; two REPLs evaluating at once don't wait on each other.
+; A top-level do is split, as in Clojure: each subform is compiled after the
+; previous one ran, so (do (in-ns 'x) (def y 1)) defines x/y.
+(defn eval [form]
+  (let* [f (macroexpand form)]
+    (if (and (list? f) (= (first f) 'do))
+      (reduce (fn [_ sub] (eval sub)) nil (rest f))
+      ((__compile f)))))
+
+; Runs every form of s; the current namespace is restored afterwards
+(defn load-string
+  ([s] (load-string s "<string>"))
+  ([s name]
+   (let* [forms (__read-all s name)
+          n (count forms)
+          saved (__current-ns)]
+     (try
+       (loop [i 0 result nil]
+         (if (< i n)
+           (recur (inc i)
+                  (try
+                    (eval (nth forms i))
+                    (catch e
+                      (throw (ex-info (str "load: error in " name " (form " (inc i) "): "
+                                           (or (get e :message) (pr-str e)))
+                                      {:file name :form (inc i) :cause e})))))
+           result))
+       (finally
+         (if (not= (__current-ns) saved) (in-ns saved)))))))
 
 (defn load-file [path]
   (let* [src (__read-file path)]

@@ -25,19 +25,23 @@
 
 ;; ── Client handler ────────────────────────────────────────────────────────────
 
+; Each connection is a session: its own current namespace (starting in
+; user), and println goes back to the client
 (defn handle-client [stream]
   (swap! *clients* inc)
   (try
-    (loop []
-      (let [line (read-line stream)]
-        (when line
-          (let [result (try
-                         (pr-str (eval (read-string line)))
-                         (catch e
-                           (str "ERROR: " (:message e))))]
-            (write stream (str result "\n"))
-            (flush stream)
-            (recur)))))
+    (binding [*ns* 'user
+              *out* stream]
+      (loop []
+        (let [line (read-line stream)]
+          (when line
+            (let [result (try
+                           (pr-str (eval (read-string line)))
+                           (catch e
+                             (str "ERROR: " (:message e))))]
+              (write stream (str result "\n"))
+              (flush stream)
+              (recur))))))
     (catch _e nil)
     (finally
       (close stream)

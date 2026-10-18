@@ -901,6 +901,9 @@ static void compile_list(Compiler* c, Value form, bool in_tail_pos) {
             Value expanded = quasiquote_expand(quoted);
             compile_expr(c, expanded, in_tail_pos);
             return;
+        } else if (strcmp(name, "__meta-sym") == 0) {
+            compile_error(c, "metadata on a symbol (^...) is only supported on a def name");
+            return;
         } else if (strcmp(name, "def") == 0) {
             /* (def symbol value) => define global var */
             compile_def(c, form);
@@ -1134,6 +1137,28 @@ static void compile_def(Compiler* c, Value form) {
     /* (def symbol value) => define global var */
     Value symbol = list_nth_or_nil(form, 1);
     Value value_expr = list_nth_or_nil(form, 2);
+
+    /* (def ^m x ...) reads as (def (__meta-sym m x) ...):
+     * => (do (def x ...) (__def-meta! 'x m) x) */
+    if (is_cons(symbol) && is_symbol_named(car(symbol), "__meta-sym")) {
+        Value meta = list_nth_or_nil(symbol, 1);
+        Value name = list_nth_or_nil(symbol, 2);
+        Value def_rest = cons(name, cdr(cdr(form)));
+        Value def_form = cons(symbol_intern("def"), def_rest);
+        object_release(def_rest);
+        Value quote_items[2] = { symbol_intern("quote"), name };
+        Value quoted = list_from_array(quote_items, 2);
+        Value meta_items[3] = { symbol_intern("__def-meta!"), quoted, meta };
+        Value meta_form = list_from_array(meta_items, 3);
+        Value do_items[4] = { symbol_intern("do"), def_form, meta_form, name };
+        Value do_form = list_from_array(do_items, 4);
+        compile_expr(c, do_form, false);
+        object_release(do_form);
+        object_release(meta_form);
+        object_release(quoted);
+        object_release(def_form);
+        return;
+    }
 
     /* Validate symbol */
     if (!is_pointer(symbol) || object_type(symbol) != TYPE_SYMBOL) {
@@ -2090,52 +2115,115 @@ static void compile_finally_body(Compiler* c, Value finally_body) {
     }
 }
 
+/* A catch block at the current offset: bind the exception to var, compile
+ * body; leaves the block's value on the stack */
+static void compile_catch_block(Compiler* c, Value var, Value body, bool tail) {
+    LexicalEnv* outer = c->env;
+    c->env = lexical_env_new(outer, false);
+    emit_op(c, OP_LOAD_EXCEPTION);
+    int local = lexical_env_add_local(c->env, var);
+    emit_uint16(c, OP_STORE_LOCAL, (uint16_t)local);
+    if (local >= c->local_count) c->local_count = local + 1;
+    if (!is_cons(body)) {
+        emit_op(c, OP_PUSH_NIL);
+    } else {
+        for (Value cur = body; is_cons(cur); ) {
+            Value next = cdr(cur);
+            bool last = !is_cons(next);
+            compile_expr(c, car(cur), last && tail);
+            if (!last) emit_op(c, OP_POP);
+            cur = next;
+        }
+    }
+    lexical_env_free(c->env);
+    c->env = outer;
+}
+
+/* After the code a handler covers: pop it and jump past its catch block,
+ * point the handler at the block, compile it */
+static void compile_handler_exit(Compiler* c, size_t handler_operand,
+                                 Value var, Value body, bool tail) {
+    emit_op(c, OP_POP_HANDLER);
+    size_t jump_past = bytecode_current_offset(c->bytecode);
+    emit_int32(c, OP_JUMP, 0);  /* Placeholder */
+    bytecode_patch_uint32(c->bytecode, handler_operand,
+                          (uint32_t)bytecode_current_offset(c->bytecode));
+    compile_catch_block(c, var, body, tail);
+    size_t after = bytecode_current_offset(c->bytecode);
+    bytecode_patch_int32(c->bytecode, jump_past + 1, (int32_t)(after - jump_past - 5));
+}
+
+static size_t emit_push_handler(Compiler* c, uint8_t op) {
+    bytecode_emit_byte(c->bytecode, op);
+    size_t operand = bytecode_current_offset(c->bytecode);
+    bytecode_emit_uint32(c->bytecode, 0);  /* Placeholder */
+    return operand;
+}
+
 static void compile_try(Compiler* c, Value form, bool in_tail_pos) {
-    /* (try body... (catch e catch-body...) (finally finally-body...)) */
+    /* (try body... (catch e ...) (catch :interrupt e ...) (finally ...))
+     * (catch e ...) catches every exception except the interrupt;
+     * (catch :interrupt e ...) catches only the interrupt (an opt-in, for
+     * REPL loops); finally runs on every exit. */
     Value rest = cdr(form);  /* Skip 'try' */
 
-    /* Find catch and finally clauses, count body expressions */
     Value catch_clause = VALUE_NIL;
+    Value int_clause = VALUE_NIL;
     Value finally_clause = VALUE_NIL;
     int body_count = 0;
-    Value cur = rest;
-    while (is_cons(cur)) {
+    for (Value cur = rest; is_cons(cur); cur = cdr(cur)) {
         Value expr = car(cur);
         if (is_cons(expr) && is_symbol_named(car(expr), "catch")) {
-            catch_clause = expr;
+            Value second = list_nth_or_nil(expr, 1);
+            if (is_pointer(second) && object_type(second) == TYPE_KEYWORD) {
+                if (strcmp(keyword_name(second), "interrupt") != 0 || keyword_has_namespace(second)) {
+                    compile_error(c, "try: catch takes a binding symbol, or :interrupt and a symbol");
+                    return;
+                }
+                if (!is_nil(int_clause)) {
+                    compile_error(c, "try: more than one (catch :interrupt ...)");
+                    return;
+                }
+                int_clause = expr;
+            } else {
+                if (!is_nil(catch_clause)) {
+                    compile_error(c, "try: more than one catch clause");
+                    return;
+                }
+                catch_clause = expr;
+            }
         } else if (is_cons(expr) && is_symbol_named(car(expr), "finally")) {
             finally_clause = expr;
-        } else if (is_nil(catch_clause) && is_nil(finally_clause)) {
+        } else if (is_nil(catch_clause) && is_nil(int_clause) && is_nil(finally_clause)) {
             body_count++;
         }
-        cur = cdr(cur);
     }
 
     bool has_catch = !is_nil(catch_clause);
+    bool has_int = !is_nil(int_clause);
     bool has_finally = !is_nil(finally_clause);
     Value finally_body = has_finally ? cdr(finally_clause) : VALUE_NIL;
 
-    if (!has_catch && !has_finally) {
+    if (!has_catch && !has_int && !has_finally) {
         compile_error(c, "try: missing catch or finally clause");
         return;
     }
 
-    /* Parse catch clause if present: (catch e body...) */
-    Value catch_var = VALUE_NIL;
-    Value catch_body = VALUE_NIL;
+    /* (catch e body...) / (catch :interrupt e body...) */
+    Value catch_var = VALUE_NIL, catch_body = VALUE_NIL;
+    Value int_var = VALUE_NIL, int_body = VALUE_NIL;
     if (has_catch) {
-        Value catch_rest = cdr(catch_clause);  /* Skip 'catch' */
-        if (!is_cons(catch_rest)) {
-            compile_error(c, "try: catch requires a binding symbol");
-            return;
-        }
-        catch_var = car(catch_rest);
-        catch_body = cdr(catch_rest);
-
-        if (!is_pointer(catch_var) || object_type(catch_var) != TYPE_SYMBOL) {
-            compile_error(c, "try: catch binding must be a symbol");
-            return;
-        }
+        catch_var = list_nth_or_nil(catch_clause, 1);
+        catch_body = cdr(cdr(catch_clause));
+    }
+    if (has_int) {
+        int_var = list_nth_or_nil(int_clause, 2);
+        int_body = cdr(cdr(cdr(int_clause)));
+    }
+    if ((has_catch && (!is_pointer(catch_var) || object_type(catch_var) != TYPE_SYMBOL)) ||
+        (has_int && (!is_pointer(int_var) || object_type(int_var) != TYPE_SYMBOL))) {
+        compile_error(c, "try: catch binding must be a symbol");
+        return;
     }
 
     /* Check if we're inside a function (need a frame for catch variable) */
@@ -2168,100 +2256,30 @@ static void compile_try(Compiler* c, Value form, bool in_tail_pos) {
         emit_uint16(c, OP_ENTER, 0);  /* Placeholder */
     }
 
-    /* With a finally, an outer handler covers the body and the catch body,
-     * so an exception escaping either still runs finally (then rethrows). */
-    size_t finally_handler_operand = 0;
-    if (has_finally) {
-        bytecode_emit_byte(c->bytecode, OP_PUSH_FINALLY);
-        finally_handler_operand = bytecode_current_offset(c->bytecode);
-        bytecode_emit_uint32(c->bytecode, 0);  /* Placeholder */
-    }
+    /* Handlers nest outermost first: finally covers everything (so an
+     * exception escaping a catch body still runs it, then rethrows); the
+     * interrupt catch covers the body and the catch body; the catch covers
+     * the body. */
+    size_t finally_handler_operand = has_finally ? emit_push_handler(c, OP_PUSH_FINALLY) : 0;
+    size_t int_handler_operand = has_int ? emit_push_handler(c, OP_PUSH_INTERRUPT_CATCH) : 0;
+    size_t catch_handler_operand = has_catch ? emit_push_handler(c, OP_PUSH_HANDLER) : 0;
 
-    if (has_catch) {
-        /* Emit OP_PUSH_HANDLER with placeholder catch_pc */
-        bytecode_emit_byte(c->bytecode, OP_PUSH_HANDLER);
-        size_t handler_operand_offset = bytecode_current_offset(c->bytecode);
-        bytecode_emit_uint32(c->bytecode, 0);  /* Placeholder */
-
-        /* Compile body expressions */
-        if (body_count == 0) {
-            emit_op(c, OP_PUSH_NIL);
-        } else {
-            cur = rest;
-            int i = 0;
-            while (i < body_count && is_cons(cur)) {
-                compile_expr(c, car(cur), false);  /* Not tail pos inside try body */
-                if (i < body_count - 1) {
-                    emit_op(c, OP_POP);
-                }
-                i++;
-                cur = cdr(cur);
-            }
-        }
-
-        /* Normal exit: pop handler */
-        emit_op(c, OP_POP_HANDLER);
-
-        size_t jump_past_catch_offset = bytecode_current_offset(c->bytecode);
-        emit_int32(c, OP_JUMP, 0);  /* Placeholder: jump past catch */
-
-        /* Patch PUSH_HANDLER target → here (catch block start) */
-        uint32_t catch_pc = (uint32_t)bytecode_current_offset(c->bytecode);
-        bytecode_patch_uint32(c->bytecode, handler_operand_offset, catch_pc);
-
-        /* In catch block: load exception, bind to catch var */
-        LexicalEnv* try_env = c->env;
-        c->env = lexical_env_new(try_env, false);
-
-        emit_op(c, OP_LOAD_EXCEPTION);
-        int catch_local = lexical_env_add_local(c->env, catch_var);
-        emit_uint16(c, OP_STORE_LOCAL, (uint16_t)catch_local);
-        if (catch_local >= c->local_count) {
-            c->local_count = catch_local + 1;
-        }
-
-        /* Compile catch body */
-        if (!is_cons(catch_body)) {
-            emit_op(c, OP_PUSH_NIL);
-        } else {
-            cur = catch_body;
-            while (is_cons(cur)) {
-                Value expr = car(cur);
-                Value next = cdr(cur);
-                bool is_last = !is_cons(next);
-                compile_expr(c, expr, is_last && in_tail_pos && !need_frame && !has_finally);
-                if (!is_last) {
-                    emit_op(c, OP_POP);
-                }
-                cur = next;
-            }
-        }
-
-        /* Restore catch sub-environment */
-        lexical_env_free(c->env);
-        c->env = try_env;
-
-        /* Patch jump past catch */
-        size_t after_catch = bytecode_current_offset(c->bytecode);
-        int32_t jump_offset = (int32_t)(after_catch - jump_past_catch_offset - 5);
-        bytecode_patch_int32(c->bytecode, jump_past_catch_offset + 1, jump_offset);
+    /* Body (not in tail position: handlers are popped after it) */
+    if (body_count == 0) {
+        emit_op(c, OP_PUSH_NIL);
     } else {
-        /* try with finally only (no catch) */
-        if (body_count == 0) {
-            emit_op(c, OP_PUSH_NIL);
-        } else {
-            cur = rest;
-            int i = 0;
-            while (i < body_count && is_cons(cur)) {
-                compile_expr(c, car(cur), false);
-                if (i < body_count - 1) {
-                    emit_op(c, OP_POP);
-                }
-                i++;
-                cur = cdr(cur);
-            }
+        Value cur = rest;
+        for (int i = 0; i < body_count && is_cons(cur); i++, cur = cdr(cur)) {
+            compile_expr(c, car(cur), false);
+            if (i < body_count - 1) emit_op(c, OP_POP);
         }
     }
+
+    bool tail_ok = in_tail_pos && !need_frame && !has_finally;
+    if (has_catch)
+        compile_handler_exit(c, catch_handler_operand, catch_var, catch_body, tail_ok && !has_int);
+    if (has_int)
+        compile_handler_exit(c, int_handler_operand, int_var, int_body, tail_ok);
 
     if (has_finally) {
         /* Normal exit (body or catch finished): drop the outer handler and

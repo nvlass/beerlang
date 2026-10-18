@@ -5,7 +5,9 @@
 These are primitive language constructs handled by the compiler.
 
 ### `def`
-Define a var in the current namespace.
+Define a var in the current namespace. Inside a fn, an unqualified name
+is defined in the namespace the fn was written in, not the one current
+when it runs (as in Clojure).
 ```clojure
 (def x 42)
 (def greeting "hello")
@@ -73,9 +75,16 @@ Exception handling. Only maps can be thrown.
   (catch e (println (:msg e)))
   (finally (println "done")))
 ```
-An interrupt (Ctrl-C at the REPL, `request-interrupt!`) unwinds the
-foreground form with `{:type :interrupt :message "interrupted"}`: `finally`
-blocks run, `catch` doesn't see it.
+An interrupt (Ctrl-C at the REPL, `request-interrupt!`, `interrupt!`)
+unwinds the task with `{:type :interrupt :message "interrupted"}`: `finally`
+blocks run, `catch` doesn't see it. Code that must survive one — a REPL
+loop written in beerlang — opts in with `(catch :interrupt e ...)`, which
+takes only the interrupt; a `try` can have one of each:
+```clojure
+(try (eval form)
+  (catch :interrupt e :interrupted)
+  (catch e (println "error:" (:message e))))
+```
 
 ### `defmacro`
 Define a macro.
@@ -286,19 +295,21 @@ installs a map:
 | `nano-time` | Monotonic nanoseconds, for measuring intervals (arbitrary origin) | `(- (nano-time) t0)` |
 | `current-time-millis` | Wall-clock ms since the Unix epoch | `(current-time-millis)` |
 | `time` | Macro: evaluate, print elapsed ms, return the value | `(time (fib 20))` |
-| `apply` | Apply function to arg list | `(apply + [1 2 3])` → `6` |
+| `apply` | Apply function (or keyword/map/vector/set) to arg list; the fn runs in the calling task, and in tail position it is a tail call | `(apply + [1 2 3])` → `6` |
 | `macroexpand-1` | Expand macro once | `(macroexpand-1 '(when true 1))` |
 | `macroexpand` | Fully expand macros | `(macroexpand '(when true 1))` |
 | `set-macro!` | Mark a var as a macro | `(set-macro! 'my-macro)` |
 | `in-ns` | Switch/create namespace | `(in-ns 'my.ns)` |
 | `require` | Load namespaces, with optional alias/refer; specs as vectors or flat | `(require '[foo.bar :as fb :refer [x]] 'baz)`, `(require 'foo.bar :as 'fb)` |
-| `eval` | Compile and execute a form | `(eval '(+ 1 2))` → `3` |
+| `eval` | Compile and execute a form in the calling task; a top-level `do` is evaluated subform by subform (Clojure); exceptions pass through unchanged | `(eval '(+ 1 2))` → `3` |
 | `read-string` | Parse a string into a beerlang value (one form) | `(read-string "(+ 1 2)")` → `(+ 1 2)` |
 | `keyword` | Create keyword from string | `(keyword "foo")` → `:foo` |
 | `name` | Get name of symbol or keyword as string | `(name :foo)` → `"foo"` |
-| `load-file` | Load and execute a .beer file (`load` is the same fn) | `(load-file "path/to/file.beer")` |
+| `load-file` | Load and execute a .beer file (`load` is the same fn); `*ns*` is restored afterwards | `(load-file "path/to/file.beer")` |
 | `load-string` | Load and execute every form in a string; optional name for errors | `(load-string "(def x 1) x" "x.beer")` → `1` |
 | `request-interrupt!` | Interrupt the foreground form (what Ctrl-C does at the REPL); background tasks keep running | `(request-interrupt!)` |
+| `interrupt!` | Interrupt a given task: it unwinds with `{:type :interrupt}` (skips `catch`, runs `finally`), woken if blocked; `false` if it already finished | `(interrupt! t)` |
+| `current-task` | The running task (nil outside one) | `(current-task)` |
 | `ns-publics` | List symbols defined in a namespace | `(ns-publics 'beer.core)` |
 
 ### Concurrency
@@ -321,7 +332,7 @@ Atoms provide managed mutable state with atomic updates.
 | `atom` | Create an atom with initial value | `(atom 0)` |
 | `deref` / `@` | Read current value | `(deref a)`, `@a` |
 | `reset!` | Set atom to new value, returns new value | `(reset! a 42)` → `42` |
-| `swap!` | Apply fn to current value (with optional extra args) | `(swap! a inc)`, `(swap! a + 10)` |
+| `swap!` | Apply fn to current value (with optional extra args); retries with compare-and-set! if another task changed the atom meanwhile, so fn may run more than once | `(swap! a inc)`, `(swap! a + 10)` |
 | `compare-and-set!` | CAS: set new if current equals old | `(compare-and-set! a 0 1)` → `true` |
 | `atom?` | Test if value is an atom | `(atom? a)` → `true` |
 
@@ -645,6 +656,22 @@ Actor handlers receive `(state msg)` and return `{:state new-state}` (or `{:stat
 | `with-open` | Auto-close resource | `(with-open [f (open "x" :read)] (read-line f))` |
 | `ns` | Declare namespace with requires | `(ns my.lib (:require [other :as o]))` |
 | `doseq` | Iterate sequence for side effects | `(doseq [x [1 2 3]] (println x))` |
+| `binding` | Task-local values for dynamic vars while the body runs (inherited by spawned tasks, restored after, also on throw) | `(binding [*out* f] (println "to f"))` |
+| `set!` | Change the running task's binding of a dynamic var | `(binding [*x* 1] (set! *x* 2) *x*)` → `2` |
+
+### Dynamic vars and metadata
+
+`(def ^:dynamic *x* 1)` declares a dynamic var. `binding` gives the running
+task its own value: bindings live in the task, so the body may yield, and
+tasks spawned inside see them (Clojure's binding conveyance). Outside a
+binding, `*x*` reads the root value; `def` sets the root, `set!` only works
+inside a binding.
+
+The reader takes `^:kw`, `^{...}` and `^Tag` metadata. On a `def`/`defn`
+name it is merged into the var's metadata (`(defn ^:private f ...)`,
+`:dynamic` makes the var dynamic). Symbols carry no metadata of their own,
+so `^m sym` anywhere else is a compile error; on collections it is
+dropped.
 
 ### Numeric
 
@@ -741,12 +768,13 @@ Actor handlers receive `(state msg)` and return `{:state new-state}` (or `{:stat
 
 | Var | Description |
 |-----|-------------|
-| `*ns*` | Current namespace name (symbol) |
-| `*in*` | Standard input stream |
-| `*out*` | Standard output stream |
-| `*err*` | Standard error stream |
+| `*ns*` | Current namespace name (symbol); dynamic: REPL sessions bind it, and `in-ns` changes the binding when there is one |
+| `*in*` | Standard input stream (dynamic) |
+| `*out*` | Standard output stream (dynamic) |
+| `*err*` | Standard error stream (dynamic) |
+| `*fs*` | File system hook, see I/O (dynamic) |
 | `*loaded-libs*` | Map of loaded namespace files |
-| `*load-path*` | Vector of library search paths (from `BEERPATH` env var + `"lib/"`) |
+| `*load-path*` | Vector of library search paths (from `BEERPATH` env var + `"lib/"`; dynamic) |
 
 ---
 

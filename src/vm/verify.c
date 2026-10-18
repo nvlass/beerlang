@@ -23,7 +23,7 @@ static bool executable(uint8_t op) {
         case OP_LOAD_VAR: case OP_STORE_VAR:
         case OP_LOAD_LOCAL: case OP_STORE_LOCAL:
         case OP_LOAD_CLOSURE: case OP_LOAD_SELF: case OP_MAKE_CLOSURE:
-        case OP_PUSH_HANDLER: case OP_PUSH_FINALLY: case OP_POP_HANDLER: case OP_THROW: case OP_LOAD_EXCEPTION:
+        case OP_PUSH_HANDLER: case OP_PUSH_FINALLY: case OP_PUSH_INTERRUPT_CATCH: case OP_POP_HANDLER: case OP_THROW: case OP_LOAD_EXCEPTION:
         case OP_YIELD: case OP_SPAWN: case OP_AWAIT:
         case OP_CHAN_SEND: case OP_CHAN_RECV:
         case OP_HALT:
@@ -106,6 +106,7 @@ bool bytecode_verify(const uint8_t* code, int code_size,
                 break;
             case OP_PUSH_HANDLER:
             case OP_PUSH_FINALLY:
+            case OP_PUSH_INTERRUPT_CATCH:
                 target = (long)u32_at(operand);
                 what = "catch target";
                 break;

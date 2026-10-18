@@ -1,5 +1,6 @@
 /* Task implementation - green thread with owned VM */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "task.h"
@@ -33,6 +34,10 @@ void task_destroy(struct Object* obj) {
     if (is_pointer(task->blocked_value)) {
         object_release(task->blocked_value);
         task->blocked_value = VALUE_NIL;
+    }
+    if (is_pointer(task->bindings)) {
+        object_release(task->bindings);
+        task->bindings = VALUE_NIL;
     }
     /* Free any remaining watchers (shouldn't normally have any — fired on completion) */
     WatcherNode* w = task->watchers;
@@ -69,6 +74,17 @@ Value task_new(Value fn, int argc, Value* argv, Scheduler* sched) {
     task->io_blocked = false;
     task->foreground = false;
     task->interrupt_pending = false;
+    task->interrupt_requested = 0;
+    task->waiting_on = NULL;
+    task->caller_reports = false;
+    task->bindings = VALUE_NIL;
+    task->ns_cache = NULL;
+    task->ns_cache_sym = VALUE_NIL;
+    /* Binding conveyance: a task sees the bindings of the task that made it */
+    if (sched && sched->current && is_pointer(sched->current->bindings)) {
+        task->bindings = sched->current->bindings;
+        object_retain(task->bindings);
+    }
 
     /* Create a VM for this task */
     VM* vm = vm_new(256);
@@ -138,6 +154,17 @@ Value task_new_from_code(uint8_t* code, int code_size,
     task->io_blocked = false;
     task->foreground = false;
     task->interrupt_pending = false;
+    task->interrupt_requested = 0;
+    task->waiting_on = NULL;
+    task->caller_reports = false;
+    task->bindings = VALUE_NIL;
+    task->ns_cache = NULL;
+    task->ns_cache_sym = VALUE_NIL;
+    /* Binding conveyance: a task sees the bindings of the task that made it */
+    if (sched && sched->current && is_pointer(sched->current->bindings)) {
+        task->bindings = sched->current->bindings;
+        object_retain(task->bindings);
+    }
 
     VM* vm = vm_new(256);
     vm->scheduler = sched;
@@ -178,12 +205,16 @@ void task_run(Task* task) {
 
     if (task->interrupt_pending) {
         task->interrupt_pending = false;
+        task->interrupt_requested = 0;
         vm_raise_interrupt(vm);
     }
     if (!vm->error) vm_run(vm);
 
     if (vm->error) {
-        /* Task errored — treat as done with nil result */
+        /* Task errored — treat as done with nil result. Spawned tasks have no
+         * caller to report it, so say it here. */
+        if (!task->caller_reports && !vm_is_interrupt(vm->thrown_exception))
+            fprintf(stderr, "Task error: %s\n", vm->error_msg ? vm->error_msg : "unknown error");
         task->state = TASK_DONE;
         task->result = VALUE_NIL;
     } else if (!vm->running && !vm->yielded) {

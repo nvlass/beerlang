@@ -2,6 +2,7 @@
 
 #include "test.h"
 #include "beerlang.h"
+#include "native.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -166,6 +167,57 @@ TEST(scheduler_round_robin) {
     return NULL;
 }
 
+/* vm_request_interrupt_task is what a signal or IRQ handler calls: it only
+ * sets flags, and the scheduler delivers at the next quantum */
+static Value test_request_interrupt(VM* vm, int argc, Value* argv) {
+    (void)vm; (void)argc;
+    vm_request_interrupt_task(task_get(argv[0]));
+    return VALUE_NIL;
+}
+
+static void define_test_native(void) {
+    Value fn = native_function_new(1, test_request_interrupt, "test-request-interrupt");
+    namespace_define(namespace_registry_get_core(global_namespace_registry),
+                     symbol_intern("test-request-interrupt"), fn);
+    object_release(fn);
+}
+
+TEST(scheduler_interrupt_task_running) {
+    eval_init();
+    define_test_native();
+    bool err;
+    Value v = eval_one(
+        "(let* [log (atom [])"
+        "       t (spawn (fn [] (try (loop [] (recur))"
+        "                            (catch e (swap! log conj :caught))"
+        "                            (finally (swap! log conj :fin)))))]"
+        "  (yield)"
+        "  (test-request-interrupt t)"
+        "  (await t)"
+        "  (count @log))", &err);
+    ASSERT(!err, "interrupting a spinning task should not error");
+    ASSERT_EQ(untag_fixnum(v), 1, "only finally runs (catch is skipped)");
+    eval_cleanup();
+    return NULL;
+}
+
+TEST(scheduler_interrupt_task_blocked) {
+    eval_init();
+    define_test_native();
+    bool err;
+    Value v = eval_one(
+        "(let* [log (atom 0)"
+        "       t (spawn (fn [] (try (<! (chan)) (finally (reset! log 7)))))]"
+        "  (yield)"
+        "  (test-request-interrupt t)"
+        "  (await t)"
+        "  @log)", &err);
+    ASSERT(!err, "interrupting a blocked task should not error");
+    ASSERT_EQ(untag_fixnum(v), 7, "the blocked task is woken and runs finally");
+    eval_cleanup();
+    return NULL;
+}
+
 /* ================================================================ */
 
 static const char* all_tests(void) {
@@ -173,6 +225,8 @@ static const char* all_tests(void) {
     RUN_TEST(scheduler_spawn_and_run);
     RUN_TEST(scheduler_multiple_tasks);
     RUN_TEST(scheduler_round_robin);
+    RUN_TEST(scheduler_interrupt_task_running);
+    RUN_TEST(scheduler_interrupt_task_blocked);
     return NULL;
 }
 

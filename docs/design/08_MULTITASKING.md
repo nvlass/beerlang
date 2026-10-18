@@ -506,15 +506,59 @@ CREATE → READY → RUNNING → YIELDED → RUNNING → ... → COMPLETED
                  FAILED
 ```
 
+#### eval and loading run in the calling task
+
+`eval`, `load-string`, `load-file` and `require` (lib/core.beer) compile
+each form into a 0-arg fn (`__compile`) and call it in the caller's VM.
+They used to run each form as a child task through
+`scheduler_run_task_to_completion`, a scheduler loop nested on the
+caller's C stack: two tasks evaluating at once (two REPLs, nREPL next to
+the terminal) then stalled each other, since whichever nested later had
+to finish before the earlier one could return. Now they yield like any
+other code. `scheduler_run_task_to_completion` remains for C callers at
+the bottom of the stack (the REPL loop, script mode, `core_load_source`
+while loading lib/core.beer, the embedding API).
+
+#### Calling fns from natives
+
+A native never runs beerlang code in a VM of its own: that VM can't yield,
+so the fn would stall every task, miss interrupts, and get fresh frames
+instead of the caller's. Instead:
+
+- `apply` (the one native that calls a given fn) asks the VM to make the
+  call: `vm_request_call(vm, fn, argc, args)`, then returns. After the
+  native, `OP_CALL`/`OP_TAIL_CALL` see the request, replace the native's
+  call on the stack with fn and args, and dispatch again — a normal call
+  in the caller's VM (a tail call from `OP_TAIL_CALL`). Native fns given
+  to `apply` are still called directly.
+- `swap!`, `reduce-kv` and `alter-meta!` are beerlang (lib/core.beer) on
+  `apply`. `swap!` is a `compare-and-set!` loop: f can yield, so another
+  task may change the atom meanwhile; then f runs again (Clojure's
+  semantics).
+- The VM stack and frames grow on demand, since such fns now use the
+  caller's.
+
+#### Dynamic bindings
+
+`binding` values live in the task (`Task.bindings`, a persistent map from
+var to value), not in the var: `var_get_value` checks the running task's
+map first for vars marked dynamic, so a task can yield inside a `binding`
+and others keep seeing their own values. A task created while another
+runs (spawn, or the per-form tasks of `core_load_source`) starts with
+that task's map, shared since it is persistent. `*ns*` is dynamic too:
+`namespace_registry_current` returns the namespace of a bound `*ns*`
+(cached per task), so REPL sessions (nREPL connections, beeros's window
+REPL) each have their own current namespace by binding it.
+
 #### Interrupts
 
 `vm_request_interrupt()` (C, safe from a signal or IRQ handler) or
 `(request-interrupt!)` stops the **foreground** task: the innermost target
 of `scheduler_run_task_to_completion` reached from C or from another
-foreground task — the REPL's form, and loads (`require`, `load-string`)
-it runs. Background tasks (`spawn`) are never interrupted, and a
-`run_task_to_completion` from a background task (its own `eval` or
-`require`) is not foreground.
+foreground task — the REPL's form (and, for C callers such as script mode,
+the per-form tasks of `core_load_source`). `eval`, `load-string`,
+`load-file` and `require` run in the calling task itself, so they are
+stopped with it. Background tasks (`spawn`) are never interrupted.
 
 - The request is a flag. `scheduler_run_one_tick` checks it before each
   quantum, so the VM's inner loop pays nothing; the delay is at most one
@@ -525,22 +569,37 @@ it runs. Background tasks (`spawn`) are never interrupted, and a
   interrupt exception `{:type :interrupt :message "interrupted"}` (one
   immortal map, recognised by identity). Catch handlers are skipped and
   `finally` blocks run (`OP_PUSH_FINALLY`); a finally's rethrow is the
-  same map, so outer catches stay skipped. With no finally left the task
-  ends with the error "interrupted".
-- A nested load (`core_load_source`, `eval`) passes the interrupt to its
-  caller unchanged instead of wrapping it in a "load: error in ..."
-  exception.
+  same map, so outer catches stay skipped. `(catch :interrupt e ...)`
+  (`OP_PUSH_INTERRUPT_CATCH`) is the one handler that takes it, for code
+  that must survive an interrupt, such as a REPL loop in beerlang
+  interrupted with `interrupt!` on its own task. With no such handler
+  left the task ends with the error "interrupted".
+- `core_load_source` (C) passes the interrupt to its caller unchanged
+  instead of wrapping it in a "load: error in ..." exception; the
+  beerlang `load-string` wraps errors with `catch`, which the interrupt
+  skips.
+- A given task: `(interrupt! task)` delivers at once (it runs in scheduler
+  context); `vm_request_interrupt_task(task)` is the signal/IRQ-safe C
+  form: it sets a flag on the task and appends it to a small pending
+  list, delivered before the next quantum. Same unwinding as above. If
+  the task waits inside a nested `run_task_to_completion` (only C callers
+  still nest), the interrupt goes to the task it waits on
+  (`Task.waiting_on`) and comes back out through `core_load_source`.
+  An interrupted spawned task doesn't print "Task error"; `await` gives
+  nil and `task-watch` sees `:status :error`.
+- Waking a task blocked on a channel takes it off the channel's wait
+  queue *before* putting it on the ready queue: both are linked through
+  `Task.next`/`prev`.
 - With no foreground task the request stays pending. The REPL clears it
   at the prompt (Ctrl-C there drops the partial form) and before each
   form; SIGINT sets it, and a second SIGINT while it is still pending
   (a task stuck in a blocking native) exits the process.
-- Natives that run a fn in a temp VM (`apply`, `swap!`, `reduce-kv`,
-  `alter-meta!`, macroexpansion) use `scheduler_run_nested`: for a
-  foreground caller the temp VM counts safe points and checks the flag
-  when its quota runs out, raises the interrupt inside (its finally blocks
-  run) and rethrows it in the caller. Other tasks don't run meanwhile, so
-  only a request from outside the scheduler (SIGINT, an IRQ) or from the
-  fn itself reaches it there.
+- Fns given to `apply`, `swap!`, `reduce-kv` and `alter-meta!` run in the
+  calling task's VM like any call (see "Calling fns from natives"), so
+  they yield and are interrupted normally. Only macroexpansion still runs
+  a fn in a temp VM (`scheduler_run_nested`): the temp VM counts safe
+  points and, when its quota runs out, raises a pending interrupt inside
+  and rethrows it in the caller; other tasks don't run meanwhile.
 
 #### Performance Characteristics
 

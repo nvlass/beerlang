@@ -422,6 +422,11 @@ its handler stores the exception in a hidden local, runs the finally body
 and rethrows. It is a separate opcode so an interrupt can tell it from a
 catch: the interrupt exception skips catch handlers but runs every finally.
 
+`(catch :interrupt e ...)` pushes an `OP_PUSH_INTERRUPT_CATCH` handler
+between the finally and the catch, so it covers the body and the catch
+body. Handlers nest finally → interrupt catch → catch; each has its own
+pop + jump past its block (`compile_handler_exit`).
+
 ## Macro Expansion
 
 Macro expansion happens at compile time using the **temp VM pattern**:

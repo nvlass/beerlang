@@ -71,16 +71,19 @@
 
 ;; ── Client loop ───────────────────────────────────────────────────────────────
 
+; Each connection is a session with its own current namespace, starting in
+; user. (Output isn't captured yet: *out* stays the server's.)
 (defn handle-client [stream]
   (swap! *clients* inc)
   (try
-    (loop []
-      (let [line (read-line stream)]
-        (when line
-          (let [msg (try (read-string line) (catch _e nil))]
-            (when (map? msg)
-              (dispatch stream msg)))
-          (recur))))
+    (binding [*ns* 'user]
+      (loop []
+        (let [line (read-line stream)]
+          (when line
+            (let [msg (try (read-string line) (catch _e nil))]
+              (when (map? msg)
+                (dispatch stream msg)))
+            (recur)))))
     (catch _e nil)
     (finally
       (close stream)

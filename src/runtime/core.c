@@ -41,9 +41,11 @@
 
 /* Forward declarations */
 Value native_load(VM* vm, int argc, Value* argv);
-static Value native_load_string(VM* vm, int argc, Value* argv);
 static Value native_request_interrupt(VM* vm, int argc, Value* argv);
-static Value native_eval(VM* vm, int argc, Value* argv);
+static Value native_interrupt_task(VM* vm, int argc, Value* argv);
+static Value native_current_task(VM* vm, int argc, Value* argv);
+static Value native_compile(VM* vm, int argc, Value* argv);
+static Value native_read_all(VM* vm, int argc, Value* argv);
 static Value native_macroexpand_1(VM* vm, int argc, Value* argv);
 static Value native_macroexpand(VM* vm, int argc, Value* argv);
 static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len);
@@ -1892,7 +1894,146 @@ static Value native_type(VM* vm, int argc, Value* argv) {
     return kw;
 }
 
+/* Make ns current. When the running task has *ns* bound (a REPL session,
+ * a load), only that binding changes; otherwise the global current
+ * namespace and the root of *ns* */
+static void set_current_ns(Namespace* ns) {
+    Var* ns_var = namespace_ns_var();
+    if (ns_var && var_is_bound(ns_var)) {
+        var_set_binding(ns_var, symbol_intern(ns->name));
+        return;
+    }
+    namespace_registry_set_current(global_namespace_registry, ns);
+    Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
+    if (core_ns) namespace_define(core_ns, symbol_intern("*ns*"), symbol_intern(ns->name));
+}
+
+/* ---- Dynamic vars: binding, set!, ^:dynamic (lib/core.beer macros) ---- */
+
+/* Resolve sym as the caller's code would: aliases and unqualified names
+ * against its home namespace, then beer.core */
+static Var* resolve_caller_var(VM* vm, Value sym) {
+    Namespace* home = vm_code_home_ns(vm);
+    if (symbol_has_namespace(sym)) {
+        const char* s = symbol_str(sym);
+        const char* slash = strchr(s, '/');
+        char ns_name[256];
+        size_t len = (size_t)(slash - s);
+        if (len >= sizeof(ns_name)) return NULL;
+        memcpy(ns_name, s, len);
+        ns_name[len] = '\0';
+        const char* resolved = home ? namespace_resolve_alias(home, symbol_intern(ns_name)) : NULL;
+        Namespace* ns = namespace_registry_get(global_namespace_registry, resolved ? resolved : ns_name);
+        return ns ? namespace_lookup(ns, symbol_intern(slash + 1)) : NULL;
+    }
+    Var* var = home ? namespace_lookup(home, sym) : NULL;
+    if (!var) var = namespace_lookup(namespace_registry_get_core(global_namespace_registry), sym);
+    return var;
+}
+
+static Task* current_task(void) {
+    return global_scheduler ? global_scheduler->current : NULL;
+}
+
+/* (__push-bindings ['a va 'b vb]) => the task's previous bindings, after
+ * binding a and b (dynamic vars) in the running task */
+static Value native_push_bindings(VM* vm, int argc, Value* argv) {
+    char buf[256];
+    if (argc != 1 || !is_pointer(argv[0]) || object_type(argv[0]) != TYPE_VECTOR ||
+        vector_length(argv[0]) % 2 != 0) {
+        vm_error(vm, "binding: requires a vector of var/value pairs");
+        return VALUE_NIL;
+    }
+    Task* t = current_task();
+    if (!t) {
+        vm_error(vm, "binding: only inside a task");
+        return VALUE_NIL;
+    }
+    Value prev = t->bindings;
+    Value next;
+    if (is_pointer(prev)) { next = prev; object_retain(next); }
+    else next = hashmap_create_default();
+    for (size_t i = 0; i < vector_length(argv[0]); i += 2) {
+        Value sym = vector_get(argv[0], i);
+        Var* var = is_pointer(sym) && object_type(sym) == TYPE_SYMBOL ? resolve_caller_var(vm, sym) : NULL;
+        if (!var || !var->is_dynamic) {
+            if (!var) snprintf(buf, sizeof(buf), "binding: unable to resolve var: %s",
+                               is_pointer(sym) && object_type(sym) == TYPE_SYMBOL ? symbol_str(sym) : "?");
+            else snprintf(buf, sizeof(buf), "binding: can't dynamically bind non-dynamic var: %s",
+                          symbol_str(sym));
+            object_release(next);
+            vm_throw_error(vm, buf);
+            return VALUE_NIL;
+        }
+        Value updated = hashmap_assoc(next, var_binding_key(var), vector_get(argv[0], i + 1));
+        object_release(next);
+        next = updated;
+    }
+    t->bindings = next;
+    return prev;  /* the task's reference, handed to the caller */
+}
+
+/* (__pop-bindings prev) — restore what __push-bindings returned */
+static Value native_pop_bindings(VM* vm, int argc, Value* argv) {
+    Task* t = current_task();
+    if (argc != 1 || !t) {
+        vm_error(vm, "__pop-bindings: requires the previous bindings, inside a task");
+        return VALUE_NIL;
+    }
+    Value old = t->bindings;
+    t->bindings = argv[0];
+    if (is_pointer(argv[0])) object_retain(argv[0]);
+    if (is_pointer(old)) object_release(old);
+    return VALUE_NIL;
+}
+
+/* (__set! 'x v) — set a dynamic var's binding in the running task */
+static Value native_set_bang(VM* vm, int argc, Value* argv) {
+    char buf[256];
+    if (argc != 2 || !is_pointer(argv[0]) || object_type(argv[0]) != TYPE_SYMBOL) {
+        vm_error(vm, "set!: usage (set! var-symbol value)");
+        return VALUE_NIL;
+    }
+    Var* var = resolve_caller_var(vm, argv[0]);
+    if (!var) {
+        snprintf(buf, sizeof(buf), "set!: unable to resolve var: %s", symbol_str(argv[0]));
+        vm_throw_error(vm, buf);
+        return VALUE_NIL;
+    }
+    if (!var->is_dynamic || !var_is_bound(var)) {
+        snprintf(buf, sizeof(buf), "set!: can't change/establish root binding of %s (not bound with binding)",
+                 symbol_str(argv[0]));
+        vm_throw_error(vm, buf);
+        return VALUE_NIL;
+    }
+    var_set_binding(var, argv[1]);
+    if (is_pointer(argv[1])) object_retain(argv[1]);
+    return argv[1];
+}
+
+/* (__def-meta! 'x m) — merge m into var x's metadata after (def ^m x ...);
+ * :dynamic makes it a dynamic var */
+static Value native_def_meta(VM* vm, int argc, Value* argv) {
+    if (argc != 2 || !is_pointer(argv[0]) || object_type(argv[0]) != TYPE_SYMBOL || !is_hashmap(argv[1])) {
+        vm_error(vm, "__def-meta!: requires a symbol and a map");
+        return VALUE_NIL;
+    }
+    Var* var = resolve_caller_var(vm, argv[0]);
+    if (!var) {
+        vm_error(vm, "__def-meta!: var not found");
+        return VALUE_NIL;
+    }
+    Value merged;
+    if (is_hashmap(var->meta)) merged = hashmap_merge(var->meta, argv[1]);
+    else { merged = argv[1]; object_retain(merged); }
+    if (is_pointer(var->meta)) object_release(var->meta);
+    var->meta = merged;
+    if (is_true(hashmap_get(argv[1], keyword_intern("dynamic")))) var->is_dynamic = true;
+    return VALUE_NIL;
+}
+
 /* in-ns: (in-ns 'ns-name) => switch to namespace (create if needed) */
+
 static Value native_in_ns(VM* vm, int argc, Value* argv) {
     if (argc != 1) {
         vm_error(vm, "in-ns: requires exactly 1 argument");
@@ -1910,15 +2051,7 @@ static Value native_in_ns(VM* vm, int argc, Value* argv) {
         vm_error(vm, "in-ns: failed to create namespace");
         return VALUE_NIL;
     }
-    namespace_registry_set_current(global_namespace_registry, ns);
-
-    /* Update *ns* in beer.core */
-    Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
-    if (core_ns) {
-        Value ns_sym_var = symbol_intern("*ns*");
-        Value ns_name_sym = symbol_intern(name);
-        namespace_define(core_ns, ns_sym_var, ns_name_sym);
-    }
+    set_current_ns(ns);
 
     if (is_pointer(sym)) object_retain(sym);
     return sym;
@@ -2050,113 +2183,6 @@ static Value native_set_macro(VM* vm, int argc, Value* argv) {
     return VALUE_NIL;
 }
 
-/* reduce-kv: (reduce-kv f init map)
- * Calls (f acc key value) for each map entry, threading the accumulator. */
-typedef struct {
-    VM* vm;
-    Value fn;
-    Value acc;
-    bool error;
-} ReduceKvCtx;
-
-static void reduce_kv_native_cb(Value key, Value value, void* ctx_ptr) {
-    ReduceKvCtx* ctx = (ReduceKvCtx*)ctx_ptr;
-    if (ctx->error) return;
-    NativeFn native_fn = native_function_ptr(ctx->fn);
-    Value argv[3] = { ctx->acc, key, value };
-    Value result = native_fn(ctx->vm, 3, argv);
-    if (ctx->vm->error) { ctx->error = true; return; }
-    if (is_pointer(ctx->acc)) object_release(ctx->acc);
-    ctx->acc = result;
-}
-
-static void reduce_kv_bytecode_cb(Value key, Value value, void* ctx_ptr) {
-    ReduceKvCtx* ctx = (ReduceKvCtx*)ctx_ptr;
-    if (ctx->error) return;
-
-    /* Build mini bytecode: PUSH_CONST acc, PUSH_CONST key, PUSH_CONST value, PUSH_CONST fn, CALL 3, HALT */
-    Value consts[4] = { ctx->acc, key, value, ctx->fn };
-    uint8_t code[4 * 5 + 3 + 1]; /* 4 PUSH_CONST (5 bytes each) + CALL (3 bytes) + HALT */
-    size_t pc = 0;
-    for (int i = 0; i < 4; i++) {
-        code[pc++] = OP_PUSH_CONST;
-        code[pc++] = (uint8_t)(i & 0xFF);
-        code[pc++] = (uint8_t)((i >> 8) & 0xFF);
-        code[pc++] = (uint8_t)((i >> 16) & 0xFF);
-        code[pc++] = (uint8_t)((i >> 24) & 0xFF);
-    }
-    code[pc++] = OP_CALL;
-    code[pc++] = 3;
-    code[pc++] = 0;
-    code[pc++] = OP_HALT;
-
-    VM* temp_vm = vm_new(256);
-    temp_vm->scheduler = ctx->vm->scheduler;
-    vm_load_code(temp_vm, code, (int)pc);
-    vm_load_constants(temp_vm, consts, 4);
-    vm_trust_loaded_code(temp_vm);  /* generated call stub */
-
-    if (!scheduler_run_nested(ctx->vm, temp_vm)) {
-        ctx->error = true;
-    } else if (temp_vm->error) {
-        char errbuf[256];
-        snprintf(errbuf, sizeof(errbuf), "reduce-kv: %s", temp_vm->error_msg);
-        vm_error(ctx->vm, errbuf);
-        ctx->error = true;
-    } else if (temp_vm->stack_pointer > 0) {
-        Value result = temp_vm->stack[temp_vm->stack_pointer - 1];
-        if (is_pointer(result)) object_retain(result);
-        if (is_pointer(ctx->acc)) object_release(ctx->acc);
-        ctx->acc = result;
-    }
-
-    vm_free(temp_vm);
-}
-
-static Value native_reduce_kv(VM* vm, int argc, Value* argv) {
-    if (argc != 3) {
-        vm_error(vm, "reduce-kv: requires exactly 3 arguments (f init map)");
-        return VALUE_NIL;
-    }
-
-    Value fn = argv[0];
-    Value init = argv[1];
-    Value map = argv[2];
-
-    if (!is_function(fn) && !is_native_function(fn)) {
-        vm_error(vm, "reduce-kv: first argument must be a function");
-        return VALUE_NIL;
-    }
-
-    /* nil or empty map → return init */
-    if (is_nil(map)) {
-        if (is_pointer(init)) object_retain(init);
-        return init;
-    }
-
-    if (!is_hashmap(map)) {
-        vm_error(vm, "reduce-kv: third argument must be a map or nil");
-        return VALUE_NIL;
-    }
-
-    /* Retain init — ctx owns the accumulator */
-    if (is_pointer(init)) object_retain(init);
-
-    ReduceKvCtx ctx = { .vm = vm, .fn = fn, .acc = init, .error = false };
-
-    if (is_native_function(fn)) {
-        hashmap_foreach(map, reduce_kv_native_cb, &ctx);
-    } else {
-        hashmap_foreach(map, reduce_kv_bytecode_cb, &ctx);
-    }
-
-    if (ctx.error) {
-        if (is_pointer(ctx.acc)) object_release(ctx.acc);
-        return VALUE_NIL;
-    }
-
-    return ctx.acc; /* owned ref transferred to caller */
-}
 
 /* apply: (apply f args) or (apply f a b ... args)
  * Last argument must be a sequence; preceding args are prepended */
@@ -2167,8 +2193,10 @@ static Value native_apply(VM* vm, int argc, Value* argv) {
     }
 
     Value fn = argv[0];
-    if (!is_function(fn) && !is_native_function(fn)) {
-        vm_error(vm, "apply: first argument must be a function");
+    if (!is_function(fn) && !is_native_function(fn) &&
+        !(is_pointer(fn) && (object_type(fn) == TYPE_KEYWORD || object_type(fn) == TYPE_HASHMAP ||
+                             object_type(fn) == TYPE_VECTOR || object_type(fn) == TYPE_SET))) {
+        vm_error(vm, "apply: first argument must be a function (or a keyword, map, vector or set)");
         return VALUE_NIL;
     }
 
@@ -2220,71 +2248,14 @@ static Value native_apply(VM* vm, int argc, Value* argv) {
         }
     }
 
-    /* Call the function */
-    Value result;
+    /* A native runs here directly; anything else (a bytecode fn, a keyword,
+     * a map) is called by the VM in place of this call, in the caller's VM */
+    Value result = VALUE_NIL;
     if (is_native_function(fn)) {
         NativeFn native_fn = native_function_ptr(fn);
         result = native_fn(vm, total, args);
     } else {
-        /* Bytecode function: build mini bytecode to call it in a temp VM */
-        int n_consts = total + 1;  /* args + function */
-        Value* consts = malloc(sizeof(Value) * (size_t)n_consts);
-        for (int i = 0; i < total; i++) {
-            consts[i] = args[i];
-        }
-        consts[total] = fn;
-
-        /* Bytecode: PUSH_CONST for each arg, PUSH_CONST fn, CALL total, HALT */
-        size_t code_size = (size_t)(n_consts * 5 + 3 + 1);
-        uint8_t* code = malloc(code_size);
-        size_t pc = 0;
-
-        for (int i = 0; i < n_consts; i++) {
-            code[pc++] = OP_PUSH_CONST;
-            code[pc++] = (uint8_t)(i & 0xFF);
-            code[pc++] = (uint8_t)((i >> 8) & 0xFF);
-            code[pc++] = (uint8_t)((i >> 16) & 0xFF);
-            code[pc++] = (uint8_t)((i >> 24) & 0xFF);
-        }
-
-        code[pc++] = OP_CALL;
-        code[pc++] = (uint8_t)(total & 0xFF);
-        code[pc++] = (uint8_t)((total >> 8) & 0xFF);
-
-        code[pc++] = OP_HALT;
-
-        VM* temp_vm = vm_new(256);
-        temp_vm->scheduler = vm->scheduler;
-        vm_load_code(temp_vm, code, (int)pc);
-        vm_load_constants(temp_vm, consts, n_consts);
-        vm_trust_loaded_code(temp_vm);  /* generated call stub */
-
-        if (!scheduler_run_nested(vm, temp_vm)) {
-            result = VALUE_NIL;
-        } else if (temp_vm->error) {
-            /* If OP_THROW saved the original exception value, re-throw it
-             * in the calling VM so try/catch sees the original map, not a
-             * wrapped "apply: Unhandled exception" string. */
-            if (is_pointer(temp_vm->thrown_exception)) {
-                Value exc = temp_vm->thrown_exception;
-                temp_vm->thrown_exception = VALUE_NIL;  /* take ownership before free */
-                vm_rethrow(vm, exc);
-            } else {
-                char errbuf[256];
-                snprintf(errbuf, sizeof(errbuf), "apply: %s", temp_vm->error_msg);
-                vm_error(vm, errbuf);
-            }
-            result = VALUE_NIL;
-        } else if (temp_vm->stack_pointer > 0) {
-            result = temp_vm->stack[temp_vm->stack_pointer - 1];
-            if (is_pointer(result)) object_retain(result);
-        } else {
-            result = VALUE_NIL;
-        }
-
-        vm_free(temp_vm);
-        free(code);
-        free(consts);
+        vm_request_call(vm, fn, total, args);
     }
 
     free(args);
@@ -2341,6 +2312,28 @@ static Value native_read_string(VM* vm, int argc, Value* argv) {
     }
     reader_free(reader);
     return result;
+}
+
+/* (__read-all s name) => vector of every form in s; read errors are thrown
+ * as "load: read error in <name>: ..." */
+static Value native_read_all(VM* vm, int argc, Value* argv) {
+    if (argc != 2 || !is_string(argv[0]) || !is_string(argv[1])) {
+        vm_error(vm, "__read-all: requires a source string and a name");
+        return VALUE_NIL;
+    }
+    const char* name = string_cstr(argv[1]);
+    Reader* reader = reader_new(string_cstr(argv[0]), name);
+    Value forms = reader_read_all(reader);
+    if (reader_has_error(reader)) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "load: read error in %s: %s", name, reader_error_msg(reader));
+        reader_free(reader);
+        if (is_pointer(forms)) object_release(forms);
+        vm_throw_error(vm, buf);
+        return VALUE_NIL;
+    }
+    reader_free(reader);
+    return forms;
 }
 
 /* =================================================================
@@ -2420,7 +2413,7 @@ static Value native_disasm(VM* vm, int argc, Value* argv) {
             }
             if (!found && n_labels < MAX_LABELS)
                 label_pcs[n_labels++] = target;
-        } else if (op == OP_PUSH_HANDLER || op == OP_PUSH_FINALLY) {
+        } else if (op == OP_PUSH_HANDLER || op == OP_PUSH_FINALLY || op == OP_PUSH_INTERRUPT_CATCH) {
             /* Absolute uint32 PC */
             uint32_t target = 0;
             if (pc + 5 <= (size_t)code_size) {
@@ -2539,7 +2532,7 @@ static Value native_disasm(VM* vm, int argc, Value* argv) {
             } else {
                 vector_push(instr, make_fixnum(offset));
             }
-        } else if (op == OP_PUSH_HANDLER || op == OP_PUSH_FINALLY) {
+        } else if (op == OP_PUSH_HANDLER || op == OP_PUSH_FINALLY || op == OP_PUSH_INTERRUPT_CATCH) {
             uint32_t target = 0;
             for (int i = 0; i < 4; i++)
                 target |= ((uint32_t)code[pc + 1 + i]) << (i * 8);
@@ -2804,7 +2797,7 @@ static Value native_asm(VM* vm, int argc, Value* argv) {
             }
             for (int b = 0; b < 4; b++)
                 bytecode[pc + 1 + b] = (uint8_t)((offset >> (b * 8)) & 0xFF);
-        } else if (info->opcode == OP_PUSH_HANDLER || info->opcode == OP_PUSH_FINALLY) {
+        } else if (info->opcode == OP_PUSH_HANDLER || info->opcode == OP_PUSH_FINALLY || info->opcode == OP_PUSH_INTERRUPT_CATCH) {
             /* Operand: label keyword → resolve to absolute PC */
             if (vector_length(instr) < 2) {
                 vm_error(vm, "asm: PUSH_HANDLER requires a label operand");
@@ -3261,7 +3254,6 @@ void core_register_collections(void) {
     register_native(core_ns, "keys", native_keys);
     register_native(core_ns, "vals", native_vals);
     register_native(core_ns, "contains?", native_contains_q);
-    register_native(core_ns, "reduce-kv", native_reduce_kv);
     register_native(core_ns, "concat", native_concat);
 }
 
@@ -3311,14 +3303,20 @@ void core_register_utility(void) {
     register_native(core_ns, "macroexpand-1", native_macroexpand_1);
     register_native(core_ns, "macroexpand", native_macroexpand);
     register_native(core_ns, "in-ns", native_in_ns);
-    register_native(core_ns, "eval", native_eval);
+    register_native(core_ns, "__compile", native_compile);
+    register_native(core_ns, "__read-all", native_read_all);
     register_native(core_ns, "__load", native_load);
-    register_native(core_ns, "load-string", native_load_string);
     register_native(core_ns, "request-interrupt!", native_request_interrupt);
+    register_native(core_ns, "interrupt!", native_interrupt_task);
+    register_native(core_ns, "current-task", native_current_task);
     register_native(core_ns, "__file-read", native_file_read);
     register_native(core_ns, "__tar-read", native_tar_read);
     register_native(core_ns, "__current-ns", native_current_ns);
     register_native(core_ns, "__alias!", native_alias);
+    register_native(core_ns, "__push-bindings", native_push_bindings);
+    register_native(core_ns, "__pop-bindings", native_pop_bindings);
+    register_native(core_ns, "__set!", native_set_bang);
+    register_native(core_ns, "__def-meta!", native_def_meta);
     register_native(core_ns, "__refer!", native_refer);
     register_native(core_ns, "pr-str", native_pr_str);
     register_native(core_ns, "prn", native_prn);
@@ -4085,25 +4083,6 @@ static Value native_reset(VM* vm, int argc, Value* argv) {
     return result;
 }
 
-/* (swap! atom f & args) — variadic */
-static Value native_swap(VM* vm, int argc, Value* argv) {
-    if (argc < 2) {
-        vm_error(vm, "swap! expects at least 2 arguments");
-        return VALUE_NIL;
-    }
-    if (!is_atom(argv[0])) {
-        vm_error(vm, "swap! expects an atom as first argument");
-        return VALUE_NIL;
-    }
-    Value fn = argv[1];
-    if (!is_pointer(fn) || (object_type(fn) != TYPE_FUNCTION && object_type(fn) != TYPE_NATIVE_FN)) {
-        vm_error(vm, "swap! expects a function as second argument");
-        return VALUE_NIL;
-    }
-    int extra_argc = argc - 2;
-    Value* extra_argv = (extra_argc > 0) ? &argv[2] : NULL;
-    return atom_swap(vm, argv[0], fn, extra_argc, extra_argv);
-}
 
 /* (compare-and-set! atom old new) */
 static Value native_compare_and_set(VM* vm, int argc, Value* argv) {
@@ -4132,7 +4111,6 @@ void core_register_atoms(void) {
     register_native(core_ns, "atom", native_atom);
     register_native(core_ns, "deref", native_deref);
     register_native(core_ns, "reset!", native_reset);
-    register_native(core_ns, "swap!", native_swap);
     register_native(core_ns, "compare-and-set!", native_compare_and_set);
     register_native(core_ns, "atom?", native_atom_q);
 }
@@ -4157,6 +4135,28 @@ static Var* resolve_symbol_to_var(VM* vm __attribute__((unused)), Value sym) {
 /* (meta x) — if x is symbol, resolve to Var and return its meta;
  *            if x is function, return function meta;
  *            otherwise nil */
+/* (__set-meta! sym m) — set var sym's metadata; returns m (alter-meta! in
+ * lib/core.beer) */
+static Value native_set_meta(VM* vm, int argc, Value* argv) {
+    if (argc != 2 || !is_pointer(argv[0]) || object_type(argv[0]) != TYPE_SYMBOL) {
+        vm_error(vm, "alter-meta!: first argument must be a symbol");
+        return VALUE_NIL;
+    }
+    Var* var = resolve_symbol_to_var(vm, argv[0]);
+    if (!var) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "alter-meta!: var not found: %s", symbol_str(argv[0]));
+        vm_throw_error(vm, buf);
+        return VALUE_NIL;
+    }
+    Value old = var->meta;
+    var->meta = argv[1];
+    if (is_pointer(argv[1])) object_retain(argv[1]);
+    if (is_pointer(old)) object_release(old);
+    if (is_pointer(argv[1])) object_retain(argv[1]);
+    return argv[1];
+}
+
 static Value native_meta(VM* vm, int argc, Value* argv) {
     if (argc != 1) {
         vm_error(vm, "meta: requires exactly 1 argument");
@@ -4200,120 +4200,6 @@ static Value native_with_meta(VM* vm, int argc, Value* argv) {
     return VALUE_NIL;
 }
 
-/* (alter-meta! sym f & args) — resolve sym to Var, apply f to current meta + args,
- * set result as new meta, return new meta */
-static Value native_alter_meta(VM* vm, int argc, Value* argv) {
-    if (argc < 2) {
-        vm_error(vm, "alter-meta!: requires at least 2 arguments (symbol, fn)");
-        return VALUE_NIL;
-    }
-
-    Value sym = argv[0];
-    if (!is_pointer(sym) || object_type(sym) != TYPE_SYMBOL) {
-        vm_error(vm, "alter-meta!: first argument must be a symbol");
-        return VALUE_NIL;
-    }
-
-    Value f = argv[1];
-    if (!is_function(f) && !is_native_function(f)) {
-        vm_error(vm, "alter-meta!: second argument must be a function");
-        return VALUE_NIL;
-    }
-
-    Var* var = resolve_symbol_to_var(vm, sym);
-    if (!var) {
-        vm_error(vm, "alter-meta!: var not found");
-        return VALUE_NIL;
-    }
-
-    /* Build args: current-meta, then argv[2..argc-1] */
-    Value current_meta = var->meta;
-    if (is_nil(current_meta)) {
-        current_meta = hashmap_create_default();
-    } else {
-        if (is_pointer(current_meta)) object_retain(current_meta);
-    }
-
-    int total_args = 1 + (argc - 2);  /* current_meta + extra args */
-    Value* call_args = malloc(sizeof(Value) * (size_t)total_args);
-    call_args[0] = current_meta;
-    for (int i = 2; i < argc; i++) {
-        call_args[i - 2 + 1] = argv[i];
-    }
-
-    Value result;
-    if (is_native_function(f)) {
-        NativeFn native_fn = native_function_ptr(f);
-        result = native_fn(vm, total_args, call_args);
-    } else {
-        /* Bytecode function: temp VM pattern */
-        int n_consts = total_args + 1;
-        Value* consts = malloc(sizeof(Value) * (size_t)n_consts);
-        for (int i = 0; i < total_args; i++) consts[i] = call_args[i];
-        consts[total_args] = f;
-
-        int bc_size = n_consts * 5 + 4;
-        uint8_t* bc = calloc(1, (size_t)bc_size);
-        int pc = 0;
-        for (int i = 0; i < total_args; i++) {
-            bc[pc++] = OP_PUSH_CONST;
-            bc[pc++] = (uint8_t)(i & 0xFF);
-            bc[pc++] = (uint8_t)((i >> 8) & 0xFF);
-            bc[pc++] = (uint8_t)((i >> 16) & 0xFF);
-            bc[pc++] = (uint8_t)((i >> 24) & 0xFF);
-        }
-        bc[pc++] = OP_PUSH_CONST;
-        uint32_t fn_idx = (uint32_t)total_args;
-        bc[pc++] = (uint8_t)(fn_idx & 0xFF);
-        bc[pc++] = (uint8_t)((fn_idx >> 8) & 0xFF);
-        bc[pc++] = (uint8_t)((fn_idx >> 16) & 0xFF);
-        bc[pc++] = (uint8_t)((fn_idx >> 24) & 0xFF);
-        bc[pc++] = OP_CALL;
-        bc[pc++] = (uint8_t)(total_args & 0xFF);
-        bc[pc++] = (uint8_t)((total_args >> 8) & 0xFF);
-        bc[pc++] = OP_HALT;
-
-        VM* temp = vm_new(pc);
-        temp->code = bc;
-        temp->code_size = pc;
-        temp->constants = consts;
-        temp->num_constants = n_consts;
-        temp->scheduler = vm->scheduler;
-
-        if (!scheduler_run_nested(vm, temp)) {
-            result = VALUE_NIL;
-        } else if (temp->error) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "alter-meta!: %s", temp->error_msg);
-            vm_error(vm, buf);
-            result = VALUE_NIL;
-        } else {
-            result = vm_pop(temp);
-            if (is_pointer(result)) object_retain(result);
-        }
-
-        temp->code = NULL;
-        temp->constants = NULL;
-        temp->scheduler = NULL;
-        vm_free(temp);
-        free(bc);
-        free(consts);
-    }
-
-    /* Release the temp current_meta we retained/created */
-    if (is_pointer(current_meta)) object_release(current_meta);
-
-    free(call_args);
-
-    /* Set new meta on var */
-    Value old_meta = var->meta;
-    var->meta = result;
-    if (is_pointer(result)) object_retain(result);
-    if (is_pointer(old_meta)) object_release(old_meta);
-
-    /* result is already an owned ref (from native call or retained from temp VM) */
-    return result;
-}
 
 /* (__print-doc name-str meta-map) — print documentation */
 static Value native___print_doc(VM* vm, int argc, Value* argv) {
@@ -4356,7 +4242,7 @@ void core_register_metadata(void) {
 
     register_native(core_ns, "meta", native_meta);
     register_native(core_ns, "with-meta", native_with_meta);
-    register_native(core_ns, "alter-meta!", native_alter_meta);
+    register_native(core_ns, "__set-meta!", native_set_meta);
     register_native(core_ns, "__print-doc", native___print_doc);
 }
 
@@ -4507,23 +4393,31 @@ void core_retain_unit(CompiledCode* code, Value* constants) {
 }
 
 /* Load and execute beerlang source from a buffer (used by tar require) */
-static Value native_eval(VM* caller_vm, int argc, Value* argv) {
-    if (argc != 1) {
-        vm_error(caller_vm, "eval: requires exactly 1 argument");
+/* (__compile form) / (__compile form name) => a 0-arg fn whose body is form,
+ * compiled in the current namespace. eval and load-string (lib/core.beer)
+ * call it in the caller's own VM: no child task, no nested scheduler loop. */
+static Value native_compile(VM* caller_vm, int argc, Value* argv) {
+    if (argc < 1 || argc > 2 || (argc == 2 && !is_string(argv[1]))) {
+        vm_error(caller_vm, "__compile: usage (__compile form) or (__compile form name)");
         return VALUE_NIL;
     }
+    const char* name = argc == 2 ? string_cstr(argv[1]) : "<eval>";
 
-    Value form = argv[0];
+    /* (fn [] form) */
+    Value params = vector_create(0);
+    Value items[3] = { symbol_intern("fn"), params, argv[0] };
+    Value fn_form = list_from_array(items, 3);
+    object_release(params);
 
-    Compiler* compiler = compiler_new("<eval>");
-    CompiledCode* code = compile(compiler, form);
-
+    Compiler* compiler = compiler_new(name);
+    CompiledCode* code = compile(compiler, fn_form);
+    object_release(fn_form);
     if (compiler_has_error(compiler)) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "eval: compile error: %s", compiler_error_msg(compiler));
+        char buf[512];
+        snprintf(buf, sizeof(buf), "compile error: %s", compiler_error_msg(compiler));
         compiled_code_free(code);
         compiler_free(compiler);
-        vm_error(caller_vm, buf);
+        vm_throw_error(caller_vm, buf);
         return VALUE_NIL;
     }
     compiler_free(compiler);
@@ -4534,7 +4428,6 @@ static Value native_eval(VM* caller_vm, int argc, Value* argv) {
         constants[j] = vector_get(code->constants, (size_t)j);
         if (is_pointer(constants[j])) object_retain(constants[j]);
     }
-
     Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
     const char* cur_ns_name = cur_ns ? cur_ns->name : NULL;
     for (int j = 0; j < n_constants; j++) {
@@ -4547,34 +4440,44 @@ static Value native_eval(VM* caller_vm, int argc, Value* argv) {
         }
     }
 
-    Value task_val = task_new_from_code(code->bytecode, (int)code->code_size,
-                                         constants, n_constants, global_scheduler);
-    Task* task = task_get(task_val);
-    scheduler_run_task_to_completion(global_scheduler, task);
-
-    Value result = VALUE_NIL;
-    if (task->vm->error && vm_is_interrupt(task->vm->thrown_exception)) {
-        vm_rethrow(caller_vm, vm_interrupt_exception());
-    } else if (task->vm->error) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "eval: %s", task->vm->error_msg);
-        vm_error(caller_vm, buf);
-    } else {
-        result = task->result;
-        if (is_pointer(result)) object_retain(result);
+    /* The unit's top-level code only pushes the fn; run it to get it */
+    VM* tmp = vm_new(16);
+    tmp->scheduler = caller_vm->scheduler;
+    vm_load_code(tmp, code->bytecode, (int)code->code_size);
+    vm_load_constants(tmp, constants, n_constants);
+    vm_run(tmp);
+    Value fn = VALUE_NIL;
+    if (tmp->error) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "compile error: %s", tmp->error_msg);
+        vm_throw_error(caller_vm, buf);
+    } else if (tmp->stack_pointer > 0) {
+        fn = tmp->stack[tmp->stack_pointer - 1];
+        if (is_pointer(fn)) object_retain(fn);
     }
+    vm_free(tmp);
 
-    object_release(task_val);
-
+    /* Functions point into the unit's code and constants: keep them */
     core_retain_unit(code, constants);
-
-    return result;
+    return fn;
 }
 
 /* Read, compile and run every form of source in the current namespace.
  * Errors are thrown in caller_vm (catchable when it has a handler) and
  * name the source and the form. */
+static Value load_forms(VM* caller_vm, const char* source, const char* name);
+
+/* Like Clojure's load, the current namespace is restored afterwards, so a
+ * file's (ns ...) doesn't stay in effect for the caller */
 Value core_load_source(VM* caller_vm, const char* source, const char* name) {
+    Namespace* saved = namespace_registry_current(global_namespace_registry);
+    Value result = load_forms(caller_vm, source, name);
+    if (saved && namespace_registry_current(global_namespace_registry) != saved)
+        set_current_ns(saved);
+    return result;
+}
+
+static Value load_forms(VM* caller_vm, const char* source, const char* name) {
     char buf[512];
     Reader* reader = reader_new(source, name);
     Value forms = reader_read_all(reader);
@@ -4664,6 +4567,32 @@ Value core_load_source(VM* caller_vm, const char* source, const char* name) {
     return last_result;
 }
 
+/* (interrupt! task) — interrupt a given task like request-interrupt! does the
+ * foreground one (skips catch, runs finally); wakes it if blocked. false if
+ * it already finished */
+static Value native_interrupt_task(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_task(argv[0])) {
+        vm_error(vm, "interrupt!: requires a task");
+        return VALUE_NIL;
+    }
+    Scheduler* sched = vm->scheduler ? vm->scheduler : global_scheduler;
+    return scheduler_interrupt_task(sched, task_get(argv[0])) ? VALUE_TRUE : VALUE_FALSE;
+}
+
+/* (current-task) — the running task, or nil outside one */
+static Value native_current_task(VM* vm, int argc, Value* argv) {
+    (void)argv;
+    if (argc != 0) {
+        vm_error(vm, "current-task: takes no arguments");
+        return VALUE_NIL;
+    }
+    Task* t = global_scheduler ? global_scheduler->current : NULL;
+    if (!t) return VALUE_NIL;
+    Value v = tag_pointer(t);
+    object_retain(v);
+    return v;
+}
+
 /* (request-interrupt!) — stop the foreground task, like Ctrl-C at the REPL */
 static Value native_request_interrupt(VM* vm, int argc, Value* argv) {
     (void)argv;
@@ -4673,16 +4602,6 @@ static Value native_request_interrupt(VM* vm, int argc, Value* argv) {
     }
     vm_request_interrupt();
     return VALUE_NIL;
-}
-
-/* load-string: (load-string s) or (load-string s name) */
-static Value native_load_string(VM* vm, int argc, Value* argv) {
-    if (argc < 1 || argc > 2 || !is_string(argv[0]) || (argc == 2 && !is_string(argv[1]))) {
-        vm_error(vm, "load-string: usage (load-string s) or (load-string s name)");
-        return VALUE_NIL;
-    }
-    return core_load_source(vm, string_cstr(argv[0]),
-                            argc == 2 ? string_cstr(argv[1]) : "<string>");
 }
 
 /* Host-filesystem load; beer.core/load and load-file go through *fs* */

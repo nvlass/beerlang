@@ -34,6 +34,21 @@ static bool to_double(Value v, double* out) {
 #define DEFAULT_STACK_SIZE 256
 #define DEFAULT_FRAME_CAPACITY 64
 
+#if defined(__GNUC__) || defined(__clang__)
+#define VM_ALWAYS_INLINE inline __attribute__((always_inline))
+#define VM_NOINLINE __attribute__((noinline))
+#define VM_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define VM_ALWAYS_INLINE inline
+#define VM_NOINLINE
+#define VM_UNLIKELY(x) (x)
+#endif
+
+/* The value stack and the frames start small (one VM per task) and double
+ * on demand up to these, which only runaway recursion reaches */
+#define MAX_STACK_SIZE (1 << 20)
+#define MAX_FRAME_CAPACITY 100000
+
 /* Create a new VM */
 VM* vm_new(int stack_size) {
     if (stack_size <= 0) {
@@ -92,6 +107,10 @@ VM* vm_new(int stack_size) {
     vm->pending_deadline = 0;
     vm->read_deadline = 0;
     vm->native_throw = false;
+    vm->call_requested = false;
+    vm->call_fn = VALUE_NIL;
+    vm->call_args = NULL;
+    vm->call_argc = 0;
     vm->thrown_exception = VALUE_NIL;
     vm->scheduler = NULL;
 
@@ -133,6 +152,13 @@ void vm_free(VM* vm) {
     if (is_pointer(vm->thrown_exception)) {
         object_release(vm->thrown_exception);
     }
+
+    if (vm->call_requested) {
+        if (is_pointer(vm->call_fn)) object_release(vm->call_fn);
+        for (int i = 0; i < vm->call_argc; i++)
+            if (is_pointer(vm->call_args[i])) object_release(vm->call_args[i]);
+    }
+    free(vm->call_args);
 
     free(vm->handlers);
     free(vm->frames);
@@ -229,14 +255,33 @@ Value vm_interrupt_exception(void) {
 
 static CallFrame* pop_frame(VM* vm);
 
-/* Pop the handler that receives exc: the innermost one, or for the
- * interrupt the innermost finally (catch handlers above it are dropped).
- * NULL when none is left. */
-static ExceptionHandler* pop_handler_for(VM* vm, Value exc) {
-    if (vm_is_interrupt(exc)) {
-        while (vm->handler_count > 0 && !vm->handlers[vm->handler_count - 1].is_finally)
-            vm->handler_count--;
+/* The namespace the running code was written in: the running function's
+ * home ns, or the current ns for top-level code (looked up only then) */
+static inline Namespace* code_home_ns(VM* vm) {
+    if (vm->frame_count > 0) {
+        Value fn_val = vm->frames[vm->frame_count - 1].function;
+        if (is_function(fn_val) && function_ns_name(fn_val)) {
+            Function* f = (Function*)untag_pointer(fn_val);
+            if (!f->home_ns)
+                f->home_ns = namespace_registry_get(global_namespace_registry, f->ns_name);
+            if (f->home_ns) return f->home_ns;
+        }
     }
+    return namespace_registry_current(global_namespace_registry);
+}
+
+Namespace* vm_code_home_ns(VM* vm) {
+    return code_home_ns(vm);
+}
+
+/* Pop the handler that receives exc, dropping the ones above it that
+ * don't take it: the interrupt goes to the innermost finally or interrupt
+ * catch, anything else to the innermost catch or finally. NULL when none
+ * is left. */
+static ExceptionHandler* pop_handler_for(VM* vm, Value exc) {
+    uint8_t skip = vm_is_interrupt(exc) ? HANDLER_CATCH : HANDLER_INTERRUPT;
+    while (vm->handler_count > 0 && vm->handlers[vm->handler_count - 1].kind == skip)
+        vm->handler_count--;
     if (vm->handler_count <= 0) return NULL;
     return &vm->handlers[--vm->handler_count];
 }
@@ -268,6 +313,19 @@ void vm_raise_interrupt(VM* vm) {
     if (is_pointer(vm->exception)) object_release(vm->exception);
     vm->exception = exc;
     vm->pc = h->catch_pc;
+}
+
+void vm_request_call(VM* vm, Value fn, int argc, const Value* args) {
+    vm->call_requested = true;
+    vm->call_fn = fn;
+    if (is_pointer(fn)) object_retain(fn);
+    free(vm->call_args);
+    vm->call_args = argc > 0 ? malloc(sizeof(Value) * (size_t)argc) : NULL;
+    for (int i = 0; i < argc; i++) {
+        vm->call_args[i] = args[i];
+        if (is_pointer(args[i])) object_retain(args[i]);
+    }
+    vm->call_argc = argc;
 }
 
 /* Release builds run only verified bytecode (verify.c: valid opcodes,
@@ -374,12 +432,48 @@ static inline size_t var_cache_slot(Namespace* home, void* sym) {
 }
 
 
+/* Make room for `need` more values on the stack. Nothing may hold a
+ * pointer into vm->stack across a push (natives get argv into it, but
+ * don't push on their own VM). */
+static VM_NOINLINE bool grow_stack(VM* vm, int need) {
+    int want = vm->stack_pointer + need;
+    if (want <= vm->stack_size) return true;
+    int size = vm->stack_size;
+    while (size < want) size *= 2;
+    if (size > MAX_STACK_SIZE) {
+        vm_error(vm, "Stack overflow");
+        return false;
+    }
+    Value* stack = realloc(vm->stack, sizeof(Value) * (size_t)size);
+    if (!stack) {
+        vm_error(vm, "Stack overflow (out of memory)");
+        return false;
+    }
+    vm->stack = stack;
+    vm->stack_size = size;
+    return true;
+}
+
+static VM_NOINLINE bool grow_frames(VM* vm) {
+    int cap = vm->frame_capacity * 2;
+    if (cap > MAX_FRAME_CAPACITY) cap = MAX_FRAME_CAPACITY;
+    if (vm->frame_count >= cap) {
+        vm_error(vm, "Call stack overflow");
+        return false;
+    }
+    CallFrame* frames = realloc(vm->frames, sizeof(CallFrame) * (size_t)cap);
+    if (!frames) {
+        vm_error(vm, "Call stack overflow (out of memory)");
+        return false;
+    }
+    vm->frames = frames;
+    vm->frame_capacity = cap;
+    return true;
+}
+
 /* Push a new call frame, saving caller's execution context */
 static void push_frame(VM* vm, Value function, uint32_t return_pc) {
-    if (vm->frame_count >= vm->frame_capacity) {
-        vm_error(vm, "Call stack overflow");
-        return;
-    }
+    if (vm->frame_count >= vm->frame_capacity && !grow_frames(vm)) return;
 
     CallFrame* frame = &vm->frames[vm->frame_count++];
     frame->return_pc = return_pc;
@@ -424,9 +518,16 @@ static CallFrame* current_frame(VM* vm) {
 }
 
 /* Push value onto stack. Inline here; vm_push is the exported wrapper. */
+static VM_NOINLINE void push_value_grow(VM* vm, Value v) {
+    if (!grow_stack(vm, 1)) return;
+    if (is_pointer(v)) object_retain(v);
+    vm->stack[vm->stack_pointer++] = v;
+}
+
 static inline void push_value(VM* vm, Value v) {
-    if (vm->stack_pointer >= vm->stack_size) {
-        vm_error(vm, "Stack overflow");
+    /* Growing is out of line: the fast path never rejoins it */
+    if (VM_UNLIKELY(vm->stack_pointer >= vm->stack_size)) {
+        push_value_grow(vm, v);
         return;
     }
 
@@ -551,17 +652,32 @@ static bool vm_invoke_value(VM* vm, Value head, int n_args, Value* args, Value* 
     return false;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-#define VM_ALWAYS_INLINE inline __attribute__((always_inline))
-#define VM_NOINLINE __attribute__((noinline))
-#define VM_UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-#define VM_ALWAYS_INLINE inline
-#define VM_NOINLINE
-#define VM_UNLIKELY(x) (x)
-#endif
+/* A native asked for a call (vm_request_call): replace its call's
+ * `popped` stack slots (args and the native) with the requested fn's args
+ * and the fn. Returns the new arg count, or -1 on error. */
+static VM_NOINLINE int take_call_request(VM* vm, int popped) {
+    for (int i = 0; i < popped; i++) vm_pop(vm);
+    int argc = vm->call_argc;
+    Value fn = vm->call_fn;
+    Value* args = vm->call_args;
+    vm->call_requested = false;
+    vm->call_fn = VALUE_NIL;
+    vm->call_args = NULL;
+    vm->call_argc = 0;
+    if (!grow_stack(vm, argc + 1)) {
+        if (is_pointer(fn)) object_release(fn);
+        for (int i = 0; i < argc; i++) if (is_pointer(args[i])) object_release(args[i]);
+        free(args);
+        return -1;
+    }
+    /* The stack takes over the request's references */
+    for (int i = 0; i < argc; i++) vm->stack[vm->stack_pointer++] = args[i];
+    vm->stack[vm->stack_pointer++] = fn;
+    free(args);
+    return argc;
+}
 
-static VM_NOINLINE void arity_error(VM* vm, const char* op, Value fn, uint16_t n_args) {
+static VM_NOINLINE void arity_error(VM* vm, const char* op, Value fn, int n_args) {
     char buf[256];
     snprintf(buf, sizeof(buf), "%s: wrong number of arguments (%u) passed to %s",
              op, (unsigned)n_args, function_name(fn));
@@ -1050,7 +1166,7 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
             /* Call a function with n arguments */
             /* Stack layout: [... | arg0 | arg1 | ... | argN | func] */
             /* Function is on top, args below it */
-            uint16_t n_args = read_uint16(vm, r);
+            int n_args = read_uint16(vm, r);
             READ_CHECK();
 
             /* Function is on top of stack */
@@ -1059,7 +1175,9 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 return;
             }
 
-            Value fn = vm->stack[vm->stack_pointer - 1];
+            Value fn;
+        call_dispatch:  /* again with the fn a native asked for (apply) */
+            fn = vm->stack[vm->stack_pointer - 1];
             TRACE_OP("PC=%04u OP=%02X (OP_CALL) n_args=%u target=%u sp=%d",
                       pc_at_opcode, op, n_args,
                       is_function(fn) ? function_code_offset(fn) : 0, vm->stack_pointer);
@@ -1099,20 +1217,29 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                     if (is_pointer(result)) object_release(result);
                     ExceptionHandler* h = pop_handler_for(vm, vm->exception);
                     if (!h) {
-                        if (vm_is_interrupt(vm->exception)) {
-                            if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
-                            vm->thrown_exception = vm->exception;
-                            vm->exception = VALUE_NIL;
-                            vm_error(vm, "interrupted");
-                        } else {
-                            vm_error(vm, "Unhandled exception");
-                        }
+                        /* Only handlers that don't take it were left: an
+                         * uncaught throw, reported with its own message */
+                        bool intr = vm_is_interrupt(vm->exception);
+                        Value msg = intr ? VALUE_NIL : hashmap_get(vm->exception, keyword_intern("message"));
+                        if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
+                        vm->thrown_exception = vm->exception;
+                        vm->exception = VALUE_NIL;
+                        vm_error(vm, intr ? "interrupted"
+                                     : is_string(msg) ? string_cstr(msg) : "Unhandled exception");
                         return;
                     }
                     unwind_to_handler(vm, h);
                     r->code = vm->code; r->code_size = (uint32_t)vm->code_size;
                     r->pc = h->catch_pc;
                     break;
+                }
+
+                /* Native asked to call a fn in its place (apply) */
+                if (VM_UNLIKELY(vm->call_requested)) {
+                    if (is_pointer(result)) object_release(result);
+                    n_args = take_call_request(vm, (int)n_args + 1);
+                    if (n_args < 0) return;
+                    goto call_dispatch;
                 }
 
                 /* Pop args and function from stack */
@@ -1123,9 +1250,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 /* Transfer native's owned ref directly to stack (no extra retain).
                  * The native returned an owned ref; we place it on the stack
                  * without vm_push's retain, so stack owns exactly 1 ref. */
-                if (vm->stack_pointer >= vm->stack_size) {
+                if (vm->stack_pointer >= vm->stack_size && !grow_stack(vm, 1)) {
                     if (is_pointer(result)) object_release(result);
-                    vm_error(vm, "Stack overflow");
                     return;
                 }
                 vm->stack[vm->stack_pointer++] = result;
@@ -1143,9 +1269,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                         vm_pop(vm);
                     }
                     /* Transfer owned ref to stack */
-                    if (vm->stack_pointer >= vm->stack_size) {
+                    if (vm->stack_pointer >= vm->stack_size && !grow_stack(vm, 1)) {
                         if (is_pointer(result)) object_release(result);
-                        vm_error(vm, "Stack overflow");
                         return;
                     }
                     vm->stack[vm->stack_pointer++] = result;
@@ -1242,7 +1367,7 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
 
         case OP_TAIL_CALL: {
             /* Tail call - reuse current frame */
-            uint16_t n_args = read_uint16(vm, r);
+            int n_args = read_uint16(vm, r);
             READ_CHECK();
 
             /* Function is on top of stack, args below it */
@@ -1252,7 +1377,9 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 return;
             }
 
-            Value fn = vm->stack[vm->stack_pointer - 1];
+            Value fn;
+        tail_call_dispatch:  /* again with the fn a native asked for (apply) */
+            fn = vm->stack[vm->stack_pointer - 1];
             TRACE_OP("PC=%04u OP=%02X (OP_TAIL_CALL) n_args=%u target=%u sp=%d",
                       pc_at_opcode, op, n_args,
                       is_function(fn) ? function_code_offset(fn) : 0, vm->stack_pointer);
@@ -1289,14 +1416,15 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                     if (is_pointer(result)) object_release(result);
                     ExceptionHandler* h = pop_handler_for(vm, vm->exception);
                     if (!h) {
-                        if (vm_is_interrupt(vm->exception)) {
-                            if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
-                            vm->thrown_exception = vm->exception;
-                            vm->exception = VALUE_NIL;
-                            vm_error(vm, "interrupted");
-                        } else {
-                            vm_error(vm, "Unhandled exception");
-                        }
+                        /* Only handlers that don't take it were left: an
+                         * uncaught throw, reported with its own message */
+                        bool intr = vm_is_interrupt(vm->exception);
+                        Value msg = intr ? VALUE_NIL : hashmap_get(vm->exception, keyword_intern("message"));
+                        if (is_pointer(vm->thrown_exception)) object_release(vm->thrown_exception);
+                        vm->thrown_exception = vm->exception;
+                        vm->exception = VALUE_NIL;
+                        vm_error(vm, intr ? "interrupted"
+                                     : is_string(msg) ? string_cstr(msg) : "Unhandled exception");
                         return;
                     }
                     unwind_to_handler(vm, h);
@@ -1305,15 +1433,22 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                     break;
                 }
 
+                /* Native asked to call a fn in its place (apply): a tail call */
+                if (VM_UNLIKELY(vm->call_requested)) {
+                    if (is_pointer(result)) object_release(result);
+                    n_args = take_call_request(vm, (int)n_args + 1);
+                    if (n_args < 0) return;
+                    goto tail_call_dispatch;
+                }
+
                 /* Pop args and function */
                 for (int i = 0; i < (int)n_args + 1; i++) {
                     vm_pop(vm);
                 }
 
                 /* Transfer native's owned ref directly to stack (no extra retain). */
-                if (vm->stack_pointer >= vm->stack_size) {
+                if (vm->stack_pointer >= vm->stack_size && !grow_stack(vm, 1)) {
                     if (is_pointer(result)) object_release(result);
-                    vm_error(vm, "Stack overflow");
                     return;
                 }
                 vm->stack[vm->stack_pointer++] = result;
@@ -1329,9 +1464,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                     for (int i = 0; i < (int)n_args + 1; i++) {
                         vm_pop(vm);
                     }
-                    if (vm->stack_pointer >= vm->stack_size) {
+                    if (vm->stack_pointer >= vm->stack_size && !grow_stack(vm, 1)) {
                         if (is_pointer(result)) object_release(result);
-                        vm_error(vm, "Stack overflow");
                         return;
                     }
                     vm->stack[vm->stack_pointer++] = result;
@@ -1497,8 +1631,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 return;
             }
 
-            Namespace* ns = namespace_registry_current(global_namespace_registry);
-            if (!ns) {
+            Namespace* home = code_home_ns(vm);
+            if (!home) {
                 vm_error(vm, "LOAD_VAR: no current namespace");
                 return;
             }
@@ -1507,16 +1641,6 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
              * the function's home ns, or the current ns for top-level code.
              * Never the caller's current ns, or redefining + in user would
              * change what beer.core/inc calls. */
-            Namespace* home = ns;
-            if (vm->frame_count > 0) {
-                Value fn_val = vm->frames[vm->frame_count - 1].function;
-                if (is_function(fn_val) && function_ns_name(fn_val)) {
-                    Function* f = (Function*)untag_pointer(fn_val);
-                    if (!f->home_ns)
-                        f->home_ns = namespace_registry_get(global_namespace_registry, f->ns_name);
-                    if (f->home_ns) home = f->home_ns;
-                }
-            }
 
             void* sym_ptr = untag_pointer(symbol);
             VarCacheEntry* ce = &var_cache[var_cache_slot(home, sym_ptr)];
@@ -1650,9 +1774,9 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 memcpy(ns_name_buf, sym_str, ns_len);
                 ns_name_buf[ns_len] = '\0';
 
-                Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
+                Namespace* home = code_home_ns(vm);
                 Value alias_sym = symbol_intern(ns_name_buf);
-                const char* resolved = cur_ns ? namespace_resolve_alias(cur_ns, alias_sym) : NULL;
+                const char* resolved = home ? namespace_resolve_alias(home, alias_sym) : NULL;
                 const char* target_name = resolved ? resolved : ns_name_buf;
 
                 target_ns = namespace_registry_get(global_namespace_registry, target_name);
@@ -1666,7 +1790,9 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 /* Use unqualified name for the var */
                 def_symbol = symbol_intern(slash + 1);
             } else {
-                target_ns = namespace_registry_current(global_namespace_registry);
+                /* Like Clojure: a def in a fn defines in the fn's namespace,
+                 * not the one current when it runs */
+                target_ns = code_home_ns(vm);
                 if (!target_ns) {
                     if (is_pointer(value)) object_release(value);
                     vm_error(vm, "STORE_VAR: no current namespace");
@@ -1722,9 +1848,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
             vm_pop(vm);
 
             int local_idx = frame->base_pointer + idx;
-            if (local_idx >= vm->stack_size) {
+            if (local_idx >= vm->stack_size && !grow_stack(vm, local_idx - vm->stack_pointer + 1)) {
                 if (is_pointer(val)) object_release(val);
-                vm_error(vm, "STORE_LOCAL: index out of bounds");
                 return;
             }
 
@@ -1887,7 +2012,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
 
         /* Exception handling */
         case OP_PUSH_HANDLER:
-        case OP_PUSH_FINALLY: {
+        case OP_PUSH_FINALLY:
+        case OP_PUSH_INTERRUPT_CATCH: {
             uint32_t catch_offset = read_uint32(vm, r);
             TRACE_OP("PC=%04u OP=%02X (OP_PUSH_HANDLER) catch_offset=%u sp=%d",
                       pc_at_opcode, op, catch_offset, vm->stack_pointer);
@@ -1902,7 +2028,8 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
             h->catch_pc = catch_offset;
             h->stack_pointer = vm->stack_pointer;
             h->frame_count = vm->frame_count;
-            h->is_finally = (op == OP_PUSH_FINALLY);
+            h->kind = op == OP_PUSH_FINALLY ? HANDLER_FINALLY
+                    : op == OP_PUSH_INTERRUPT_CATCH ? HANDLER_INTERRUPT : HANDLER_CATCH;
             break;
         }
 
@@ -2150,8 +2277,9 @@ void vm_step(VM* vm) {
 }
 
 /* A runtime error with a try/catch handler active: turn it into a
- * catchable {:message ...} exception and resume at the handler. */
-static VM_NOINLINE void error_to_exception(VM* vm) {
+ * catchable {:message ...} exception and resume at the handler. false (the
+ * error stands) when only interrupt catches are left. */
+static VM_NOINLINE bool error_to_exception(VM* vm) {
     const char* emsg = vm->error_msg ? vm->error_msg : "runtime error";
     Value exc = hashmap_create_default();
     Value k   = keyword_intern("message");
@@ -2160,13 +2288,18 @@ static VM_NOINLINE void error_to_exception(VM* vm) {
     object_release(exc);
     object_release(s);
 
-    ExceptionHandler* h = &vm->handlers[--vm->handler_count];
+    ExceptionHandler* h = pop_handler_for(vm, exc2);
+    if (!h) {
+        object_release(exc2);
+        return false;
+    }
     unwind_to_handler(vm, h);
     if (is_pointer(vm->exception)) object_release(vm->exception);
     vm->exception = exc2;
     vm->pc  = h->catch_pc;
     vm->error   = false;
     vm->running = true;
+    return true;
 }
 
 /* Run VM until halt or yield */
@@ -2176,10 +2309,8 @@ void vm_run(VM* vm) {
     vm->yielded = false;
     /* Don't reset pc - allow caller to set starting position */
 
-    if (!verify_loaded(vm)) {
-        fprintf(stderr, "VM Error: %s\n", vm->error_msg);
-        return;
-    }
+    /* Errors are left in vm->error / error_msg for the caller to report */
+    if (!verify_loaded(vm)) return;
 
     /* One compare per instruction: running, no error, not yielded */
     const uint32_t go = vm_run_state_go();
@@ -2191,7 +2322,7 @@ void vm_run(VM* vm) {
         /* A runtime error with a try/catch active becomes an exception */
         if (vm->error && vm->handler_count > 0) {
             vm->pc = r.pc;
-            error_to_exception(vm);
+            if (!error_to_exception(vm)) break;
             r.pc = vm->pc;
             r.code = vm->code;
             r.code_size = (uint32_t)vm->code_size;
@@ -2200,8 +2331,4 @@ void vm_run(VM* vm) {
         break;
     }
     vm->pc = r.pc;
-
-    if (vm->error) {
-        fprintf(stderr, "VM Error: %s\n", vm->error_msg ? vm->error_msg : "Unknown error");
-    }
 }

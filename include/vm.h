@@ -62,6 +62,8 @@ typedef enum {
     OP_LOAD_EXCEPTION = 0x73,  /* Push current exception onto stack */
     OP_PUSH_FINALLY = 0x74,    /* Push a finally handler (uint32: handler PC); an
                                   interrupt unwinds to these, skipping catches */
+    OP_PUSH_INTERRUPT_CATCH = 0x75, /* Push a handler that takes only the
+                                  interrupt ((catch :interrupt e ...)) */
 
     /* Functions & Closures (0x80 - 0x8F) */
     OP_MAKE_CLOSURE = 0x80,
@@ -79,8 +81,13 @@ typedef struct ExceptionHandler {
     uint32_t catch_pc;       /* PC of catch block (absolute) */
     int stack_pointer;       /* SP to restore on throw */
     int frame_count;         /* Frame count to restore on throw */
-    bool is_finally;         /* Pushed by OP_PUSH_FINALLY */
+    uint8_t kind;            /* HANDLER_CATCH / _FINALLY / _INTERRUPT */
 } ExceptionHandler;
+
+/* Which exceptions a handler takes: catch — all but the interrupt;
+ * finally — all (runs, then rethrows); interrupt — only the interrupt
+ * ((catch :interrupt e ...), for REPL loops) */
+enum { HANDLER_CATCH = 0, HANDLER_FINALLY = 1, HANDLER_INTERRUPT = 2 };
 
 #define DEFAULT_HANDLER_CAPACITY 16
 
@@ -148,6 +155,12 @@ typedef struct VM {
     const char* error_msg;
     char error_buf[256];  /* Buffer for dynamic error messages */
     bool native_throw;   /* Native requested a catchable throw; exception in vm->exception */
+    /* A native asked the VM to call call_fn with call_args in its place
+     * (vm_request_call); all owned */
+    bool call_requested;
+    Value call_fn;
+    Value* call_args;
+    int call_argc;
     Value thrown_exception; /* Exception value saved when OP_THROW finds no handler (for temp-VM re-throw) */
 } VM;
 
@@ -187,6 +200,13 @@ void vm_error(VM* vm, const char* msg);
 void vm_throw_error(VM* vm, const char* msg);
 void vm_rethrow(VM* vm, Value exc); /* Re-throw an already-owned exception Value */
 
+/* For a native that calls a fn (apply, ...): instead of running it itself,
+ * the native asks the VM to call fn with args in place of the native's own
+ * call, then returns VALUE_NIL. fn runs in this VM like any call (it can
+ * yield, be interrupted, see bindings), its result is the native call's,
+ * and in tail position it is a tail call. Retains fn and args. */
+void vm_request_call(VM* vm, Value fn, int argc, const Value* args);
+
 /* Interrupts: stop the foreground task (the one the REPL or a load waits
  * on). vm_request_interrupt only sets a flag, so it is safe from a signal
  * or IRQ handler; the scheduler delivers it between quanta. The task
@@ -203,5 +223,10 @@ static inline bool vm_is_interrupt(Value exc) {
 /* Unwind vm to its innermost finally handler with the interrupt exception,
  * or end it with an "interrupted" error when there is none */
 void vm_raise_interrupt(VM* vm);
+
+/* Namespace the running code was written in (the running fn's home ns, or
+ * the current ns for top-level code): where a native resolves the
+ * caller's symbols */
+struct Namespace* vm_code_home_ns(VM* vm);
 
 #endif /* BEERLANG_VM_H */

@@ -24,15 +24,28 @@ struct Var {
     Value name;      /* Symbol */
     Value value;     /* Current value */
     bool is_macro;   /* Is this a macro? */
+    bool is_dynamic; /* ^:dynamic: binding gives it task-local values */
     Value meta;      /* Metadata (map) */
 };
 
 /* Var API */
 Var* var_new(Value name);
 void var_free(Var* var);
+/* Dynamic vars: (binding [*x* v] ...) gives the running task its own value,
+ * kept in the task (Task.bindings: var key -> value) and inherited by tasks
+ * it spawns. Reading one checks the current task's bindings first. */
+Value var_dynamic_value(Var* var);
 static inline Value var_get_value(Var* var) {
-    return var ? var->value : VALUE_NIL;
+    if (!var) return VALUE_NIL;
+    if (var->is_dynamic) return var_dynamic_value(var);
+    return var->value;
 }
+static inline Value var_binding_key(Var* var) {
+    return make_fixnum((int64_t)(intptr_t)var);
+}
+bool var_is_bound(Var* var);              /* bound in the current task */
+void var_set_binding(Var* var, Value v);  /* current task; var must be bound */
+Var* namespace_ns_var(void);              /* the *ns* var in beer.core */
 void var_set_value(Var* var, Value value);
 
 /* =================================================================
@@ -96,10 +109,9 @@ Namespace* namespace_registry_get(NamespaceRegistry* reg, const char* name);
 /* Set current namespace */
 void namespace_registry_set_current(NamespaceRegistry* reg, Namespace* ns);
 
-/* Get current namespace */
-static inline Namespace* namespace_registry_current(NamespaceRegistry* reg) {
-    return reg ? reg->current : NULL;
-}
+/* Current namespace: the running task's bound *ns* if it has one, else
+ * the global one */
+Namespace* namespace_registry_current(NamespaceRegistry* reg);
 
 /* Get beer.core namespace */
 Namespace* namespace_registry_get_core(NamespaceRegistry* reg);

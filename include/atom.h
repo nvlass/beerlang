@@ -29,9 +29,6 @@ Value atom_deref(Value atom);
 /* Set the atom to new_val, return new_val. */
 Value atom_reset(Value atom, Value new_val);
 
-/* Apply fn to current value (+ extra args), store result. Uses temp VM.
- * Returns the new value. */
-Value atom_swap(VM* vm, Value atom, Value fn, int extra_argc, Value* extra_argv);
 
 /* If current == old, set to new_val and return true; else return false. */
 bool atom_compare_and_set(Value atom, Value old_val, Value new_val);

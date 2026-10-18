@@ -284,15 +284,66 @@ void scheduler_fire_watchers(Scheduler* sched, Task* task) {
 /* Hand a requested interrupt to the foreground task, waking it if it is
  * blocked. With no foreground task it stays pending (the REPL clears it at
  * the prompt). */
+static void deliver_to(Scheduler* sched, Task* task);
+
 static void scheduler_deliver_interrupt(Scheduler* sched) {
     Task* task = sched->foreground;
     if (!task || task->state == TASK_DONE) return;
     vm_interrupt_requested = 0;
+    deliver_to(sched, task);
+}
+
+/* Tasks named by vm_request_interrupt_task, which may run in a signal or
+ * IRQ handler: it only appends here and sets flags */
+#define MAX_PENDING_TASK_INTERRUPTS 16
+static Task* volatile pending_task_interrupts[MAX_PENDING_TASK_INTERRUPTS];
+static volatile sig_atomic_t n_pending_task_interrupts = 0;
+static volatile sig_atomic_t task_interrupts_requested = 0;
+
+void vm_request_interrupt_task(Task* task) {
+    task->interrupt_requested = 1;
+    int n = n_pending_task_interrupts;
+    if (n < MAX_PENDING_TASK_INTERRUPTS) {
+        pending_task_interrupts[n] = task;
+        n_pending_task_interrupts = n + 1;
+    }
+    task_interrupts_requested = 1;
+}
+
+static void scheduler_deliver_task_interrupts(Scheduler* sched) {
+    task_interrupts_requested = 0;
+    int n = n_pending_task_interrupts;
+    n_pending_task_interrupts = 0;
+    for (int i = 0; i < n; i++) {
+        Task* task = pending_task_interrupts[i];
+        if (!task->interrupt_requested) continue;  /* taken by scheduler_run_nested */
+        task->interrupt_requested = 0;
+        if (task->state != TASK_DONE) deliver_to(sched, task);
+    }
+}
+
+bool scheduler_interrupt_task(Scheduler* sched, Task* task) {
+    if (task->state == TASK_DONE) return false;
+    deliver_to(sched, task);
+    return true;
+}
+
+/* Mark task (or, when it waits in a nested scheduler loop, the task it
+ * waits on) to raise the interrupt when it next runs; wake it if blocked */
+static void deliver_to(Scheduler* sched, Task* task) {
+    while (task->waiting_on && task->waiting_on->state != TASK_DONE)
+        task = task->waiting_on;
     task->interrupt_pending = true;
     if (task->state != TASK_BLOCKED) return;
     if (task->wait_queue) {
-        scheduler_wake(sched, task);  /* enqueue retains before the queue's ref goes */
+        /* Unlink from the channel before enqueueing: both queues use
+         * next/prev. The channel's ref may be the only one, so hold one. */
+        Value task_val = tag_pointer(task);
+        object_retain(task_val);
         channel_cancel_wait(task);
+        task->state = TASK_BLOCKED;
+        scheduler_wake(sched, task);
+        object_release(task_val);
     } else if (task->io_blocked) {
         scheduler_cancel_timer(sched, task);
         if (sched->io_reactor) io_reactor_forget(sched->io_reactor, task);
@@ -303,6 +354,7 @@ static void scheduler_deliver_interrupt(Scheduler* sched) {
 /* Run one task for one quantum */
 bool scheduler_run_one_tick(Scheduler* sched) {
     if (vm_interrupt_requested) scheduler_deliver_interrupt(sched);
+    if (task_interrupts_requested) scheduler_deliver_task_interrupts(sched);
     scheduler_check_timers(sched);
     /* A kevent/epoll_wait per tick would be a syscall every quantum */
     if ((++sched->ticks & (IO_CHECK_EVERY - 1)) == 0 || !scheduler_has_ready(sched)) {
@@ -336,14 +388,19 @@ bool scheduler_run_one_tick(Scheduler* sched) {
 
 bool scheduler_run_nested(VM* caller, VM* temp) {
     Scheduler* sched = caller->scheduler;
-    bool fg = sched && sched->current && sched->current->foreground;
-    int quota = fg ? sched->quota : 0;
+    Task* cur = sched ? sched->current : NULL;
+    int quota = cur ? sched->quota : 0;
     temp->yield_countdown = quota;
     vm_run(temp);
-    /* Out of quota (not a yield or a parked native): check, then resume */
-    while (fg && temp->yielded && !temp->error && temp->yield_countdown == 0) {
-        if (vm_interrupt_requested) {
-            vm_interrupt_requested = 0;
+    /* Out of quota (not a yield or a parked native): check, then resume.
+     * Nothing else runs meanwhile, so only a request from a signal/IRQ
+     * handler (or the fn itself) can be pending. */
+    while (cur && temp->yielded && !temp->error && temp->yield_countdown == 0) {
+        bool raise = false;
+        if (cur->foreground && vm_interrupt_requested) { vm_interrupt_requested = 0; raise = true; }
+        if (cur->interrupt_requested) { cur->interrupt_requested = 0; raise = true; }
+        if (cur->interrupt_pending) { cur->interrupt_pending = false; raise = true; }
+        if (raise) {
             vm_raise_interrupt(temp);
             if (temp->error) break;
         }
@@ -361,12 +418,15 @@ bool scheduler_run_nested(VM* caller, VM* temp) {
 void scheduler_run_task_to_completion(Scheduler* sched, Task* target) {
     Task* saved_current = sched->current;
     Task* saved_foreground = sched->foreground;
+    Task* saved_waiting_on = saved_current ? saved_current->waiting_on : NULL;
+    if (saved_current) saved_current->waiting_on = target;
     /* Called from C, or from a foreground task (a require inside the REPL's
      * form): an interrupt stops target. Not from a background task. */
     if (!saved_current || saved_current->foreground) {
         target->foreground = true;
         sched->foreground = target;
     }
+    target->caller_reports = true;
     scheduler_enqueue(sched, target);
     while (target->state != TASK_DONE) {
         if (scheduler_run_one_tick(sched)) continue;
@@ -375,6 +435,7 @@ void scheduler_run_task_to_completion(Scheduler* sched, Task* target) {
     }
     sched->current = saved_current;
     sched->foreground = saved_foreground;
+    if (saved_current) saved_current->waiting_on = saved_waiting_on;
 }
 
 /* Non-blocking counterpart to scheduler_run_until_done: wakes tasks whose

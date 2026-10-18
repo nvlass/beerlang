@@ -424,6 +424,11 @@ static int run_repl(void) {
 
     int line_number = 1;
 
+    /* kqueue never reports a regular file at EOF as readable, so `beerlang
+     * < file` would wait forever there; a file is always readable anyway */
+    struct stat stdin_st;
+    bool stdin_is_file = fstat(STDIN_FILENO, &stdin_st) == 0 && S_ISREG(stdin_st.st_mode);
+
     while (true) {
         Namespace* cur_ns = namespace_registry_current(global_namespace_registry);
         if (accum_len == 0) {
@@ -436,7 +441,14 @@ static int run_repl(void) {
         /* Background tasks (accept-loops, connection readers, actors) keep
          * running while we wait for input */
         if (global_scheduler) {
-            scheduler_run_until_readable(global_scheduler, STDIN_FILENO);
+            if (stdin_is_file) {
+                /* A batch, not until idle: a task that never blocks is
+                 * always ready */
+                for (int i = 0; i < IO_CHECK_EVERY && scheduler_has_ready(global_scheduler); i++)
+                    scheduler_run_one_tick(global_scheduler);
+            } else {
+                scheduler_run_until_readable(global_scheduler, STDIN_FILENO);
+            }
         }
         bool got_line = !vm_interrupt_requested && fgets(input, INPUT_BUFFER_SIZE, stdin);
         if (!got_line && (vm_interrupt_requested || (ferror(stdin) && errno == EINTR))) {
