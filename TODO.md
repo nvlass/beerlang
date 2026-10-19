@@ -6,8 +6,8 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 671 (`bash tests/smoke_test.sh`)
-- **Last Updated:** 2026-10-17
+- REPL smoke tests: 676 (`bash tests/smoke_test.sh`)
+- **Last Updated:** 2026-10-19
 
 ## Open Items at a Glance
 
@@ -579,6 +579,43 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
      across a push (check `pop_handler`, vm.c:283, and the unwinding
      code). Also check that temp VMs (macroexpansion) and task VMs get
      the same growth.
+
+10. **`beer.string/replace` with a shorter replacement — done
+    (2026-10-19):** the length delta is computed per direction, a failed
+    `malloc` throws "replace: out of memory". Found on the way: an empty
+    target returned the input without retaining it (use-after-free on the
+    second call). Smoke tests cover both. Also done: the ~80 `malloc`/`calloc`/`realloc`
+    results in `src/` that were used without a NULL check now go through
+    `xmalloc`/`xcalloc`/`xrealloc` (`include/memory.h`), which abort with
+    "FATAL: Out of memory (requested N bytes)" like `object_alloc`;
+    `mem_alloc`/`mem_realloc` call them.
+    Original report:
+    beeros crashed (store fault in `memcpy`, address 0) on
+    `(beer.string/replace "a\r\nb" "\r" "")`. `string_replace`
+    (`src/types/string.c:465`) computes
+    `new_len = s->byte_len + count * (r->byte_len - t->byte_len)`; with
+    unsigned lengths `0 - 1` wraps, so the size is ~4 GB per occurrence.
+    The host survives because the huge `malloc` succeeds lazily; beeros's
+    returns NULL, which the next line writes through (no NULL check).
+    Wanted: compute the delta signed (or `s->byte_len - count *
+    (t->byte_len - r->byte_len)` when shrinking), check `malloc`, and a
+    smoke test replacing with a shorter and an empty string. Worth a scan
+    for the same pattern elsewhere (unsigned length differences,
+    unchecked `malloc`). beeros works around it with split/join.
+
+11. **`beer.hive` without the network (2026-10-19).** The local half —
+    actors, mailboxes, `ask`/`reply`, `register`/`whereis`, supervisors,
+    `monitor` — needs no sockets, but `(ns beer.hive (:require
+    [beer.hive.node ...]))` pulls in `beer.tcp` and `beer.crypto` at load,
+    so `beer.hive` doesn't load at all on `BEER_PLATFORM=none` (beeros,
+    WASM). Wanted: `beer.hive` loads with `BEER_NET=0`; the node part
+    (`beer.hive.node`, `beer.hive.wire`) is required lazily, e.g. inside
+    `start-node!`/`connect-node!`, with a clear error when `beer.tcp`
+    isn't there; remote routing in `ask`/`send` only when a node runs.
+    A smoke test that loads `beer.hive` and runs local actors with
+    `BEER_NET=0` would keep it that way. beeros plans to use the
+    registry as its "named channels" (instead of Unix sockets: one image,
+    so a name -> channel map is enough).
 
 Related: `::kw` resolution needs form-by-form reading in `load`; a
 `load-string` built on `core_load_source` inherits that.

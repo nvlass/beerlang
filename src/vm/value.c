@@ -289,7 +289,7 @@ static size_t sprint_str_readable(const char* s, char** buf, size_t* cap, size_t
                 }
                 break;
         }
-        while (len + esc_len + 2 > *cap) { *cap *= 2; *buf = realloc(*buf, *cap); }
+        while (len + esc_len + 2 > *cap) { *cap *= 2; *buf = xrealloc(*buf, *cap); }
         memcpy(*buf + len, esc, esc_len);
         len += esc_len;
         s++;
@@ -374,7 +374,7 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
                     fclose(mf);
                     while (len + mlen + 1 > *cap) {
                         *cap = (*cap < 64) ? 64 : *cap * 2;
-                        *buf = realloc(*buf, *cap);
+                        *buf = xrealloc(*buf, *cap);
                     }
                     memcpy(*buf + len, mbuf, mlen);
                     free(mbuf);
@@ -400,7 +400,7 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
 
     while (len + slen + 1 > *cap) {
         *cap = (*cap < 64) ? 64 : *cap * 2;
-        *buf = realloc(*buf, *cap);
+        *buf = xrealloc(*buf, *cap);
     }
     memcpy(*buf + len, s, slen);
     free(owned);

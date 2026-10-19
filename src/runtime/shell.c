@@ -100,7 +100,7 @@ static Value native_shell_exec(VM* vm, int argc, Value* argv) {
         out_len += n;
         if (out_len >= out_cap) {
             out_cap *= 2;
-            out_buf = realloc(out_buf, out_cap);
+            out_buf = xrealloc(out_buf, out_cap);
         }
     }
     close(stdout_pipe[0]);
@@ -109,7 +109,7 @@ static Value native_shell_exec(VM* vm, int argc, Value* argv) {
         err_len += n;
         if (err_len >= err_cap) {
             err_cap *= 2;
-            err_buf = realloc(err_buf, err_cap);
+            err_buf = xrealloc(err_buf, err_cap);
         }
     }
     close(stderr_pipe[0]);

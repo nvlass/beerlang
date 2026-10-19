@@ -803,7 +803,7 @@ static Value expand_macro(Compiler* c, Value macro_fn, Value form) {
 
     /* Build mini constant pool: [arg0, arg1, ..., macro_fn] */
     int n_consts = n_args + 1;
-    Value* consts = malloc(sizeof(Value) * (size_t)n_consts);
+    Value* consts = xmalloc(sizeof(Value) * (size_t)n_consts);
     cur = arg_forms;
     for (int i = 0; i < n_args; i++) {
         consts[i] = car(cur);
@@ -813,7 +813,7 @@ static Value expand_macro(Compiler* c, Value macro_fn, Value form) {
 
     /* Build mini bytecode: PUSH_CONST for each arg, PUSH_CONST fn, CALL n, HALT */
     size_t code_size = (size_t)(n_consts * 5 + 3 + 1);  /* 5 bytes per PUSH_CONST, 3 for CALL, 1 for HALT */
-    uint8_t* code = malloc(code_size);
+    uint8_t* code = xmalloc(code_size);
     size_t pc = 0;
 
     /* Push args */

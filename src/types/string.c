@@ -405,7 +405,7 @@ Value string_subs(Value str, size_t start, size_t end) {
 Value string_upper(Value str) {
     assert(is_pointer(str) && object_type(str) == TYPE_STRING);
     String* s = (String*)untag_pointer(str);
-    char* buf = malloc(s->byte_len + 1);
+    char* buf = xmalloc(s->byte_len + 1);
     for (size_t i = 0; i < s->byte_len; i++) {
         buf[i] = (char)toupper((unsigned char)s->data[i]);
     }
@@ -419,7 +419,7 @@ Value string_upper(Value str) {
 Value string_lower(Value str) {
     assert(is_pointer(str) && object_type(str) == TYPE_STRING);
     String* s = (String*)untag_pointer(str);
-    char* buf = malloc(s->byte_len + 1);
+    char* buf = xmalloc(s->byte_len + 1);
     for (size_t i = 0; i < s->byte_len; i++) {
         buf[i] = (char)tolower((unsigned char)s->data[i]);
     }
@@ -448,7 +448,10 @@ Value string_replace(Value str, Value target, Value replacement) {
     String* t = (String*)untag_pointer(target);
     String* r = (String*)untag_pointer(replacement);
 
-    if (t->byte_len == 0) return str;
+    if (t->byte_len == 0) {
+        object_retain(str);
+        return str;
+    }
 
     /* Count occurrences */
     int count = 0;
@@ -462,8 +465,14 @@ Value string_replace(Value str, Value target, Value replacement) {
         return str;
     }
 
-    size_t new_len = s->byte_len + (size_t)count * (r->byte_len - t->byte_len);
+    /* Lengths are unsigned: subtracting the larger one would wrap */
+    size_t new_len = s->byte_len;
+    if (r->byte_len >= t->byte_len)
+        new_len += (size_t)count * (r->byte_len - t->byte_len);
+    else
+        new_len -= (size_t)count * (t->byte_len - r->byte_len);
     char* buf = malloc(new_len + 1);
+    if (!buf) return VALUE_NIL;
     char* out = buf;
     p = s->data;
 
@@ -521,7 +530,7 @@ Value string_split(Value str, Value delim) {
     /* Collect parts in a temporary array, then build list */
     size_t parts_cap = 16;
     size_t parts_count = 0;
-    Value* parts = malloc(sizeof(Value) * parts_cap);
+    Value* parts = xmalloc(sizeof(Value) * parts_cap);
 
     while (p <= end) {
         const char* found = (p < end) ? strstr(p, d->data) : NULL;
@@ -530,7 +539,7 @@ Value string_split(Value str, Value delim) {
 
         if (parts_count >= parts_cap) {
             parts_cap *= 2;
-            parts = realloc(parts, sizeof(Value) * parts_cap);
+            parts = xrealloc(parts, sizeof(Value) * parts_cap);
         }
         parts[parts_count++] = part;
 
@@ -551,7 +560,7 @@ Value string_split(Value str, Value delim) {
 Value string_join(Value sep, Value coll) {
     /* Use value_sprint (display mode) for each element */
     size_t cap = 64;
-    char* buf = malloc(cap);
+    char* buf = xmalloc(cap);
     size_t len = 0;
 
     const char* sep_str = NULL;
@@ -567,7 +576,7 @@ Value string_join(Value sep, Value coll) {
         Value cur = coll;
         while (is_cons(cur)) {
             if (!first && sep_str) {
-                while (len + sep_len + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (len + sep_len + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                 memcpy(buf + len, sep_str, sep_len);
                 len += sep_len;
             }
@@ -578,12 +587,12 @@ Value string_join(Value sep, Value coll) {
             if (is_pointer(elem) && object_type(elem) == TYPE_STRING) {
                 const char* es = string_cstr(elem);
                 size_t elen = string_byte_length(elem);
-                while (len + elen + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (len + elen + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                 memcpy(buf + len, es, elen);
                 len += elen;
             } else if (is_fixnum(elem)) {
                 int n = snprintf(tmp, sizeof(tmp), "%" PRId64, untag_fixnum(elem));
-                while (len + (size_t)n + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (len + (size_t)n + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                 memcpy(buf + len, tmp, (size_t)n);
                 len += (size_t)n;
             } else if (is_nil(elem)) {
@@ -592,7 +601,7 @@ Value string_join(Value sep, Value coll) {
                 /* Generic: use value_sprint from core.c pattern */
                 const char* s_name = value_type_name(elem);
                 size_t slen = strlen(s_name);
-                while (len + slen + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (len + slen + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                 memcpy(buf + len, s_name, slen);
                 len += slen;
             }
@@ -602,7 +611,7 @@ Value string_join(Value sep, Value coll) {
         size_t vlen = vector_length(coll);
         for (size_t i = 0; i < vlen; i++) {
             if (!first && sep_str) {
-                while (len + sep_len + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (len + sep_len + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                 memcpy(buf + len, sep_str, sep_len);
                 len += sep_len;
             }
@@ -612,12 +621,12 @@ Value string_join(Value sep, Value coll) {
             if (is_pointer(elem) && object_type(elem) == TYPE_STRING) {
                 const char* es = string_cstr(elem);
                 size_t elen = string_byte_length(elem);
-                while (len + elen + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (len + elen + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                 memcpy(buf + len, es, elen);
                 len += elen;
             } else if (is_fixnum(elem)) {
                 int n = snprintf(tmp, sizeof(tmp), "%" PRId64, untag_fixnum(elem));
-                while (len + (size_t)n + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (len + (size_t)n + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                 memcpy(buf + len, tmp, (size_t)n);
                 len += (size_t)n;
             } else if (is_nil(elem)) {
@@ -625,7 +634,7 @@ Value string_join(Value sep, Value coll) {
             } else if (is_char(elem)) {
                 char cbuf[4];
                 int clen = utf8_encode(untag_char(elem), cbuf);
-                while (len + (size_t)clen + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (len + (size_t)clen + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                 memcpy(buf + len, cbuf, (size_t)clen);
                 len += (size_t)clen;
             } else {
@@ -635,23 +644,23 @@ Value string_join(Value sep, Value coll) {
                 if (is_pointer(elem) && object_type(elem) == TYPE_KEYWORD) {
                     char kwbuf[64];
                     kwlen = (size_t)snprintf(kwbuf, sizeof(kwbuf), ":%s", keyword_name(elem));
-                    while (len + kwlen + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                    while (len + kwlen + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                     memcpy(buf + len, kwbuf, kwlen);
                     len += kwlen;
                 } else if (is_pointer(elem) && object_type(elem) == TYPE_SYMBOL) {
                     kw = symbol_name(elem);
                     kwlen = strlen(kw);
-                    while (len + kwlen + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                    while (len + kwlen + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                     memcpy(buf + len, kw, kwlen);
                     len += kwlen;
                 } else if (is_true(elem)) {
                     kw = "true"; kwlen = 4;
-                    while (len + kwlen + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                    while (len + kwlen + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                     memcpy(buf + len, kw, kwlen);
                     len += kwlen;
                 } else if (is_false(elem)) {
                     kw = "false"; kwlen = 5;
-                    while (len + kwlen + 1 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                    while (len + kwlen + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
                     memcpy(buf + len, kw, kwlen);
                     len += kwlen;
                 }

@@ -567,7 +567,7 @@ static bool native_stream_write(VM* vm, const char* who, Value stream,
 static Value print_args(VM* vm, const char* who, int argc, Value* argv,
                         bool readable, bool newline) {
     size_t cap = 64, len = 0;
-    char* buf = malloc(cap);
+    char* buf = xmalloc(cap);
     for (int i = 0; i < argc; i++) {
         if (i > 0) len = sprint_lit(" ", &buf, &cap, len);
         len = readable ? value_sprint_readable(argv[i], &buf, &cap, len)
@@ -696,7 +696,7 @@ static int sort_cmp(SortCtx* ctx, Value a, Value b) {
 
 static void merge_sort_items(SortItem* items, size_t n, SortCtx* ctx) {
     if (n < 2) return;
-    SortItem* tmp = malloc(n * sizeof(SortItem));
+    SortItem* tmp = xmalloc(n * sizeof(SortItem));
     for (size_t width = 1; width < n && !ctx->failed; width *= 2) {
         for (size_t lo = 0; lo < n; lo += 2 * width) {
             size_t mid = lo + width < n ? lo + width : n;
@@ -1656,7 +1656,7 @@ static size_t value_sprint(Value v, char** buf, size_t* cap, size_t len) {
     /* Ensure capacity */
     while (len + slen + 1 > *cap) {
         *cap = (*cap < 64) ? 64 : *cap * 2;
-        *buf = realloc(*buf, *cap);
+        *buf = xrealloc(*buf, *cap);
     }
     memcpy(*buf + len, s, slen);
     free(owned);
@@ -1667,7 +1667,7 @@ static size_t sprint_lit(const char* s, char** buf, size_t* cap, size_t len) {
     size_t slen = strlen(s);
     while (len + slen + 1 > *cap) {
         *cap = (*cap < 64) ? 64 : *cap * 2;
-        *buf = realloc(*buf, *cap);
+        *buf = xrealloc(*buf, *cap);
     }
     memcpy(*buf + len, s, slen);
     return len + slen;
@@ -1735,7 +1735,7 @@ static Value native_str(VM* vm, int argc, Value* argv) {
     if (argc == 0) return string_from_cstr("");
 
     size_t cap = 64;
-    char* buf = malloc(cap);
+    char* buf = xmalloc(cap);
     size_t len = 0;
 
     for (int i = 0; i < argc; i++) {
@@ -2227,7 +2227,7 @@ static Value native_apply(VM* vm, int argc, Value* argv) {
     /* Build args array */
     Value* args = NULL;
     if (total > 0) {
-        args = malloc(sizeof(Value) * (size_t)total);
+        args = xmalloc(sizeof(Value) * (size_t)total);
 
         /* Copy fixed args */
         for (int i = 0; i < fixed_count; i++) {
@@ -2272,12 +2272,12 @@ static Value native_pr_str(VM* vm, int argc, Value* argv) {
     if (argc == 0) return string_from_cstr("");
 
     size_t cap = 64;
-    char* buf = malloc(cap);
+    char* buf = xmalloc(cap);
     size_t len = 0;
 
     for (int i = 0; i < argc; i++) {
         if (i > 0) {
-            while (len + 2 > cap) { cap *= 2; buf = realloc(buf, cap); }
+            while (len + 2 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
             buf[len++] = ' ';
         }
         len = value_sprint_readable(argv[i], &buf, &cap, len);
@@ -2681,13 +2681,13 @@ static Value native_asm(VM* vm, int argc, Value* argv) {
     Value* const_arr = NULL;
     if (!is_nil(const_val) && is_pointer(const_val) && object_type(const_val) == TYPE_VECTOR) {
         num_constants = (int)vector_length(const_val);
-        const_arr = malloc((size_t)num_constants * sizeof(Value));
+        const_arr = xmalloc((size_t)num_constants * sizeof(Value));
         for (int i = 0; i < num_constants; i++) {
             const_arr[i] = vector_get(const_val, (size_t)i);
             if (is_pointer(const_arr[i])) object_retain(const_arr[i]);
         }
     } else {
-        const_arr = malloc(sizeof(Value));
+        const_arr = xmalloc(sizeof(Value));
         num_constants = 0;
     }
 
@@ -2755,7 +2755,7 @@ static Value native_asm(VM* vm, int argc, Value* argv) {
     }
 
     /* Pass 2: emit bytecode */
-    uint8_t* bytecode = malloc(total_size);
+    uint8_t* bytecode = xmalloc(total_size);
     size_t pc = 0;
     uint16_t n_locals = 0;
 
@@ -3016,7 +3016,7 @@ static void sb_append_values(Value sbv, int argc, Value* argv) {
             strbuilder_append(sbv, string_cstr(x), string_byte_length(x));
         } else if (value_identical(x, sbv)) {
             /* value_sprint would read from the buffer it reallocates */
-            char* copy = malloc(sb->len + 1);
+            char* copy = xmalloc(sb->len + 1);
             size_t n = sb->len;
             memcpy(copy, sb->data, n);
             strbuilder_append(sbv, copy, n);
@@ -3087,7 +3087,9 @@ static Value native_str_replace(VM* vm, int argc, Value* argv) {
         vm_error(vm, "replace: requires 3 string arguments");
         return VALUE_NIL;
     }
-    return string_replace(argv[0], argv[1], argv[2]);
+    Value result = string_replace(argv[0], argv[1], argv[2]);
+    if (is_nil(result)) vm_error(vm, "replace: out of memory");
+    return result;
 }
 
 /* char?: (char? x) => true if x is a character */
@@ -3902,10 +3904,10 @@ static Value native_tar_create(VM* vm, int argc, Value* argv) {
     }
     Value keys = hashmap_keys(argv[1]);
     size_t n = vector_length(keys);
-    const char** names = malloc(n * sizeof(char*));
-    const char** contents = malloc(n * sizeof(char*));
+    const char** names = xmalloc(n * sizeof(char*));
+    const char** contents = xmalloc(n * sizeof(char*));
     /* We need to hold string Values alive */
-    Value* val_refs = malloc(n * sizeof(Value));
+    Value* val_refs = xmalloc(n * sizeof(Value));
 
     for (size_t i = 0; i < n; i++) {
         Value k = vector_get(keys, i);
@@ -4309,7 +4311,7 @@ static Value do_macroexpand_1(VM* vm, Value form) {
 
     /* Build mini constant pool: [arg0, arg1, ..., macro_fn] */
     int n_consts = n_args + 1;
-    Value* consts = malloc(sizeof(Value) * (size_t)n_consts);
+    Value* consts = xmalloc(sizeof(Value) * (size_t)n_consts);
     cur = arg_forms;
     for (int i = 0; i < n_args; i++) {
         consts[i] = car(cur);
@@ -4319,7 +4321,7 @@ static Value do_macroexpand_1(VM* vm, Value form) {
 
     /* Build mini bytecode */
     size_t code_size = (size_t)(n_consts * 5 + 3 + 1);
-    uint8_t* code = malloc(code_size);
+    uint8_t* code = xmalloc(code_size);
     size_t pc = 0;
 
     for (int i = 0; i < n_args; i++) {
@@ -4412,8 +4414,8 @@ static int cap_load_units = 0;
 void core_retain_unit(CompiledCode* code, Value* constants) {
     if (n_load_units == cap_load_units) {
         cap_load_units = cap_load_units ? cap_load_units * 2 : 256;
-        load_units = realloc(load_units, sizeof(*load_units) * (size_t)cap_load_units);
-        load_constants = realloc(load_constants, sizeof(*load_constants) * (size_t)cap_load_units);
+        load_units = xrealloc(load_units, sizeof(*load_units) * (size_t)cap_load_units);
+        load_constants = xrealloc(load_constants, sizeof(*load_constants) * (size_t)cap_load_units);
     }
     load_units[n_load_units] = code;
     load_constants[n_load_units] = constants;
@@ -4451,7 +4453,7 @@ static Value native_compile(VM* caller_vm, int argc, Value* argv) {
     compiler_free(compiler);
 
     int n_constants = (int)vector_length(code->constants);
-    Value* constants = malloc((size_t)n_constants * sizeof(Value));
+    Value* constants = xmalloc((size_t)n_constants * sizeof(Value));
     for (int j = 0; j < n_constants; j++) {
         constants[j] = vector_get(code->constants, (size_t)j);
         if (is_pointer(constants[j])) object_retain(constants[j]);
@@ -4555,7 +4557,7 @@ static Value load_forms(VM* caller_vm, const char* source, const char* name) {
         compiler_free(compiler);
 
         int n_constants = (int)vector_length(code->constants);
-        Value* constants = malloc((size_t)n_constants * sizeof(Value));
+        Value* constants = xmalloc((size_t)n_constants * sizeof(Value));
         for (int j = 0; j < n_constants; j++) {
             constants[j] = vector_get(code->constants, (size_t)j);
             if (is_pointer(constants[j])) object_retain(constants[j]);

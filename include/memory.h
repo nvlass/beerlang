@@ -51,6 +51,11 @@ void memory_dump_objects(void);
 /* Mark an object as immortal (retain/release become no-ops) */
 void object_make_immortal(Value v);
 
+/* malloc/calloc/realloc that abort with a message instead of returning NULL */
+void* xmalloc(size_t size);
+void* xcalloc(size_t count, size_t size);
+void* xrealloc(void* ptr, size_t size);
+
 /* Object allocation and deallocation */
 
 /* Allocate a new object with given type and size

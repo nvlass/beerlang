@@ -16,7 +16,7 @@ void strbuilder_init(void) {
 Value strbuilder_new(size_t capacity) {
     if (capacity < 16) capacity = 16;
     StringBuilder* sb = (StringBuilder*)object_alloc(TYPE_STRBUILDER, sizeof(StringBuilder));
-    sb->data = malloc(capacity);
+    sb->data = xmalloc(capacity);
     sb->data[0] = '\0';
     sb->len = 0;
     sb->cap = capacity;
@@ -28,7 +28,7 @@ void strbuilder_append(Value v, const char* s, size_t n) {
     if (sb->len + n + 1 > sb->cap) {
         size_t cap = sb->cap;
         while (sb->len + n + 1 > cap) cap *= 2;
-        sb->data = realloc(sb->data, cap);
+        sb->data = xrealloc(sb->data, cap);
         sb->cap = cap;
     }
     memcpy(sb->data + sb->len, s, n);

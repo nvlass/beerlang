@@ -398,6 +398,14 @@ check '(beer.string/starts-with? "hello" "lo")'              'false'
 check '(beer.string/ends-with? "hello" "lo")'                'true'
 check '(beer.string/ends-with? "hello" "he")'                'false'
 check '(beer.string/replace "hello world" "o" "0")'          '"hell0 w0rld"'
+check '(beer.string/replace "a\r\nb" "\r" "")'                 '"a\nb"'
+check '(beer.string/replace "abcabc" "bc" "x")'              '"axax"'
+check '(beer.string/replace "abcabc" "abc" "")'              '""'
+check '(beer.string/replace "abc" "" "x")'                   '"abc"'
+check_multi '(def s (str "ab" "c"))
+(beer.string/replace s "" "x")
+(beer.string/replace s "" "x")
+s' '"abc"' 'replace with empty target keeps its input alive'
 check_multi '(require (quote beer.string) :as (quote str))
 (str/upper-case "world")' '"WORLD"' 'str/upper-case via :as alias'
 check_multi '(require (quote beer.string))

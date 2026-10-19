@@ -407,7 +407,7 @@ static Value native_bytes_to_string_lossy(VM* vm, int argc, Value* argv) {
     const uint8_t* data = bytebuffer_data(argv[0]);
     size_t n = bytebuffer_capacity(argv[0]);
     /* Worst case: every input byte becomes a 3-byte U+FFFD replacement */
-    char* out = malloc(n * 3 + 1);
+    char* out = xmalloc(n * 3 + 1);
     size_t out_len = 0;
     size_t i = 0;
     while (i < n) {

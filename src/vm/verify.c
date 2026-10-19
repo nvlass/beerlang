@@ -68,7 +68,7 @@ static bool mark_starts(const uint8_t* code, int code_size, uint8_t* starts,
 
 bool bytecode_is_instruction_start(const uint8_t* code, int code_size, uint32_t offset) {
     if (!code || code_size <= 0 || offset >= (uint32_t)code_size) return false;
-    uint8_t* starts = calloc((size_t)code_size, 1);
+    uint8_t* starts = xcalloc((size_t)code_size, 1);
     char err[8];
     bool ok = mark_starts(code, code_size, starts, err, sizeof(err)) && starts[offset];
     free(starts);
@@ -82,7 +82,7 @@ bool bytecode_verify(const uint8_t* code, int code_size,
         snprintf(err, err_len, "empty code");
         return false;
     }
-    uint8_t* starts = calloc((size_t)code_size, 1);
+    uint8_t* starts = xcalloc((size_t)code_size, 1);
     if (!mark_starts(code, code_size, starts, err, err_len)) {
         free(starts);
         return false;

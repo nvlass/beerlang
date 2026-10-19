@@ -94,8 +94,8 @@ Value task_new(Value fn, int argc, Value* argv, Scheduler* sched) {
     /* Build mini bytecode: PUSH_CONST arg0, ..., PUSH_CONST fn, CALL argc, HALT */
     int n_consts = argc + 1;
     size_t code_size = (size_t)(n_consts * 5 + 3 + 1);  /* 5 per PUSH_CONST, 3 for CALL, 1 for HALT */
-    uint8_t* code = malloc(code_size);
-    Value* consts = malloc(sizeof(Value) * (size_t)n_consts);
+    uint8_t* code = xmalloc(code_size);
+    Value* consts = xmalloc(sizeof(Value) * (size_t)n_consts);
 
     /* Constants: args first, then fn. Retained: a spawned task runs after
      * the spawner has dropped its own references to fn and args. */
@@ -171,7 +171,7 @@ Value task_new_from_code(uint8_t* code, int code_size,
     vm->yield_countdown = sched ? sched->quota : 0;
 
     /* Clone code and constants so the task owns them */
-    uint8_t* code_copy = malloc((size_t)code_size);
+    uint8_t* code_copy = xmalloc((size_t)code_size);
     memcpy(code_copy, code, (size_t)code_size);
     Value* consts_copy = n_constants > 0
         ? malloc(sizeof(Value) * (size_t)n_constants) : NULL;
@@ -236,7 +236,7 @@ void task_run(Task* task) {
 
 /* Add a watcher callback to fire when task completes */
 void task_add_watcher(Task* task, Value callback) {
-    WatcherNode* node = malloc(sizeof(WatcherNode));
+    WatcherNode* node = xmalloc(sizeof(WatcherNode));
     node->callback = callback;
     if (is_pointer(callback)) {
         object_retain(callback);

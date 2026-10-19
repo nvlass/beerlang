@@ -121,7 +121,7 @@ static void stream_unread(Stream* s, const char* data, size_t n) {
     if (n + unread > s->read_cap) {
         size_t cap = s->read_cap;
         while (n + unread > cap) cap *= 2;
-        uint8_t* nb = malloc(cap);
+        uint8_t* nb = xmalloc(cap);
         memcpy(nb + n, s->read_buf + s->read_pos, unread);
         free(s->read_buf);
         s->read_buf = nb;
@@ -166,7 +166,7 @@ Value stream_read_line(Value stream) {
 
     /* Accumulate into a growable buffer */
     size_t cap = 128;
-    char* buf = malloc(cap);
+    char* buf = xmalloc(cap);
     size_t len = 0;
 
     for (;;) {
@@ -191,7 +191,7 @@ Value stream_read_line(Value stream) {
             }
             if (len + 1 >= cap) {
                 cap *= 2;
-                buf = realloc(buf, cap);
+                buf = xrealloc(buf, cap);
             }
             buf[len++] = (char)c;
         }
@@ -210,7 +210,7 @@ Value stream_read_line_nb(Value stream, bool* would_block) {
     if (s->closed || !s->readable) return VALUE_NIL;
 
     size_t cap = 128;
-    char* buf = malloc(cap);
+    char* buf = xmalloc(cap);
     size_t len = 0;
 
     for (;;) {
@@ -232,7 +232,7 @@ Value stream_read_line_nb(Value stream, bool* would_block) {
         while (s->read_pos < s->read_len) {
             uint8_t c = s->read_buf[s->read_pos++];
             if (c == '\n') goto done;
-            if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+            if (len + 1 >= cap) { cap *= 2; buf = xrealloc(buf, cap); }
             buf[len++] = (char)c;
         }
     }
@@ -248,7 +248,7 @@ Value stream_read_bytes(Value stream, size_t n) {
     Stream* s = (Stream*)untag_pointer(stream);
     if (s->closed || !s->readable || n == 0) return string_from_cstr("");
 
-    char* buf = malloc(n);
+    char* buf = xmalloc(n);
     size_t total = 0;
 
     while (total < n) {
@@ -277,7 +277,7 @@ Value stream_read_bytes_nb(Value stream, size_t n, bool* would_block) {
     Stream* s = (Stream*)untag_pointer(stream);
     if (s->closed || !s->readable || n == 0) return string_from_cstr("");
 
-    char* buf = malloc(n);
+    char* buf = xmalloc(n);
     size_t total = 0;
 
     while (total < n) {
@@ -378,13 +378,13 @@ Value stream_slurp(const char* path) {
 
     /* Read entire file */
     size_t cap = 4096;
-    char* buf = malloc(cap);
+    char* buf = xmalloc(cap);
     size_t len = 0;
 
     for (;;) {
         if (len + 4096 > cap) {
             cap *= 2;
-            buf = realloc(buf, cap);
+            buf = xrealloc(buf, cap);
         }
         ssize_t n = read(fd, buf + len, cap - len);
         if (n < 0) {

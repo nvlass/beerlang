@@ -56,6 +56,30 @@ void memory_print_stats(void) {
     printf("  Live objects: %zu\n", g_stats.objects_alive);
 }
 
+static void out_of_memory(size_t size) {
+    fprintf(stderr, "FATAL: Out of memory (requested %zu bytes)\n", size);
+    abort();
+}
+
+/* A zero size may legally return NULL, so ask for at least one byte */
+void* xmalloc(size_t size) {
+    void* p = malloc(size ? size : 1);
+    if (!p) out_of_memory(size);
+    return p;
+}
+
+void* xcalloc(size_t count, size_t size) {
+    void* p = calloc(count ? count : 1, size ? size : 1);
+    if (!p) out_of_memory(count * size);
+    return p;
+}
+
+void* xrealloc(void* ptr, size_t size) {
+    void* p = realloc(ptr, size ? size : 1);
+    if (!p) out_of_memory(size);
+    return p;
+}
+
 /* Allocate a new object */
 struct Object* object_alloc(uint8_t type, size_t size) {
     /* Ensure size is at least as large as Object header */
@@ -67,11 +91,7 @@ struct Object* object_alloc(uint8_t type, size_t size) {
     size_t aligned_size = (size + 7) & ~7;
 
     /* calloc returns zeroed, sufficiently aligned memory */
-    struct Object* obj = calloc(1, aligned_size);
-    if (!obj) {
-        fprintf(stderr, "FATAL: Out of memory (requested %zu bytes)\n", aligned_size);
-        abort();
-    }
+    struct Object* obj = xcalloc(1, aligned_size);
 
     /* Initialize object header */
     obj->type = type;
@@ -256,22 +276,12 @@ void memory_dump_objects(void) {
 
 /* Direct memory allocation (for internal use) */
 void* mem_alloc(size_t size) {
-    void* ptr = malloc(size);
-    if (!ptr && size > 0) {
-        fprintf(stderr, "FATAL: Out of memory (requested %zu bytes)\n", size);
-        abort();
-    }
-    return ptr;
+    return xmalloc(size);
 }
 
 void* mem_realloc(void* ptr, size_t old_size, size_t new_size) {
     (void)old_size;  /* Unused, but kept for API consistency */
-    void* new_ptr = realloc(ptr, new_size);
-    if (!new_ptr && new_size > 0) {
-        fprintf(stderr, "FATAL: Out of memory (requested %zu bytes)\n", new_size);
-        abort();
-    }
-    return new_ptr;
+    return xrealloc(ptr, new_size);
 }
 
 void mem_free(void* ptr, size_t size) {

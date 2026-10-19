@@ -108,8 +108,8 @@ static int cap_compiled_units = 0;
 static void keep_unit(CompiledCode* code, Value* constants) {
     if (n_compiled_units == cap_compiled_units) {
         cap_compiled_units = cap_compiled_units ? cap_compiled_units * 2 : 64;
-        compiled_units = realloc(compiled_units, sizeof(*compiled_units) * (size_t)cap_compiled_units);
-        constant_arrays = realloc(constant_arrays, sizeof(*constant_arrays) * (size_t)cap_compiled_units);
+        compiled_units = xrealloc(compiled_units, sizeof(*compiled_units) * (size_t)cap_compiled_units);
+        constant_arrays = xrealloc(constant_arrays, sizeof(*constant_arrays) * (size_t)cap_compiled_units);
     }
     compiled_units[n_compiled_units] = code;
     constant_arrays[n_compiled_units] = constants;
@@ -142,7 +142,7 @@ static int eval_form(const char* source, const char* filename) {
     object_release(form);
 
     int n_constants = (int)vector_length(code->constants);
-    Value* constants = malloc(n_constants * sizeof(Value));
+    Value* constants = xmalloc(n_constants * sizeof(Value));
     for (int i = 0; i < n_constants; i++) {
         constants[i] = vector_get(code->constants, i);
     }
@@ -215,7 +215,7 @@ static int cmd_eval_exprs(const char** exprs, int n) {
                 break;
             }
             int n_constants = (int)vector_length(code->constants);
-            Value* constants = malloc(n_constants * sizeof(Value));
+            Value* constants = xmalloc(n_constants * sizeof(Value));
             for (int i = 0; i < n_constants; i++) constants[i] = vector_get(code->constants, i);
             for (int i = 0; i < n_constants; i++) {
                 if (is_function(constants[i])) {
@@ -526,7 +526,7 @@ static int run_repl(void) {
             }
 
             int n_constants = (int)vector_length(code->constants);
-            Value* constants = malloc(n_constants * sizeof(Value));
+            Value* constants = xmalloc(n_constants * sizeof(Value));
             for (int i = 0; i < n_constants; i++) {
                 constants[i] = vector_get(code->constants, i);
             }

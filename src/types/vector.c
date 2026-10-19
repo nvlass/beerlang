@@ -694,7 +694,7 @@ Value vector_to_list(Value vec) {
     Vector* v = as_vec(vec);
     if (v->cnt == 0) return list_from_array(NULL, 0);
 
-    Value* tmp = malloc(v->cnt * sizeof(Value));
+    Value* tmp = xmalloc(v->cnt * sizeof(Value));
     VecIter it;
     vec_iter_init(&it, v, 0);
     size_t n = 0;

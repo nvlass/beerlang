@@ -77,7 +77,7 @@ static int beer_run_source(BeerState* B, const char* src,
 
         /* Wire up function constants (same pattern as native_eval in core.c) */
         int n_constants = (int)vector_length(code->constants);
-        Value* constants = malloc((size_t)n_constants * sizeof(Value));
+        Value* constants = xmalloc((size_t)n_constants * sizeof(Value));
         for (int i = 0; i < n_constants; i++) {
             constants[i] = vector_get(code->constants, i);
             if (is_pointer(constants[i])) object_retain(constants[i]);
@@ -286,7 +286,7 @@ BeerValue beer_call(BeerState* B, BeerValue fn, int argc, BeerValue* argv) {
 
     /* We need fn + args as constants; build bytecode inline */
     int n_constants = argc + 1;   /* argv[0..argc-1] + fn */
-    Value* constants = malloc((size_t)(n_constants) * sizeof(Value));
+    Value* constants = xmalloc((size_t)(n_constants) * sizeof(Value));
     for (int i = 0; i < argc; i++) constants[i] = argv[i];
     constants[argc] = fn;
     /* Keep fn and args alive for the duration of the call (released below) */
@@ -297,7 +297,7 @@ BeerValue beer_call(BeerState* B, BeerValue fn, int argc, BeerValue* argv) {
      * OP_CALL       = 0x63 (3 bytes: opcode + uint16 argc)
      * OP_HALT       = 0x6F (1 byte) */
     size_t code_size = (size_t)(n_constants) * 5 + 3 + 1;
-    uint8_t* code = malloc(code_size);
+    uint8_t* code = xmalloc(code_size);
     size_t p = 0;
     for (int i = 0; i < n_constants; i++) {
         code[p++] = 0x13;  /* OP_PUSH_CONST — 4-byte LITTLE-ENDIAN index */

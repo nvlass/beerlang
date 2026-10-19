@@ -180,7 +180,7 @@ void function_set_arities(Value fn, const FnArity* arities, uint16_t n) {
     assert(is_function(fn) && n > 0);
     Function* f = (Function*)untag_pointer(fn);
     free(f->arities);
-    f->arities = malloc(sizeof(FnArity) * n);
+    f->arities = xmalloc(sizeof(FnArity) * n);
     memcpy(f->arities, arities, sizeof(FnArity) * n);
     f->n_arities = n;
     f->arity = arities[0].arity;

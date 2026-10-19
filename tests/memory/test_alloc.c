@@ -1,6 +1,8 @@
 /* Test memory management - allocator and reference counting */
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "test.h"
 #include "beerlang.h"
 #include "memory.h"
@@ -215,6 +217,28 @@ TEST(direct_memory_allocation) {
     return NULL;
 }
 
+/* xmalloc/xcalloc/xrealloc never return NULL, even for size 0 */
+TEST(checked_allocation) {
+    char* a = xmalloc(0);
+    ASSERT(a != NULL, "xmalloc(0) should return a pointer");
+    free(a);
+
+    unsigned char* z = xcalloc(16, 4);
+    int all_zero = 1;
+    for (int i = 0; i < 64; i++) if (z[i]) all_zero = 0;
+    ASSERT(all_zero, "xcalloc should zero the block");
+    free(z);
+
+    char* b = xmalloc(4);
+    memcpy(b, "abc", 4);
+    b = xrealloc(b, 4096);
+    ASSERT(strcmp(b, "abc") == 0, "xrealloc should keep the contents");
+    b = xrealloc(b, 0);
+    ASSERT(b != NULL, "xrealloc(p, 0) should return a pointer");
+    free(b);
+    return NULL;
+}
+
 /* Test large object allocation */
 TEST(large_object_allocation) {
     memory_init();
@@ -243,6 +267,7 @@ static const char* all_tests(void) {
     RUN_TEST(multiple_object_types);
     RUN_TEST(direct_memory_allocation);
     RUN_TEST(large_object_allocation);
+    RUN_TEST(checked_allocation);
     return NULL;
 }
 

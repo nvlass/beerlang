@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "tarindex.h"
+#include "memory.h"
 
 TarIndex global_tar_index;
 
@@ -41,7 +42,7 @@ static void tar_index_add(TarIndex* idx, const char* ns_path,
                            size_t file_size) {
     if (idx->count >= idx->capacity) {
         int new_cap = idx->capacity ? idx->capacity * 2 : 32;
-        idx->entries = realloc(idx->entries, (size_t)new_cap * sizeof(TarEntry));
+        idx->entries = xrealloc(idx->entries, (size_t)new_cap * sizeof(TarEntry));
         idx->capacity = new_cap;
     }
     TarEntry* e = &idx->entries[idx->count++];

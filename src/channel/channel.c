@@ -51,7 +51,7 @@ Value channel_new(int capacity) {
     ch->closed = false;
 
     if (capacity > 0) {
-        ch->buffer = malloc(sizeof(Value) * (size_t)capacity);
+        ch->buffer = xmalloc(sizeof(Value) * (size_t)capacity);
     } else {
         ch->buffer = NULL;
     }

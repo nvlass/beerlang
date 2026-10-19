@@ -55,7 +55,7 @@ static void buf_reserve(Buf* b, size_t extra) {
     if (b->len + extra <= b->cap) return;
     size_t cap = b->cap ? b->cap : 256;
     while (cap < b->len + extra) cap *= 2;
-    b->data = realloc(b->data, cap);
+    b->data = xrealloc(b->data, cap);
     b->cap = cap;
 }
 
@@ -235,7 +235,7 @@ static Value parse_number(Parser* ps) {
             tmp[n] = '\0';
             return make_float(strtod(tmp, NULL));
         }
-        char* big = malloc(n + 1);
+        char* big = xmalloc(n + 1);
         memcpy(big, s, n);
         big[n] = '\0';
         double d = strtod(big, NULL);
@@ -250,7 +250,7 @@ static Value parse_number(Parser* ps) {
         return make_fixnum(*s == '-' ? -v : v);
     }
 
-    char* tmp = malloc(n + 1);
+    char* tmp = xmalloc(n + 1);
     memcpy(tmp, s, n);
     tmp[n] = '\0';
     Value big = bigint_from_string(tmp, 10);

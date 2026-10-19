@@ -58,10 +58,10 @@ static void keyword_destructor(struct Object* obj) {
 void symbol_init(void) {
     if (g_symbol_table == NULL) {
         g_symbol_table_size = INITIAL_TABLE_SIZE;
-        g_symbol_table = calloc(g_symbol_table_size, sizeof(InternEntry*));
+        g_symbol_table = xcalloc(g_symbol_table_size, sizeof(InternEntry*));
 
         g_keyword_table_size = INITIAL_TABLE_SIZE;
-        g_keyword_table = calloc(g_keyword_table_size, sizeof(InternEntry*));
+        g_keyword_table = xcalloc(g_keyword_table_size, sizeof(InternEntry*));
 
         object_register_destructor(TYPE_SYMBOL, symbol_destructor);
         object_register_destructor(TYPE_KEYWORD, keyword_destructor);
@@ -175,7 +175,7 @@ static Value intern_value(uint8_t type, InternEntry*** table, size_t* table_size
     object_make_immortal(value);
 
     /* Add to table */
-    entry = malloc(sizeof(InternEntry));
+    entry = xmalloc(sizeof(InternEntry));
     entry->value = value;
     entry->next = (*table)[index];
     (*table)[index] = entry;
