@@ -311,6 +311,8 @@ installs a map:
 | `interrupt!` | Interrupt a given task: it unwinds with `{:type :interrupt}` (skips `catch`, runs `finally`), woken if blocked; `false` if it already finished | `(interrupt! t)` |
 | `current-task` | The running task (nil outside one) | `(current-task)` |
 | `ns-publics` | List symbols defined in a namespace | `(ns-publics 'beer.core)` |
+| `all-ns` | Names (symbols) of all namespaces, sorted | `(all-ns)` → `(beer.core ... user)` |
+| `find-ns` | The name if that namespace exists, else `nil` | `(find-ns 'beer.string)` → `beer.string` |
 
 ### Concurrency
 
@@ -344,17 +346,19 @@ Functions and vars can carry metadata (arbitrary maps).
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `meta` | Get metadata from a symbol's var or a function | `(meta 'foo)` → `{:doc "..."}` |
+| `meta` | Get metadata from a symbol's var or a function; qualified and aliased symbols resolve like in code | `(meta 'foo)` → `{:arglists ([x]) :doc "..."}`, `(meta 'str/blank?)` |
 | `with-meta` | Return function with new metadata | `(with-meta f {:tag "x"})` |
 | `alter-meta!` | Apply fn to var's current metadata | `(alter-meta! 'foo assoc :added true)` |
 | `doc` | Print documentation for a symbol (macro) | `(doc map)` |
 
-`defn` and `defmacro` support an optional docstring after the name:
+`defn` and `defmacro` record `:arglists` (one parameter vector per arity) and
+support an optional docstring after the name; `doc` prints both:
 ```clojure
 (defn greet "Greet a person by name." [name] (str "Hello, " name))
 (doc greet)
 ;; -------------------------
 ;; greet
+;; ([name])
 ;;   Greet a person by name.
 ;; -------------------------
 ```

@@ -6,14 +6,16 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 677 (`bash tests/smoke_test.sh`)
+- REPL smoke tests: 687 (`bash tests/smoke_test.sh`)
 - **Last Updated:** 2026-10-19
 
 ## Open Items at a Glance
 
 Small / concrete:
-- beeros requests still open: `beer run app.tar`, tar index from memory,
-  `*fs*` for `open`/`beer.tar` — see "beeros requests" below
+- beeros requests still open: docs (`:doc`/`:arglists`) on natives (#12);
+  `beer run app.tar`
+  (host CLI); `*fs*` for `open`/`beer.tar` (not needed by beeros now) —
+  see "beeros requests" below
 - `::kw` isn't auto-resolved (reads as a keyword named `:kw`). Resolving
   at read time needs `load`, the file runner and `beerc` to read
   form-by-form instead of `reader_read_all` up front, or the file's
@@ -468,9 +470,11 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
      other keys) from it.
      The project file doubles as the package description; no new
      manifest format.
-   - Index a tar from memory: `tar_index_add_buffer(idx, name, data,
-     len)` or a native `(beer.tar/index! bytebuffer)`, since beeros
-     reads the tar from its own filesystem, not through `FILE*`.
+   - ~~Index a tar from memory~~: not needed by beeros any more (checked
+     2026-10-19). beeros indexes tars itself (`beer.ustar/index` over a
+     ByteBuffer, `tar-open` in its `lib/fs.beer`), mounts them as
+     directories, and `beer.pkg/run` reads `:main` from `beer.edn`.
+     `beer run app.tar` is still wanted for the host CLI.
    - ~~Entries stored as `src/foo/core.beer`~~: fixed, see above.
 
 6. **Small ones.** `(def x "doc" v)` and the core.beer NOTE are done (see
@@ -626,6 +630,40 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
     `BEER_NET=0` would keep it that way. beeros plans to use the
     registry as its "named channels" (instead of Unix sockets: one image,
     so a name -> channel map is enough).
+
+12. **Introspection for `beer.help` (2026-10-19, from beeros's TODO).**
+    Done (2026-10-19): `all-ns` (sorted name symbols), `find-ns` (the
+    name or nil), `meta`/`alter-meta!` on qualified and aliased symbols
+    (aliases of the current ns, like unqualified lookup), `:arglists` from
+    `defn` and `defmacro` (so every defn now calls `alter-meta!` at load:
+    ~0.2 ms on a 4 ms startup), `doc` prints the arglists. Still open:
+    docs on natives (below). Original request:
+    beeros's browsable docs (`beer.help`: `describe`, `apropos`,
+    `namespaces`, F1 in its WM) work around three gaps:
+    - **`all-ns`** (and `find-ns`): neither exists. beer.help guesses the
+      namespace list from `*loaded-libs*` plus a hand-kept list of native
+      namespaces. `ns-publics` exists.
+    - **Qualified `meta`**: `(meta 'beer.string/replace)` returns nil
+      without an error: `resolve_symbol_to_var` (core.c) looks the name up
+      in the current namespace and beer.core and ignores the qualifier.
+      beer.help binds `*ns*` around the call instead. Should resolve like
+      the compiler (home ns aliases, then the namespace), and `alter-meta!`
+      the same.
+    - **`:arglists`**: var metadata holds only `:doc`. `defn`/`defmacro`
+      should store the parameter vectors (one per arity), as Clojure does.
+    - Also: natives have no docstrings (`(meta 'map)` is nil), so
+      `beer.core`, `beer.string`, `beer.gfx` (beeros) show nothing.
+      Needs a way for `register_native` callers to attach `:doc` (and
+      `:arglists`), or docs set from a .beer file after registration.
+    beeros also lists a native-namespace docs pass and fn docstrings in
+    its own `lib/*.beer`; those are on its side.
+
+Not needed from beerlang after all (checked against beeros 2026-10-19):
+user-defined streams. beeros's terminal and beermacs's eval output use
+`beer.tty/capture-stream`, a stream on an fd that beeros's own `write()`
+routes into a buffer; nothing there calls `open` on its files. A
+fn-backed stream type would still give the host `with-out-str` and nREPL
+`:out`, and would replace the fake fds; see "Open Items at a Glance".
 
 Related: `::kw` resolution needs form-by-form reading in `load`; a
 `load-string` built on `core_load_source` inherits that.

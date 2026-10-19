@@ -1,6 +1,6 @@
 # Beerlang Implementation Progress
 
-**Last Updated:** 2026-10-17
+**Last Updated:** 2026-10-19
 
 ## Current Status
 
@@ -9,8 +9,8 @@
 Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperative multitasking, async I/O, actor system, and comprehensive standard library. The language supports interactive REPL-driven development, project tooling, and library distribution.
 
 **Test suite: all passing (100% pass rate)**
-- 329 unit tests (26 suites)
-- 671 REPL smoke tests
+- 330 unit tests (26 suites)
+- 687 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -113,7 +113,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
   - Atoms: `atom`, `deref`, `reset!`, `swap!`, `compare-and-set!`
   - Metadata: `meta`, `with-meta`, `alter-meta!`
   - Bytecode: `disasm`, `asm`
-  - Namespace: `in-ns`, `load-string`, `set-macro!`, `macroexpand-1`, `macroexpand`, `ns-publics`
+  - Namespace: `in-ns`, `load-string`, `set-macro!`, `macroexpand-1`, `macroexpand`, `ns-publics`, `all-ns`, `find-ns`
 - **Loading in beerlang** (`lib/core.beer`): `require` (Clojure vector specs
   or flat options, several per call), `load-file`/`load`, `slurp`, `spit`, on
   small natives (`__file-read`, `__tar-read`, `__alias!`, `__refer!`, ...).
@@ -142,6 +142,9 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - Exception handler stack grows on demand (was 16 nested `try`s);
   `offer!`/`poll!` non-blocking channel put/take; freeing a long list is
   iterative (a 1M-element list crashed the process)
+- Allocation: `xmalloc`/`xcalloc`/`xrealloc` (`include/memory.h`) abort
+  with "Out of memory (requested N bytes)" like `object_alloc`; used
+  wherever a result was unchecked (~80 sites)
 - Embedding: `beerlang.mk` (sources + `BEER_PLATFORM` posix/none + feature
   switches) shared by the host, WASM and embedders; `src/platform/none/`
   stub reactor; `core_load_source_ns`; docs/EMBEDDING.md
@@ -194,11 +197,17 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - `hive/ask` / `hive/reply` — request-reply pattern with envelope wrapping
 - `hive/register` / `hive/whereis` — actor name registry
 - `hive/supervisor` — supervisor trees with `:one-for-one` strategy
+- Local actors need no networking: the node layer (`beer.hive.node`,
+  `beer.tcp`, `beer.crypto`) loads on first remote use, so `beer.hive`
+  loads on `BEER_NET=0` / `BEER_PLATFORM=none` builds (beeros, WASM)
 
 ### Metadata & Docstrings
-- `meta`, `with-meta`, `alter-meta!` natives for var/function metadata
-- `defn` and `defmacro` support optional docstrings
-- `doc` macro for printing documentation
+- `meta`, `with-meta`, `alter-meta!` natives for var/function metadata;
+  `meta`/`alter-meta!` take qualified and aliased symbols (`'str/blank?`)
+- `defn` and `defmacro` support optional docstrings and record `:arglists`
+  (one parameter vector per arity)
+- `doc` macro for printing documentation (name, arglists, docstring)
+- `all-ns` / `find-ns` (namespace names as symbols), `ns-publics`
 - `__print-doc` native for formatted doc output
 
 ### Standard Library (lib/core.beer)
@@ -278,7 +287,7 @@ beerlang/
 │       ├── hive.beer   # Actor system
 │       └── tools.beer  # Build tooling
 ├── tests/
-│   ├── smoke_test.sh  # 397 end-to-end REPL tests
+│   ├── smoke_test.sh  # 687 end-to-end REPL tests
 │   └── ...            # Unit test directories (vm, compiler, types, etc.)
 ├── docs/
 │   ├── API.md         # API reference

@@ -22,6 +22,7 @@
 ; Single arity:  (defn name [params] body...)
 ; Multi-arity:   (defn name ([params1] body1...) ([params2] body2...) ...)
 ; Optional docstring: (defn name "docstring" [params] body...)
+; The var's meta gets :arglists, one parameter vector per arity, and :doc.
 (defmacro defn [name & fdecl]
   (let* [has-doc (string? (first fdecl))
          docstring (if has-doc (first fdecl) nil)
@@ -30,12 +31,20 @@
          ; fn and alter-meta! want the symbol
          sym (if (list? name) (first (rest (rest name))) name)
          ; fn handles both [params] body... and ([params] body...) clauses
-         base (list (quote def) name (cons (quote fn) (cons sym fdecl)))]
-    (if has-doc
-      (list (quote do) base
-            (list (quote alter-meta!) (list (quote quote) sym) (quote assoc) :doc docstring)
-            sym)
-      base)))
+         base (list (quote def) name (cons (quote fn) (cons sym fdecl)))
+         ; map isn't defined yet here
+         arglists (if (vector? (first fdecl))
+                    (list (first fdecl))
+                    ((fn clause-params [cs]
+                       (if (= (count cs) 0)
+                         nil
+                         (cons (first (first cs)) (clause-params (rest cs)))))
+                     fdecl))
+         meta-args (list :arglists (list (quote quote) arglists))
+         meta-args (if has-doc (cons :doc (cons docstring meta-args)) meta-args)]
+    (list (quote do) base
+          (cons (quote alter-meta!) (cons (list (quote quote) sym) (cons (quote assoc) meta-args)))
+          sym)))
 
 ; doc: print documentation for a symbol
 (defmacro doc [sym]

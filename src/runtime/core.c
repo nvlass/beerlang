@@ -3282,6 +3282,8 @@ void core_register_predicates(void) {
 
 /* Forward declaration — defined after streams section */
 Value native_ns_publics(VM* vm, int argc, Value* argv);
+static Value native_all_ns(VM* vm, int argc, Value* argv);
+static Value native_find_ns(VM* vm, int argc, Value* argv);
 
 void core_register_utility(void) {
     Namespace* core_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.core");
@@ -3327,6 +3329,8 @@ void core_register_utility(void) {
     register_native(core_ns, "asm", native_asm);
     register_native(core_ns, "subs", native_subs);
     register_native(core_ns, "ns-publics", native_ns_publics);
+    register_native(core_ns, "all-ns", native_all_ns);
+    register_native(core_ns, "find-ns", native_find_ns);
 
     /* Initialize *loaded-libs* as empty map */
     Value loaded_sym = symbol_intern("*loaded-libs*");
@@ -4149,10 +4153,24 @@ void core_register_atoms(void) {
  * Metadata: meta, with-meta, alter-meta!, __print-doc
  * ================================================================= */
 
-/* Helper: resolve a symbol to its Var (current ns, then beer.core) */
+/* Helper: resolve a symbol to its Var. Unqualified: current ns, then
+ * beer.core. Qualified: the current ns's aliases, then the namespace. */
 static Var* resolve_symbol_to_var(VM* vm __attribute__((unused)), Value sym) {
     Namespace* ns = namespace_registry_current(global_namespace_registry);
     if (!ns) return NULL;
+    if (symbol_has_namespace(sym)) {
+        const char* full = symbol_str(sym);
+        const char* slash = strchr(full, '/');
+        char ns_name[256];
+        size_t ns_len = slash ? (size_t)(slash - full) : 0;
+        if (!slash || ns_len >= sizeof(ns_name)) return NULL;
+        memcpy(ns_name, full, ns_len);
+        ns_name[ns_len] = '\0';
+        const char* target = namespace_resolve_alias(ns, symbol_intern(ns_name));
+        Namespace* target_ns = namespace_registry_get(global_namespace_registry,
+                                                      target ? target : ns_name);
+        return target_ns ? namespace_lookup(target_ns, symbol_intern(slash + 1)) : NULL;
+    }
     Var* var = namespace_lookup(ns, sym);
     if (var) return var;
     Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
@@ -4248,6 +4266,15 @@ static Value native___print_doc(VM* vm, int argc, Value* argv) {
     stream_write_string(out, "\n", 1);
 
     if (is_pointer(meta_map) && object_type(meta_map) == TYPE_HASHMAP) {
+        Value arglists = hashmap_get(meta_map, keyword_intern("arglists"));
+        if (!is_nil(arglists)) {
+            size_t cap = 64;
+            char* buf = xmalloc(cap);
+            size_t len = value_sprint_readable(arglists, &buf, &cap, 0);
+            stream_write_string(out, buf, len);
+            stream_write_string(out, "\n", 1);
+            free(buf);
+        }
         Value doc_key = keyword_intern("doc");
         Value doc_val = hashmap_get(meta_map, doc_key);
         if (!is_nil(doc_val) && is_string(doc_val)) {
@@ -4689,6 +4716,44 @@ Value native_ns_publics(VM* vm, int argc, Value* argv) {
     Value result = vector_to_list(keys_vec);
     object_release(keys_vec);
     return result;
+}
+
+static int cmp_cstr(const void* a, const void* b) {
+    return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
+
+/* (all-ns) => sorted list of the names (symbols) of all namespaces */
+static Value native_all_ns(VM* vm, int argc, Value* argv) {
+    (void)argv;
+    if (argc != 0) {
+        vm_error(vm, "all-ns: takes no arguments");
+        return VALUE_NIL;
+    }
+    Value names = hashmap_keys(global_namespace_registry->namespaces);
+    size_t n = vector_length(names);
+    const char** strs = xmalloc((n ? n : 1) * sizeof(char*));
+    for (size_t i = 0; i < n; i++) strs[i] = string_cstr(vector_get(names, i));
+    qsort(strs, n, sizeof(char*), cmp_cstr);
+    Value result = VALUE_NIL;
+    for (size_t i = n; i > 0; i--) {
+        Value next = cons(symbol_intern(strs[i - 1]), result);
+        if (is_pointer(result)) object_release(result);
+        result = next;
+    }
+    free(strs);
+    object_release(names);
+    return result;
+}
+
+/* (find-ns 'foo) => 'foo if that namespace exists, else nil */
+static Value native_find_ns(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_pointer(argv[0]) || object_type(argv[0]) != TYPE_SYMBOL) {
+        vm_error(vm, "find-ns: requires a symbol");
+        return VALUE_NIL;
+    }
+    if (!namespace_registry_get(global_namespace_registry, symbol_str(argv[0])))
+        return VALUE_NIL;
+    return argv[0];
 }
 
 /* =================================================================

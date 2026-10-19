@@ -1252,32 +1252,35 @@ static void compile_defmacro(Compiler* c, Value form) {
     /* Call set-macro! with 1 arg */
     emit_uint16(c, OP_CALL, 1);
 
-    /* If docstring present, call (alter-meta! 'name assoc :doc docstring) */
-    if (!is_nil(docstring)) {
-        emit_op(c, OP_POP);  /* discard set-macro! return */
-
-        /* Push args: name-symbol, assoc, :doc, docstring */
-        emit_uint32(c, OP_PUSH_CONST, (uint32_t)sym_const_idx);
-
-        Value assoc_sym = symbol_intern("assoc");
-        int assoc_idx = constant_pool_add(c->constants, assoc_sym);
-        emit_uint16(c, OP_LOAD_VAR, (uint16_t)assoc_idx);
-
-        Value doc_kw = keyword_intern("doc");
-        int doc_kw_idx = constant_pool_add(c->constants, doc_kw);
-        emit_uint32(c, OP_PUSH_CONST, (uint32_t)doc_kw_idx);
-
-        int doc_str_idx = constant_pool_add(c->constants, docstring);
-        emit_uint32(c, OP_PUSH_CONST, (uint32_t)doc_str_idx);
-
-        /* Load alter-meta! */
-        Value alter_meta_sym = symbol_intern("alter-meta!");
-        int alter_meta_idx = constant_pool_add(c->constants, alter_meta_sym);
-        emit_uint16(c, OP_LOAD_VAR, (uint16_t)alter_meta_idx);
-
-        /* Call alter-meta! with 4 args */
-        emit_uint16(c, OP_CALL, 4);
+    /* (alter-meta! 'name assoc [:doc docstring] :arglists '(params...)),
+     * one parameter vector per arity, as defn does */
+    emit_op(c, OP_POP);  /* discard set-macro! return */
+    Value fdecl = is_nil(docstring) ? rest_after_name : cdr(rest_after_name);
+    Value arglists;
+    if (is_cons(fdecl) && is_vector(car(fdecl))) {
+        arglists = cons(car(fdecl), VALUE_NIL);
+    } else {
+        int64_t n = list_length(fdecl);
+        Value* params = xmalloc(sizeof(Value) * (size_t)(n > 0 ? n : 1));
+        int64_t k = 0;
+        for (Value p = fdecl; is_cons(p); p = cdr(p))
+            if (is_cons(car(p))) params[k++] = car(car(p));
+        arglists = list_from_array(params, (int)k);
+        free(params);
     }
+    Value quote_items[2] = { symbol_intern("quote"), name };
+    Value quoted_name = list_from_array(quote_items, 2);
+    Value quote_al_items[2] = { symbol_intern("quote"), arglists };
+    Value quoted_al = list_from_array(quote_al_items, 2);
+    Value meta_items[7] = { symbol_intern("alter-meta!"), quoted_name, symbol_intern("assoc"),
+                            keyword_intern("arglists"), quoted_al,
+                            keyword_intern("doc"), docstring };
+    Value meta_form = list_from_array(meta_items, is_nil(docstring) ? 5 : 7);
+    compile_expr(c, meta_form, false);
+    object_release(meta_form);
+    object_release(quoted_al);
+    object_release(quoted_name);
+    object_release(arglists);
 
     /* Discard last return, load the defined var as result */
     emit_op(c, OP_POP);

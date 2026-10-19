@@ -1236,9 +1236,32 @@ check '(meta (quote +))' 'nil'
 check_multi '(defn foo "a docstring" [x] x)
 (:doc (meta (quote foo)))' '"a docstring"' "defn docstring"
 
-# defn without docstring => nil meta
+# defn without docstring => only :arglists
 check_multi '(defn bar [x] x)
-(meta (quote bar))' 'nil' "defn no docstring meta is nil"
+(meta (quote bar))' '{:arglists ([x])}' "defn no docstring meta has only arglists"
+
+# :arglists: one vector per arity, defn and defmacro
+check_multi '(defn ar ([x] x) ([x y & more] y))
+(:arglists (meta (quote ar)))' '([x] [x y & more])' "defn multi-arity arglists"
+check_multi '(defmacro am "m" [t & body] t)
+[(:arglists (meta (quote am))) (:doc (meta (quote am)))]' '[([t & body]) "m"]' "defmacro arglists and doc"
+check_multi '(defmacro am2 ([a] a) ([a b] b))
+(:arglists (meta (quote am2)))' '([a] [a b])' "defmacro multi-arity arglists"
+
+# meta / alter-meta! on qualified and aliased symbols
+check_multi '(defn qf "qdoc" [a] a)
+(:doc (meta (quote user/qf)))' '"qdoc"' "meta on a qualified symbol"
+check_multi '(require (quote [beer.string :as bs]))
+[(:arglists (meta (quote bs/blank?))) (= (meta (quote bs/blank?)) (meta (quote beer.string/blank?)))]' '[([s]) true]' "meta through an alias"
+check '(meta (quote no.such.ns/x))'                         'nil'
+check_multi '(defn qa [] 1)
+(alter-meta! (quote user/qa) assoc :added "0.2")
+(:added (meta (quote qa)))' '"0.2"' "alter-meta! on a qualified symbol"
+
+# all-ns / find-ns
+check '(boolean (some (fn [n] (= n (quote beer.core))) (all-ns)))' 'true'
+check '(symbol? (first (all-ns)))'                          'true'
+check '[(find-ns (quote beer.core)) (find-ns (quote no.such.ns))]' '[beer.core nil]'
 
 # alter-meta! on a var
 check_multi '(defn baz [x] x)
