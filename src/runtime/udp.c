@@ -17,6 +17,7 @@
 #include "stream.h"
 #include "symbol.h"
 #include "namespace.h"
+#include "docs.h"
 #include "memory.h"
 #include "native.h"
 #include "scheduler.h"
@@ -283,7 +284,16 @@ static void register_native_in_ns(Namespace* ns, const char* name, NativeFn fn) 
     object_release(fn_val);
 }
 
+static const NativeDoc udp_docs[] = {
+    { "udp-socket", "([])", "An unbound UDP socket, for sending. Close it with close." },
+    { "udp-bind", "([port] [host port])", "A UDP socket bound to port (on host, default all interfaces), for receiving." },
+    { "udp-send", "([sock host port data])", "Sends the string data as one datagram to host:port." },
+    { "udp-recv", "([sock max-bytes])", "Waits for a datagram (other tasks keep running): {:data s :host h :port p}, or nil once the socket is closed." },
+    { "udp-local-port", "([sock])", "The local port sock is bound to." },
+};
+
 void core_register_udp(void) {
+    docs_register("beer.udp", udp_docs, sizeof(udp_docs) / sizeof(udp_docs[0]));
     Namespace* udp_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.udp");
     if (!udp_ns) return;
     register_native_in_ns(udp_ns, "udp-socket",     native_udp_socket);

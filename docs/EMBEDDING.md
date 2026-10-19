@@ -101,6 +101,20 @@ instead of running it itself: `vm_request_call(vm, fn, argc, args)`, then
 return `VALUE_NIL` (that is how `apply` works). Don't run beerlang code in
 a VM of your own from a native: it can't yield, so it stalls every task.
 
+Give natives docs (for `doc`, `meta`, `:arglists`) with a static table;
+nothing is built until `meta` asks for a var's metadata:
+
+```c
+#include "docs.h"
+static const NativeDoc my_docs[] = {
+    { "my-native", "([x] [x y])", "What it does." },
+};
+docs_register("my.ns", my_docs, sizeof(my_docs) / sizeof(my_docs[0]));
+```
+
+A namespace that only has natives needs no `.beer` file: `(require 'my.ns)`
+succeeds once it has vars.
+
 **File system: `beer.core/*fs*`.** `slurp`, `spit`, `load-file`/`load` and
 `require`'s `*load-path*` search go through it when it is set:
 

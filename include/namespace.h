@@ -22,6 +22,7 @@ typedef struct NamespaceRegistry NamespaceRegistry;
 struct Var {
     struct Object header;  /* Object header (type = TYPE_VAR) */
     Value name;      /* Symbol */
+    Value ns;        /* Symbol naming the home namespace (set by namespace_define) */
     Value value;     /* Current value */
     bool is_macro;   /* Is this a macro? */
     bool is_dynamic; /* ^:dynamic: binding gives it task-local values */
@@ -115,6 +116,15 @@ Namespace* namespace_registry_current(NamespaceRegistry* reg);
 
 /* Get beer.core namespace */
 Namespace* namespace_registry_get_core(NamespaceRegistry* reg);
+
+/* The var sym names as code written in home sees it: unqualified -> home,
+ * then beer.core; qualified -> home's aliases, then the namespace. NULL if
+ * there is none. */
+Var* namespace_resolve_var(Namespace* home, Value sym);
+
+static inline bool is_var(Value v) {
+    return is_pointer(v) && object_type(v) == TYPE_VAR;
+}
 
 /* Global registry instance (initialized once) */
 extern NamespaceRegistry* global_namespace_registry;

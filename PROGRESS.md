@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 330 unit tests (26 suites)
-- 687 REPL smoke tests
+- 733 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -209,6 +209,16 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - `doc` macro for printing documentation (name, arglists, docstring)
 - `all-ns` / `find-ns` (namespace names as symbols), `ns-publics`
 - `__print-doc` native for formatted doc output
+- `with-out-str` (string streams, `STREAM_STRING`); the EDN nREPL sends `:out`
+- Clojure semantics: `(str nil)` is `""`, `and` returns the first falsy value; `dotimes`
+- Map destructuring (`:keys`/`:strs`/`:syms`/`:or`/`:as`, `{x :x}`, keyword args
+  via `& {:keys [...]}`) in `let`/`fn`/`loop`/`doseq`; `loop` destructures
+- Maps are seqable (`[k v]` entries) and `seq` exists; `doseq` destructures
+- `var` / `#'sym` (compile-time resolution), callable and derefable vars,
+  `var?`, `#'ns/name` printing
+- Natives documented through C doc tables (`include/docs.h`, `docs_register`),
+  built into meta maps on first `meta`; every public `beer.core` var and the
+  library namespaces have `:doc` and `:arglists`
 
 ### Standard Library (lib/core.beer)
 - **Macros**: `defn`, `doc`, `when`, `and`, `or`, `cond`, `->`, `->>`, `let`, `with-open`, `doseq`, `ns`, `deftest`, `is`, `testing`
@@ -287,7 +297,7 @@ beerlang/
 │       ├── hive.beer   # Actor system
 │       └── tools.beer  # Build tooling
 ├── tests/
-│   ├── smoke_test.sh  # 687 end-to-end REPL tests
+│   ├── smoke_test.sh  # 733 end-to-end REPL tests
 │   └── ...            # Unit test directories (vm, compiler, types, etc.)
 ├── docs/
 │   ├── API.md         # API reference

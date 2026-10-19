@@ -55,6 +55,7 @@
 #include "bigint.h"
 #include "function.h"
 #include "namespace.h"
+#include "docs.h"
 #include "native.h"
 #include "reader.h"
 #include "compiler.h"
@@ -163,6 +164,7 @@ static void write_bytes_prefixed(FILE* f, const char* data, size_t len) {
 #define BEERC_BIGINT   0x13
 #define BEERC_FUNCTION 0x20
 #define BEERC_MULTI_FUNCTION 0x21   /* + u16 n, n x (i32 arity, u32 offset) */
+#define BEERC_VAR      0x22         /* + qualified name: (var ns/name) */
 
 static int write_constant(FILE* f, Value v) {
     switch (v.tag) {
@@ -237,6 +239,15 @@ static int write_constant(FILE* f, Value v) {
                     write_u32le(f, fobj->arities[i].code_offset);
                 }
             }
+            return 0;
+        }
+        if (t == TYPE_VAR) {
+            const Var* var = (const Var*)untag_pointer(v);
+            const char* nsn = is_nil(var->ns) ? "" : symbol_str(var->ns);
+            const char* nm = symbol_str(var->name);
+            write_u8(f, BEERC_VAR);
+            write_bytes_prefixed(f, nsn, strlen(nsn));
+            write_bytes_prefixed(f, nm, strlen(nm));
             return 0;
         }
         /* Unserializable heap type (e.g. vector, cons) — store as nil.
@@ -541,7 +552,17 @@ static void register_native_in(Namespace* ns, const char* name, NativeFn fn) {
     object_release(fn_val);
 }
 
+static const NativeDoc aot_docs[] = {
+    { "compile-file!", "([path])", "Compiles the .beer file at path and writes the .beerc next to it." },
+    { "read-header", "([path])", "The header of a .beerc file: {:mtime :crc32 :n-forms}, or nil." },
+    { "file-mtime", "([path])", "The file's modification time in nanoseconds, or nil." },
+    { "crc32", "([path])", "The CRC-32 of the file's contents, or nil." },
+    { "file-exists?", "([path])", "True if a file exists at path." },
+    { "list-dir", "([path])", "A vector of the directory's entry names, or nil." },
+};
+
 void core_register_aot(void) {
+    docs_register("beer.beerc", aot_docs, sizeof(aot_docs) / sizeof(aot_docs[0]));
     Namespace* ns = namespace_registry_get_or_create(global_namespace_registry, "beer.beerc");
     if (!ns) return;
     register_native_in(ns, "file-mtime",    native_file_mtime);

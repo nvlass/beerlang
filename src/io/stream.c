@@ -19,7 +19,7 @@ static void stream_destructor(struct Object* obj) {
     Stream* s = (Stream*)obj;
     if (!s->closed) {
         /* Flush write buffer */
-        if (s->write_buf && s->write_len > 0 && s->writable) {
+        if (s->write_buf && s->write_len > 0 && s->writable && s->kind != STREAM_STRING) {
             size_t written = 0;
             while (written < s->write_len) {
                 ssize_t n = write(s->fd, s->write_buf + written, s->write_len - written);
@@ -53,17 +53,26 @@ Value stream_from_fd(int fd, bool readable, bool writable, bool owns_fd, StreamK
     s->closed = false;
     s->owns_fd = owns_fd;
     s->nonblocking = false;
-    s->read_buf = readable ? malloc(STREAM_BUF_SIZE) : NULL;
+    s->read_buf = readable ? xmalloc(STREAM_BUF_SIZE) : NULL;
     s->read_pos = 0;
     s->read_len = 0;
     s->read_cap = readable ? STREAM_BUF_SIZE : 0;
     s->read_timeout_ms = 0;
-    s->write_buf = writable ? malloc(STREAM_BUF_SIZE) : NULL;
+    s->write_buf = writable ? xmalloc(STREAM_BUF_SIZE) : NULL;
     s->write_len = 0;
     s->write_flush_pos = 0;
     s->write_cap = writable ? STREAM_BUF_SIZE : 0;
     s->line_buffered = (kind == STREAM_STDOUT || kind == STREAM_STDERR);
     return v;
+}
+
+Value stream_string_new(void) {
+    return stream_from_fd(-1, false, true, false, STREAM_STRING);
+}
+
+Value stream_string_contents(Value stream) {
+    Stream* s = (Stream*)untag_pointer(stream);
+    return string_from_buffer((const char*)s->write_buf, s->write_len);
 }
 
 Value stream_open(const char* path, const char* mode) {
@@ -355,6 +364,7 @@ int stream_flush(Value stream) {
 int stream_flush_nb(Value stream) {
     Stream* s = (Stream*)untag_pointer(stream);
     if (s->closed || !s->writable || s->write_len == 0) return STREAM_OK;
+    if (s->kind == STREAM_STRING) return STREAM_OK;   /* the buffer is the output */
 
     while (s->write_flush_pos < s->write_len) {
         ssize_t n = write(s->fd, s->write_buf + s->write_flush_pos,

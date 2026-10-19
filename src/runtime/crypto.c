@@ -17,6 +17,7 @@
 #include "vm.h"
 #include "value.h"
 #include "namespace.h"
+#include "docs.h"
 #include "symbol.h"
 #include "bstring.h"
 #include "memory.h"
@@ -335,7 +336,15 @@ static Value native_random_bytes(VM* vm, int argc, Value* argv) {
     return vec;
 }
 
+static const NativeDoc crypto_docs[] = {
+    { "sha256", "([s])", "The SHA-256 of s's bytes as 64 hex characters." },
+    { "hmac-sha256", "([key msg])", "The HMAC-SHA256 of msg under key as 64 hex characters." },
+    { "constant-time-eq?", "([a b])", "True if the strings are equal, compared in time independent of where they differ (lengths may leak)." },
+    { "random-bytes", "([n])", "A string of n random bytes from the system source." },
+};
+
 void core_register_crypto(void) {
+    docs_register("beer.crypto", crypto_docs, sizeof(crypto_docs) / sizeof(crypto_docs[0]));
     Namespace* crypto_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.crypto");
     if (!crypto_ns) return;
 

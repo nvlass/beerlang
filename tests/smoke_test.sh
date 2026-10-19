@@ -689,7 +689,7 @@ check_multi '(defn aev? [n] (if (= n 0) true (apply aod? [(- n 1)])))
 (defn aod? [n] (if (= n 0) false (apply aev? [(- n 1)])))
 (aev? 100001)' 'false' "apply in tail position is a tail call"
 check '(try (apply (fn [] (throw {:k 1})) []) (catch e e))' '{:k 1}'
-check '(apply 5 [])' 'Runtime error: apply: first argument must be a function (or a keyword, map, vector or set)'
+check '(apply 5 [])' 'Runtime error: apply: first argument must be a function (or a keyword, map, vector, set or var)'
 check_multi "(spawn (fn [] (sleep 30) (request-interrupt!)))
 (apply (fn [] (loop [] (recur))) [])
 :after" ':after' "apply: background request-interrupt! reaches it"
@@ -962,6 +962,18 @@ check_script "(require 'beer.nrepl.simple)
 (beer.nrepl.simple/stop!)
 (println r *ns*)" '[sess.a user sess.a 42 nil] user' "nREPL sessions"
 
+# EDN nREPL: what an eval prints comes back as :out before :value
+check_script "(require 'beer.nrepl)
+(require 'beer.tcp)
+(def port (beer.nrepl/start! 0))
+(def r (await (spawn (fn []
+  (let [c (beer.tcp/connect \"127.0.0.1\" port)]
+    (write c (str (pr-str {:op \"eval\" :code \"(do (println 1 2) (+ 3 4))\" :id \"e1\"}) \"\\n\"))
+    (flush c)
+    [(read-string (read-line c)) (read-string (read-line c)) (read-string (read-line c))])))))
+(beer.nrepl/stop!)
+(prn (map (fn [m] (dissoc m :id)) r))" '({:out "1 2\n"} {:value "7"} {:status "done"})' "EDN nREPL sends :out"
+
 check_script '(require (quote beer.test) :as (quote t))
 (t/deftest math (t/is (= 2 (+ 1 1))) (t/is (= 6 (* 2 3))))
 (t/deftest strs (t/is (= "ab" (str "a" "b"))))
@@ -1229,8 +1241,19 @@ check_multi '(require (quote beer.json) :as (quote json))
 echo ""
 echo "--- Metadata & Docstrings ---"
 
-# meta on builtin returns nil (no doc set)
-check '(meta (quote +))' 'nil'
+# natives carry :arglists and :doc from the C doc tables
+check '[(:arglists (meta (quote +))) (string? (:doc (meta (quote +))))]' '[([] [x] [x y & more]) true]'
+check '(:arglists (meta (quote beer.string/join)))'            '([coll] [sep coll])'
+check_multi '(require (quote beer.tar))
+(:arglists (meta (quote beer.tar/list)))' '([path])' "(def alias native) finds the native's doc"
+check_multi '(alter-meta! (quote first) assoc :added "1.0")
+[(:added (meta (quote first))) (string? (:doc (meta (quote first))))]' '["1.0" true]' "alter-meta! on a native keeps its doc"
+check '(count (filter (fn [s] (and (not (beer.string/starts-with? (name s) "__")) (nil? (:doc (meta (symbol "beer.core" (name s))))))) (ns-publics (quote beer.core))))' '0'
+check_multi '(require (quote [beer.bytes :as bb]))
+(bb/capacity (bb/alloc 3))' '3' "require a natives-only namespace"
+check '(try (require (quote no.such.lib)) (catch e (:message e)))' '"require: cannot find file for '"'"'no.such.lib'"'"'"'
+check '[(range 3) (range 1 4) (range 5 0 -2) (:arglists (meta (quote range)))]' '[(0 1 2) (1 2 3) (5 3 1) ([end] [start end] [start end step])]'
+check '[(max 3 9 2) (min 4) (:arglists (meta (quote max)))]' '[9 4 ([x & more])]'
 
 # defn with docstring
 check_multi '(defn foo "a docstring" [x] x)
@@ -1280,6 +1303,79 @@ check_multi '(defmacro my-when "like when" [test & body] (list (quote if) test (
 check_multi '(defn documented "hello world" [x] x)
 (alter-meta! (quote documented) assoc :added "1.0")
 (:added (meta (quote documented)))' '"1.0"' "multiple meta keys"
+
+# --- Maps are seqable; seq ---
+echo ""
+echo "--- seq / seqable maps ---"
+check '[(seq {:a 1}) (seq {}) (seq []) (seq nil) (seq "ab") (seq #{7}) (seq (list 1))]' '[([:a 1]) nil nil nil (\a \b) (7) (1)]'
+check '[(first {:a 1}) (rest {:a 1}) (count (rest {:a 1 :b 2}))]' '[[:a 1] nil 1]'
+check '(reduce (fn [acc [k v]] (+ acc v)) 0 {:a 1 :b 2 :c 3})'     '6'
+check '(sort (map (fn [[k v]] [v k]) {:a 2 :b 1}))'                '([1 :b] [2 :a])'
+check '(into {} (map (fn [[k v]] [k (inc v)]) {:a 1}))'             '{:a 2}'
+check '[(into [] {:a 1}) (vec {:a 1}) (sort {:b 1 :a 2})]'          '[[[:a 1]] [[:a 1]] ([:a 2] [:b 1])]'
+check '(filter (fn [[k v]] (> v 1)) {:a 1 :b 2})'                  '([:b 2])'
+check_multi '(def seen (atom 0))
+(doseq [[k v] {:a 1 :b 2}] (swap! seen + v))
+@seen' '3' "doseq over a map destructures entries"
+check '(try (seq 5) (catch e (:message e)))'                       '"seq: argument must be a collection, string or nil"'
+
+# --- Map destructuring; loop destructuring ---
+echo ""
+echo "--- map destructuring ---"
+check '(let [{:keys [a b] :or {b 9} :as m} {:a 1}] [a b m])'        '[1 9 {:a 1}]'
+check '(let [{x :x [y z] :yz} {:x 1 :yz [2 3]}] [x y z])'           '[1 2 3]'
+check '(let [{:strs [s] :syms [q]} {"s" 1 (quote q) 2}] [s q])'     '[1 2]'
+check '(let [{:keys [a/b c]} {:a/b 1 :c 2}] [b c])'                 '[1 2]'
+check '(let [{{:keys [deep]} :inner} {:inner {:deep 5}}] deep)'     '5'
+check '(let [[a {:keys [b]}] [1 {:b 2}] {:keys [c]} nil] [a b c])'  '[1 2 nil]'
+check_multi '(defn kwf [x & {:keys [scale] :or {scale 1}}] (* x scale))
+[(kwf 2) (kwf 2 :scale 5)]' '[2 10]' "keyword arguments via & {:keys ...}"
+check_multi '(defn mdf ([{:keys [a]}] a) ([{:keys [a]} [b]] (+ a b)))
+[(mdf {:a 1}) (mdf {:a 1} [2])]' '[1 3]' "map and vector params in a multi-arity fn"
+check '(loop [[a & r] [1 2 3] acc 0] (if a (recur r (+ acc a)) acc))' '6'
+check '(loop [{:keys [n]} {:n 3} acc []] (if (pos? n) (recur {:n (dec n)} (conj acc n)) acc))' '[3 2 1]'
+check '(loop [[a b] [1 2] c (+ a b)] c)'                             '3'
+
+# --- Clojure semantics: str nil, and, dotimes ---
+check '[(str nil) (str "a" nil "b") (str [nil])]'                  '["" "ab" "[nil]"]'
+check '[(and nil 1) (and 1 false) (and 1 2) (and)]'                '[nil false 2 true]'
+check '(let [a (atom []) ] (dotimes [i 3] (swap! a conj i)) @a)'   '[0 1 2]'
+
+check '[(with-out-str (println "a" 1) (print :b)) (with-out-str) (count (with-out-str (dotimes [i 5000] (print "xx"))))]' '["a 1\n:b" "" 10000]'
+check '[(with-out-str (print "x") (print (with-out-str (print "in")))) (with-out-str (await (spawn (fn [] (print "t")))))]' '["xin" "t"]'
+
+# --- Vars: (var sym), #'sym, callable vars ---
+echo ""
+echo "--- Vars ---"
+
+check '(pr-str #'"'"'map)'                                    '"#'"'"'beer.core/map"'
+check '[(var? #'"'"'inc) (var? inc) (type (var inc))]'        '[true false :var]'
+check_multi '(defn vg [n] (str "v1 " n))
+(def vh {:g #'"'"'vg :plain vg})
+(defn vg [n] (str "v2 " n))
+[((:g vh) 1) ((:plain vh) 1)]' '["v2 1" "v1 1"]' "a stored var calls the current definition"
+check_multi '(defn va [& xs] (count xs))
+[(apply #'"'"'va [1 2 3]) (#'"'"'va 1) (map #'"'"'inc [1 2])]' '[3 1 (2 3)]' "apply, call and map through a var"
+check_multi '(defn vt [x] (* 2 x))
+(await (spawn #'"'"'vt 21))' '42' "spawn a var"
+check_multi '(defn vtail [x] x)
+(defn vcaller [] (#'"'"'vtail :t))
+(vcaller)' ':t' "var call in tail position"
+check_multi '(def ^:dynamic *vd* 1)
+[(binding [*vd* 2] @#'"'"'*vd*) (deref (var *vd*))]' '[2 1]' "deref a var sees bindings"
+check_multi '(require (quote [beer.string :as vs]))
+(pr-str #'"'"'vs/join)' '"#'"'"'beer.string/join"' "var through an alias"
+check '(try (eval (quote (var no-such-var))) (catch e (:message e)))' '"compile error: var: unable to resolve var '"'"'no-such-var'"'"'"'
+check_multi '(defn vm1 "vdoc" [x] x)
+(alter-meta! #'"'"'vm1 assoc :k 1)
+[(:doc (meta #'"'"'vm1)) (:k (meta (quote vm1)))]' '["vdoc" 1]' "meta and alter-meta! on a var"
+check '(= #'"'"'inc (var inc))'                               'true'
+
+check_multi '(require (quote beer.tar))
+(beer.tar/create "/tmp/beer_smoke_pkg.tar" {"smokepkg/core.beer" "(ns smokepkg.core) (defn hi [] :hi)" "beer.edn" "{:main smokepkg.core}"})
+(__tar-add! "/tmp/beer_smoke_pkg.tar")
+(require (quote smokepkg.core))
+[(smokepkg.core/hi) (:main (read-string (beer.tar/read-entry "/tmp/beer_smoke_pkg.tar" "beer.edn")))]' '[:hi smokepkg.core]' "require from a tar added at run time (beer run app.tar)"
 
 # --- Atoms ---
 echo ""
@@ -1549,7 +1645,7 @@ check_multi '(require (quote beer.hive) :as (quote hive))
 check_multi '(require (quote beer.hive) :as (quote hive))
 (def pid (hive/spawn-actor (fn [s m] {:reply (+ s m) :state (+ s m)}) 0 {:name :acc}))
 (hive/send pid 2)
-(str (hive/ask (hive/whereis :acc) 5) "," (hive/node-id) "," (get *loaded-libs* :beer.hive.node) "," (get *loaded-libs* :beer.tcp))' '"7,nil,nil,nil"' 'hive local actors without loading the node layer'
+(str (hive/ask (hive/whereis :acc) 5) "," (hive/node-id) "," (get *loaded-libs* :beer.hive.node) "," (get *loaded-libs* :beer.tcp))' '"7,,,"' 'hive local actors without loading the node layer'
 
 # --- Supervisor ---
 echo ""
@@ -2314,7 +2410,7 @@ check_multi '(require (quote beer.bench) :as (quote bench))
 # --- String builder ---
 check_multi '(def b (beer.string/builder "[" 1))
 (beer.string/append! b ", " :kw ", " 2.5 ", " [1 "a"] ", " \c ", " nil)
-(str b)' '"[1, :kw, 2.5, [1 \"a\"], c, nil"' 'string builder appends like str'
+(str b)' '"[1, :kw, 2.5, [1 \"a\"], c, "' 'string builder appends like str'
 check_multi '(def b (beer.string/builder "ab"))
 (beer.string/append! b b)
 (beer.string/append! b (beer.string/builder "é"))

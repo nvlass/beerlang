@@ -174,7 +174,7 @@ Value task_new_from_code(uint8_t* code, int code_size,
     uint8_t* code_copy = xmalloc((size_t)code_size);
     memcpy(code_copy, code, (size_t)code_size);
     Value* consts_copy = n_constants > 0
-        ? malloc(sizeof(Value) * (size_t)n_constants) : NULL;
+        ? xmalloc(sizeof(Value) * (size_t)n_constants) : NULL;
     for (int i = 0; i < n_constants; i++) {
         consts_copy[i] = constants[i];
     }

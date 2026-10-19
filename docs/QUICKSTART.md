@@ -91,6 +91,9 @@ beer run                    # calls (-main) in the :main namespace
 # Build a distributable tar
 beer build                  # creates myproject.tar
 
+# Run a built package anywhere (reads :main from its beer.edn)
+beer run myproject.tar
+
 # Start a project REPL (with src/ and lib/ on the load path)
 beer repl
 ```
@@ -289,7 +292,7 @@ make clean    # Clean build artifacts
 
 beer --help   # Show all CLI commands
 beer new      # Create a project
-beer run      # Run project
+beer run      # Run project (or: beer run app.tar)
 beer build    # Build project tar
 ```
 

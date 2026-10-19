@@ -322,7 +322,7 @@ void vm_request_call(VM* vm, Value fn, int argc, const Value* args) {
     vm->call_fn = fn;
     if (is_pointer(fn)) object_retain(fn);
     free(vm->call_args);
-    vm->call_args = argc > 0 ? malloc(sizeof(Value) * (size_t)argc) : NULL;
+    vm->call_args = argc > 0 ? xmalloc(sizeof(Value) * (size_t)argc) : NULL;
     for (int i = 0; i < argc; i++) {
         vm->call_args[i] = args[i];
         if (is_pointer(args[i])) object_retain(args[i]);
@@ -671,6 +671,15 @@ static bool vm_invoke_value(VM* vm, Value head, int n_args, Value* args, Value* 
     }
 
     return false;
+}
+
+/* Replace the Var on top of the stack (a call's head) with its value */
+static VM_NOINLINE void deref_var_callee(VM* vm) {
+    Value var = vm->stack[vm->stack_pointer - 1];
+    Value v = var_get_value((Var*)untag_pointer(var));
+    if (is_pointer(v)) object_retain(v);
+    vm->stack[vm->stack_pointer - 1] = v;
+    object_release(var);
 }
 
 /* A native asked for a call (vm_request_call): replace its call's
@@ -1281,6 +1290,11 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
 
             /* Try callable non-function types (keyword, map, vector) */
             if (!is_function(fn)) {
+                /* A var calls its current value (binding included): #'f */
+                if (is_var(fn)) {
+                    deref_var_callee(vm);
+                    goto call_dispatch;
+                }
                 Value* args = &vm->stack[vm->stack_pointer - 1 - n_args];
                 Value result = VALUE_NIL;
                 if (vm_invoke_value(vm, fn, (int)n_args, args, &result)) {
@@ -1478,6 +1492,11 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
 
             /* Try callable non-function types (keyword, map, vector) */
             if (!is_function(fn)) {
+                /* A var calls its current value (binding included): #'f */
+                if (is_var(fn)) {
+                    deref_var_callee(vm);
+                    goto tail_call_dispatch;
+                }
                 Value* args = &vm->stack[vm->stack_pointer - 1 - n_args];
                 Value result = VALUE_NIL;
                 if (vm_invoke_value(vm, fn, (int)n_args, args, &result)) {

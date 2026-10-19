@@ -23,7 +23,7 @@
 ; Multi-arity:   (defn name ([params1] body1...) ([params2] body2...) ...)
 ; Optional docstring: (defn name "docstring" [params] body...)
 ; The var's meta gets :arglists, one parameter vector per arity, and :doc.
-(defmacro defn [name & fdecl]
+(defmacro defn "Defines name as a fn: (defn name doc? [params] body...) or (defn name doc? ([params] body...) ...). Records :arglists and :doc." [name & fdecl]
   (let* [has-doc (string? (first fdecl))
          docstring (if has-doc (first fdecl) nil)
          fdecl (if has-doc (rest fdecl) fdecl)
@@ -46,24 +46,32 @@
           (cons (quote alter-meta!) (cons (list (quote quote) sym) (cons (quote assoc) meta-args)))
           sym)))
 
+; Defined with def before defn existed
+(alter-meta! 'alter-meta! assoc :arglists '([ref f & args])
+             :doc "Sets the metadata of a var, or of the var the symbol ref names, to (f old-meta args...).")
+(alter-meta! 'swap! assoc :arglists '([a f & args])
+             :doc "Sets atom a to (f old-value args...) and returns it. Retries if another task changed a meanwhile, so f may run more than once.")
+
 ; doc: print documentation for a symbol
-(defmacro doc [sym]
+(defmacro doc "Prints the arglists and docstring of the var sym names." [sym]
   (list (quote __print-doc) (str sym) (list (quote meta) (list (quote quote) sym))))
 
 ; when: (when test body...) => (if test (do body...) nil)
-(defmacro when [test & body]
+(defmacro when "Evaluates body if test is truthy, else nil." [test & body]
   (list (quote if) test (cons (quote do) body) nil))
 
 ; and: short-circuit logical and
-(defmacro and [& args]
+(defmacro and "Evaluates the forms left to right and returns the first falsy value (nil or false), else the last value. (and) is true." [& args]
   (if (empty? args) true
     (if (= (count args) 1) (first args)
-      (list (quote if) (first args)
-        (cons (quote and) (rest args))
-        false))))
+      (let* [v (gensym "and__")]
+        (list (quote let*) [v (first args)]
+              (list (quote if) v
+                    (cons (quote and) (rest args))
+                    v))))))
 
 ; or: short-circuit logical or (uses gensym to avoid double evaluation)
-(defmacro or [& args]
+(defmacro or "Evaluates the forms left to right and returns the first truthy value, else the last value. (or) is nil." [& args]
   (if (empty? args) nil
     (if (= (count args) 1) (first args)
       (let* [v (gensym "or__")]
@@ -72,7 +80,7 @@
                     (cons (quote or) (rest args))))))))
 
 ; cond: (cond test1 expr1 test2 expr2 ... :else default)
-(defmacro cond [& clauses]
+(defmacro cond "Takes test/expr pairs; evaluates the expr of the first truthy test, else nil. Use :else as a last catch-all test." [& clauses]
   (if (empty? clauses) nil
     (if (= (count clauses) 1)
       (first clauses)
@@ -82,7 +90,7 @@
 
 ; ->: thread-first macro
 ; (-> x (f a) (g b)) => (g (f x a) b)
-(defmacro -> [x & forms]
+(defmacro -> "Threads x through the forms as their first argument: (-> x (f a) g) is (g (f x a))." [x & forms]
   (if (empty? forms) x
     (let* [form (first forms)
            threaded (if (list? form)
@@ -92,7 +100,7 @@
 
 ; ->>: thread-last macro
 ; (->> x (f a) (g b)) => (g a (f a x))  -- actually (g b (->> x (f a)))
-(defmacro ->> [x & forms]
+(defmacro ->> "Threads x through the forms as their last argument: (->> x (f a) g) is (g (f a x))." [x & forms]
   (if (empty? forms) x
     (let* [form (first forms)
            threaded (if (list? form)
@@ -108,11 +116,45 @@
       (recur (+ i 1) (list 'rest v)))))
 
 ; Helper: flat let* binding pairs for binding `target` (a symbol or a
-; destructuring vector, possibly nested) to expr
+; destructuring vector or map, possibly nested) to expr
 (defn __bind-pairs [target expr]
-  (if (vector? target)
-    (__expand-destructure target expr)
-    (list target expr)))
+  (cond (vector? target) (__expand-destructure target expr)
+        (map? target) (__expand-map-destructure target expr)
+        :else (list target expr)))
+
+; The map a map pattern destructures: a seq (& {:keys [...]} rest args)
+; becomes a map of its key/value pairs
+(defn __destr-map [x]
+  (if (or (list? x) (vector? x)) (apply hash-map x) x))
+
+; {:keys [a b] :strs [c] :syms [d] :or {a 1} :as m, e :e, [f g] :fg}
+(defn __expand-map-destructure [pattern expr]
+  (let* [tmp (gensym "mdestr__")
+         defaults (get pattern :or {})
+         lookup (fn [sym k]
+                  (if (contains? defaults sym)
+                    (list 'get tmp k (get defaults sym))
+                    (list 'get tmp k)))
+         ; :keys entries may be symbols, keywords or qualified (a/b binds b)
+         key-binds (fn [names make-key]
+                     (reduce (fn [acc n]
+                               (let* [sym (symbol (name n))]
+                                 (concat acc (list sym (lookup sym (make-key n))))))
+                             '() names))]
+    (reduce
+      (fn [acc e]
+        (let* [k (first e) v (first (rest e))]
+        (cond (= k :as) (concat acc (list v tmp))
+              (= k :or) acc
+              (= k :keys) (concat acc (key-binds v (fn [n] (if (namespace n)
+                                                             (keyword (namespace n) (name n))
+                                                             (keyword (name n))))))
+              (= k :strs) (concat acc (key-binds v (fn [n] (name n))))
+              (= k :syms) (concat acc (key-binds v (fn [n] (list 'quote (symbol (name n))))))
+              (symbol? k) (concat acc (list k (lookup k v)))
+              :else (concat acc (__bind-pairs k (list 'get tmp v))))))
+      (list tmp (list '__destr-map expr))
+      pattern)))
 
 ; Helper: expand a destructuring vector pattern into flat let* binding pairs
 (defn __expand-destructure [pattern expr]
@@ -140,23 +182,21 @@
       result
       (let* [binding (nth bindings i)
              expr    (nth bindings (+ i 1))]
-        (if (vector? binding)
-          (recur (+ i 2) (concat result (__expand-destructure binding expr)))
-          (recur (+ i 2) (concat result (list binding expr))))))))
+        (recur (+ i 2) (concat result (__bind-pairs binding expr)))))))
 
 ; let: supports destructuring via macro expansion to let*
-(defmacro let [bindings & body]
+(defmacro let "Binds names to values for body, in order. Vector and map bindings destructure: [[a b & more] coll], {:keys [a b] :or {a 1} :as m}, {x :x}." [bindings & body]
   (let* [expanded (__expand-bindings bindings)]
     (cons 'let* (cons (apply vector expanded) body))))
 
-(defmacro if-let [bindings then & else]
+(defmacro if-let "If test is truthy, evaluates then with name bound to it; else the else form (or nil). bindings: [name test]." [bindings then & else]
   (let* [tmp (gensym "iflet__")]
     (list 'let* [tmp (nth bindings 1)]
       (list 'if tmp
         (list 'let [(nth bindings 0) tmp] then)
         (first else)))))
 
-(defmacro when-let [bindings & body]
+(defmacro when-let "If test is truthy, evaluates body with name bound to it; else nil. bindings: [name test]." [bindings & body]
   (let* [tmp (gensym "whenlet__")]
     (list 'let* [tmp (nth bindings 1)]
       (list 'when tmp
@@ -164,34 +204,34 @@
 
 
 ; --- Numeric utilities ---
-(defn inc [x] (+ x 1))
-(defn dec [x] (- x 1))
-(defn zero? [x] (= x 0))
-(defn pos? [x] (> x 0))
-(defn neg? [x] (< x 0))
-(defn even? [x] (= 0 (mod x 2)))
-(defn odd? [x] (not (even? x)))
+(defn inc "x plus one." [x] (+ x 1))
+(defn dec "x minus one." [x] (- x 1))
+(defn zero? "True if x is zero." [x] (= x 0))
+(defn pos? "True if x is greater than zero." [x] (> x 0))
+(defn neg? "True if x is less than zero." [x] (< x 0))
+(defn even? "True if the integer x is even." [x] (= 0 (mod x 2)))
+(defn odd? "True if the integer x is odd." [x] (not (even? x)))
 
 ; --- Comparison utilities ---
-(defn not= [a b] (not (= a b)))
-(defn max [& args] (reduce (fn [a b] (if (> a b) a b)) (first args) (rest args)))
-(defn min [& args] (reduce (fn [a b] (if (< a b) a b)) (first args) (rest args)))
-(defn abs [x] (if (neg? x) (- x) x))
+(defn not= "Same as (not (= a b))." [a b] (not (= a b)))
+(defn max "The greatest of the numbers." [x & more] (reduce (fn [a b] (if (> a b) a b)) x more))
+(defn min "The smallest of the numbers." [x & more] (reduce (fn [a b] (if (< a b) a b)) x more))
+(defn abs "The absolute value of x." [x] (if (neg? x) (- x) x))
 
 ; --- Function utilities ---
-(defn identity [x] x)
+(defn identity "Returns x." [x] x)
 (defn boolean "true unless x is nil or false" [x] (if x true false))
-(defn constantly [x] (fn [& _] x))
-(defn complement [f] (fn [& args] (not (apply f args))))
-(defn comp [& fns]
+(defn constantly "A fn that takes any arguments and returns x." [x] (fn [& _] x))
+(defn complement "A fn that returns the boolean opposite of f's result." [f] (fn [& args] (not (apply f args))))
+(defn comp "The composition of the fns, applied right to left: ((comp f g) x) is (f (g x)). (comp) is identity." [& fns]
   (if (empty? fns) identity
     (if (empty? (rest fns)) (first fns)
       (let* [f (first fns)
              g (apply comp (rest fns))]
         (fn [& args] (f (apply g args)))))))
-(defn partial [f & bound]
+(defn partial "A fn that calls f with the bound args followed by its own." [f & bound]
   (fn [& args] (apply f (concat bound args))))
-(defn juxt [& fns]
+(defn juxt "A fn that returns a vector of each fn applied to its arguments." [& fns]
   (fn [& args]
     (let* [results (map (fn [f] (apply f args)) fns)]
       (into [] results))))
@@ -206,7 +246,7 @@
       acc
       (recur (rest s) (cons (first s) acc)))))
 
-(defn filter [pred coll]
+(defn filter "A list of the elements of coll for which pred is truthy." [pred coll]
   (loop [s   (__seq coll)
          acc '()]
     (if (empty? s)
@@ -229,12 +269,12 @@
         (recur (f acc (first s)) (rest s))))))
 
 ; (f acc k v) for each entry of a map (or nil)
-(defn reduce-kv [f init m]
+(defn reduce-kv "Reduces map m with (f acc k v) for each entry, starting from init." [f init m]
   (if (or (nil? m) (map? m))
     (reduce (fn [acc k] (f acc k (get m k))) init (keys m))
     (throw {:message "reduce-kv: third argument must be a map or nil"})))
 
-(defn map [f coll]
+(defn map "A list of (f x) for each element x of coll." [f coll]
   (loop [s   (__seq coll)
          acc '()]
     (if (empty? s)
@@ -242,22 +282,22 @@
       (recur (rest s) (cons (f (first s)) acc)))))
 
 ; --- More collection utilities ---
-(defn second [coll] (first (rest coll)))
-(defn ffirst [coll] (first (first coll)))
+(defn second "The second element of coll." [coll] (first (rest coll)))
+(defn ffirst "Same as (first (first coll))." [coll] (first (first coll)))
 
-(defn last [coll]
+(defn last "The last element of coll, or nil if empty." [coll]
   (loop [s (__seq coll)]
     (if (empty? (rest s))
       (first s)
       (recur (rest s)))))
 
-(defn butlast [coll]
+(defn butlast "A list of all but the last element of coll." [coll]
   (loop [s (__seq coll) acc '()]
     (if (empty? (rest s))
       (__rev acc)
       (recur (rest s) (cons (first s) acc)))))
 
-(defn take [n coll]
+(defn take "A list of the first n elements of coll (fewer if it is shorter)." [n coll]
   (loop [i 0 s (__seq coll) acc '()]
     (if (or (= i n) (empty? s))
       (__rev acc)
@@ -265,7 +305,7 @@
 
 ; drop/drop-while return the remainder itself, so coll is only converted
 ; once at least one element is actually dropped -- (drop 0 v) stays v.
-(defn drop [n coll]
+(defn drop "coll without its first n elements; coll itself when n <= 0." [n coll]
   (if (or (<= n 0) (empty? coll))
     coll
     (loop [i 1 s (rest (__seq coll))]
@@ -273,13 +313,13 @@
         s
         (recur (+ i 1) (rest s))))))
 
-(defn take-while [pred coll]
+(defn take-while "A list of the leading elements of coll for which pred is truthy." [pred coll]
   (loop [s (__seq coll) acc '()]
     (if (or (empty? s) (not (pred (first s))))
       (__rev acc)
       (recur (rest s) (cons (first s) acc)))))
 
-(defn drop-while [pred coll]
+(defn drop-while "coll without the leading elements for which pred is truthy." [pred coll]
   (if (or (empty? coll) (not (pred (first coll))))
     coll
     (loop [s (rest (__seq coll))]
@@ -300,47 +340,47 @@
             (__rev acc)
             (recur (drop step s) (cons chunk acc))))))))
 
-(defn range [& args]
-  (let* [start (if (>= (count args) 2) (first args) 0)
-         end   (if (>= (count args) 2) (second args) (first args))
-         step  (if (>= (count args) 3) (nth args 2) 1)
-         done? (cond (pos? step) (fn [i] (>= i end))
-                     (neg? step) (fn [i] (<= i end))
-                     :else (throw (ex-info "range: step must be non-zero" {:step step})))]
-    (loop [i start acc '()]
-      (if (done? i)
-        (__rev acc)
-        (recur (+ i step) (cons i acc))))))
+(defn range "A list of numbers from start (default 0) up to but not including end, by step (default 1; may be negative)."
+  ([end] (range 0 end 1))
+  ([start end] (range start end 1))
+  ([start end step]
+    (let* [done? (cond (pos? step) (fn [i] (>= i end))
+                       (neg? step) (fn [i] (<= i end))
+                       :else (throw (ex-info "range: step must be non-zero" {:step step})))]
+      (loop [i start acc '()]
+        (if (done? i)
+          (__rev acc)
+          (recur (+ i step) (cons i acc)))))))
 
-(defn repeat [n x]
+(defn repeat "A list of n copies of x." [n x]
   (loop [i 0 acc '()]
     (if (= i n)
       acc
       (recur (+ i 1) (cons x acc)))))
 
-(defn repeatedly [n f]
+(defn repeatedly "A list of the results of n calls to the no-argument fn f." [n f]
   (loop [i 0 acc '()]
     (if (= i n)
       (__rev acc)
       (recur (+ i 1) (cons (f) acc)))))
 
-(defn reverse [coll]
+(defn reverse "A list of coll's elements in reverse order." [coll]
   (reduce (fn [acc x] (cons x acc)) '() coll))
 
-(defn into [to from]
+(defn into "from's elements added to the collection to with conj." [to from]
   (reduce conj to from))
 
-(defn vec [coll]
+(defn vec "A vector of coll's elements." [coll]
   (into [] coll))
 
-(defn some [pred coll]
+(defn some "The first truthy (pred x) for the elements of coll, else nil." [pred coll]
   (loop [s (__seq coll)]
     (if (empty? s)
       nil
       (let* [result (pred (first s))]
         (if result result (recur (rest s)))))))
 
-(defn every? [pred coll]
+(defn every? "True if (pred x) is truthy for every element of coll (true for an empty coll)." [pred coll]
   (loop [s (__seq coll)]
     (if (empty? s)
       true
@@ -348,34 +388,34 @@
         (recur (rest s))
         false))))
 
-(defn not-any? [pred coll] (not (some pred coll)))
-(defn not-every? [pred coll] (not (every? pred coll)))
+(defn not-any? "True if (pred x) is falsy for every element of coll." [pred coll] (not (some pred coll)))
+(defn not-every? "True if (pred x) is falsy for some element of coll." [pred coll] (not (every? pred coll)))
 
-(defn frequencies [coll]
+(defn frequencies "A map from each distinct element of coll to the number of times it occurs." [coll]
   (reduce (fn [m x]
             (let* [n (get m x 0)]
               (assoc m x (+ n 1))))
           {} coll))
 
-(defn group-by [f coll]
+(defn group-by "A map from each (f x) to a list of the elements x of coll that gave it, in order." [f coll]
   (let* [reversed (reduce (fn [m x]
                             (let* [k (f x)]
                               (assoc m k (cons x (get m k '())))))
                           {} coll)]
     (reduce-kv (fn [m k v] (assoc m k (__rev v))) {} reversed)))
 
-(defn mapcat [f coll]
+(defn mapcat "A list of the elements of each (f x), for each element x of coll in turn." [f coll]
   (__rev (reduce (fn [acc x] (reduce (fn [a y] (cons y a)) acc (f x)))
                  '() coll)))
 
-(defn interleave [c1 c2]
+(defn interleave "A list of the first item of each coll, then the second of each, ... up to the shorter one's length." [c1 c2]
   (loop [s1 (__seq c1) s2 (__seq c2) acc '()]
     (if (or (empty? s1) (empty? s2))
       (__rev acc)
       (recur (rest s1) (rest s2)
              (cons (first s2) (cons (first s1) acc))))))
 
-(defn zipmap [keys vals]
+(defn zipmap "A map from each element of keys to the element of vals at the same index." [keys vals]
   (loop [ks (__seq keys) vs (__seq vals) m {}]
     (if (or (empty? ks) (empty? vs))
       m
@@ -388,10 +428,10 @@
               (cons x a)))
           acc coll))
 
-(defn flatten [coll]
+(defn flatten "A list of the non-sequential elements of coll, with nested lists and vectors spliced in." [coll]
   (__rev (__flatten-into '() coll)))
 
-(defn distinct [coll]
+(defn distinct "A list of coll's elements without duplicates, keeping the first occurrence." [coll]
   (loop [s (__seq coll) seen {} acc '()]
     (if (empty? s)
       (__rev acc)
@@ -400,7 +440,7 @@
           (recur (rest s) seen acc)
           (recur (rest s) (assoc seen x true) (cons x acc)))))))
 
-(defn select-keys [m ks]
+(defn select-keys "A map of the entries of m whose keys are in ks." [m ks]
   (reduce (fn [acc k]
             (if (contains? m k)
               (assoc acc k (get m k))
@@ -467,25 +507,25 @@
         (sort (fn [a b] (cmp (keyfn a) (keyfn b))) coll)))))
 
 ; --- Nested collection access ---
-(defn get-in [m ks]
+(defn get-in "The value in nested associative structures at the path of keys ks." [m ks]
   (reduce get m ks))
 
-(defn assoc-in [m ks v]
+(defn assoc-in "Sets the value at the path of keys ks in nested maps to v, creating maps where missing." [m ks v]
   (if (= (count ks) 1)
     (assoc m (first ks) v)
     (assoc m (first ks)
            (assoc-in (get m (first ks) {}) (rest ks) v))))
 
-(defn update [m k f & args]
+(defn update "m with the value at k replaced by (f old-value args...)." [m k f & args]
   (assoc m k (apply f (get m k) args)))
 
-(defn update-in [m ks f & args]
+(defn update-in "Like update, at the path of keys ks in nested maps." [m ks f & args]
   (if (= (count ks) 1)
     (apply update m (first ks) f args)
     (assoc m (first ks)
            (apply update-in (get m (first ks) {}) (rest ks) f args))))
 
-(defn merge [& maps]
+(defn merge "A map of the entries of all the maps; later keys win. nil maps are skipped." [& maps]
   (reduce (fn [acc m]
             (if (nil? m) acc
               (reduce (fn [a k] (assoc a k (get m k)))
@@ -493,7 +533,7 @@
           {} maps))
 
 ; --- I/O helpers ---
-(defmacro with-open [bindings & body]
+(defmacro with-open "Binds name to init, evaluates body and closes name afterwards, also on throw. bindings: [name init]." [bindings & body]
   (let* [name (first bindings)
          init (second bindings)
          result (gensym "result__")]
@@ -509,13 +549,22 @@
 
 ; doseq: iterate a collection for side effects
 ; (doseq [x coll] body...)
-(defmacro doseq [bindings & body]
+(defmacro dotimes "Evaluates body n times with name bound to 0 .. n-1; returns nil. bindings: [name n]." [bindings & body]
+  (let* [i (first bindings)
+         n (gensym "n__")]
+    (list 'let* [n (second bindings)]
+      (list 'loop [i 0]
+        (list 'when (list '< i n)
+          (cons 'do body)
+          (list 'recur (list 'inc i)))))))
+
+(defmacro doseq "Evaluates body once per element of coll with name bound to it (name may destructure: [[k v] m]); returns nil. bindings: [name coll]." [bindings & body]
   (let* [sym (first bindings)
          coll-expr (second bindings)
          s (gensym "s__")]
-    (list 'loop [s coll-expr]
+    (list 'loop [s (list '__seq coll-expr)]
       (list 'when (list 'not (list 'empty? s))
-        (list 'let* [sym (list 'first s)]
+        (list 'let [sym (list 'first s)]
           (cons 'do body)
           (list 'recur (list 'rest s)))))))
 
@@ -523,7 +572,7 @@
 ; tasks it spawns) sees its own values for these dynamic vars
 ; ((def ^:dynamic *x* ...)); they are restored afterwards, also on throw.
 ; Bindings live in the task, so body may yield.
-(defmacro binding [bindings & body]
+(defmacro binding "Gives the dynamic vars new values in the running task (and tasks it spawns) while body runs; restores them afterwards, also on throw." [bindings & body]
   (if (odd? (count bindings))
     (throw {:message "binding: requires an even number of forms in the binding vector"}))
   (let* [g (gensym "prev-bindings")
@@ -535,24 +584,32 @@
     (list 'let* [g (list '__push-bindings pairs)]
           (list 'try (cons 'do body) (list 'finally (list '__pop-bindings g))))))
 
+(defmacro with-out-str "Evaluates body with *out* bound to a fresh string stream and returns what was printed." [& body]
+  (let* [s (gensym "out__")]
+    (list 'let* [s '(__string-stream)]
+      (list 'binding ['*out* s] (cons 'do body))
+      (list '__string-stream-contents s))))
+
 ; (set! *x* v) changes the running task's binding of a dynamic var
-(defmacro set! [sym v]
+(defmacro set! "Changes the running task's binding of a dynamic var (inside binding)." [sym v]
   (list '__set! (list 'quote sym) v))
 
 ; Exception helpers
-(defn ex-info [msg data] {:type :error :message msg :data data})
+(defn ex-info "An exception map {:type :error :message msg :data data} to throw." [msg data] {:type :error :message msg :data data})
 
 ;; --- Files and loading ---
 ; File access goes through *fs* when an embedder sets it:
 ;   (def beer.core/*fs* {:read (fn [path] ...) :write! (fn [path s append?] ...)})
 ; :read returns the contents as a string, or nil if path can't be read.
 ; nil means the host file system.
-(def ^:dynamic *fs* nil)
+(def ^:dynamic *fs*
+  "nil for the host file system, or a map {:read (fn [path]) :write! (fn [path s append?])} that slurp, spit, load and require go through."
+  nil)
 
 (defn __read-file [path]
   (if *fs* ((get *fs* :read) path) (__file-read path)))
 
-(defn slurp [path]
+(defn slurp "The contents of the file at path as a string (through *fs* when set)." [path]
   (if *fs*
     (let* [s ((get *fs* :read) path)]
       (if (nil? s)
@@ -560,7 +617,7 @@
         s))
     (__slurp path)))
 
-(defn spit [path content & opts]
+(defn spit "Writes the string content to the file at path; :append true appends (through *fs* when set)." [path content & opts]
   (if *fs*
     ((get *fs* :write!) path content (if (= (first opts) :append) (second opts) false))
     (apply __spit path content opts)))
@@ -570,14 +627,14 @@
 ;; two REPLs evaluating at once don't wait on each other.
 ; A top-level do is split, as in Clojure: each subform is compiled after the
 ; previous one ran, so (do (in-ns 'x) (def y 1)) defines x/y.
-(defn eval [form]
+(defn eval "Evaluates form in the calling task and returns its value. A top-level do is evaluated form by form." [form]
   (let* [f (macroexpand form)]
     (if (and (list? f) (= (first f) 'do))
       (reduce (fn [_ sub] (eval sub)) nil (rest f))
       ((__compile f)))))
 
 ; Runs every form of s; the current namespace is restored afterwards
-(defn load-string
+(defn load-string "Evaluates every form in the string s and returns the last value; name labels errors. The current namespace is restored afterwards."
   ([s] (load-string s "<string>"))
   ([s name]
    (let* [forms (__read-all s name)
@@ -597,13 +654,14 @@
        (finally
          (if (not= (__current-ns) saved) (in-ns saved)))))))
 
-(defn load-file [path]
+(defn load-file "Evaluates every form in the file at path (through *fs* when set) and returns the last value. The current namespace is restored afterwards." [path]
   (let* [src (__read-file path)]
     (if (nil? src)
       (throw (ex-info (str "load: cannot open '" path "'") {:path path}))
       (load-string src path))))
 
-(def load load-file)
+(def load "Same as load-file." load-file)
+(alter-meta! 'load assoc :arglists '([path]))
 
 ; --- Namespace support ---
 (def __requiring (atom []))
@@ -627,15 +685,17 @@
       nil
       (let* [rel (str (beer.string/replace (name ns-sym) "." "/") ".beer")
              found (__require-source rel)
-             saved (__current-ns)]
-        (if (nil? found)
+             saved (__current-ns)
+             ; natives-only namespaces (beer.bytes, an embedder's) have no file
+             native-only (and (nil? found) (find-ns ns-sym) (not (empty? (ns-publics ns-sym))))]
+        (if (and (nil? found) (not native-only))
           (throw (ex-info (str "require: cannot find file for '" ns-sym "'") {:ns ns-sym})))
         (if (some (fn [n] (= n ns-sym)) @__requiring)
           (throw (ex-info (str "require: circular dependency detected for '" ns-sym "'") {:ns ns-sym})))
         (swap! __requiring conj ns-sym)
         (try
           (in-ns ns-sym)
-          (load-string (first found) (second found))
+          (if found (load-string (first found) (second found)))
           (finally
             (in-ns saved)
             (swap! __requiring pop)))
@@ -677,7 +737,7 @@
 
 ; (require 'foo.bar), (require 'foo.bar :as 'fb :refer '[x]),
 ; (require '[foo.bar :as fb] '[baz :refer :all] 'qux)
-(defn require [& args]
+(defn require "Loads libraries once each and sets up aliases and refers: (require '[a.b :as ab :refer [x]] 'c) or (require 'a.b :as 'ab)." [& args]
   (reduce (fn [_ spec] (__require-one spec)) nil (__require-specs args))
   nil)
 
@@ -686,7 +746,7 @@
 (defn __ns-require-clause [clause]
   (list 'quote clause))
 
-(defmacro ns [name & clauses]
+(defmacro ns "Makes name the current namespace (creating it) and loads the libraries in a (:require ...) clause." [name & clauses]
   (let* [in-ns-form (list 'in-ns (list 'quote name))
          list-clauses (filter list? clauses)
          require-forms
@@ -702,7 +762,7 @@
 ;; Multimethods
 ;; ============================================================
 
-(defmacro defmulti [name dispatch-fn]
+(defmacro defmulti "Defines a multimethod name that calls the method registered with defmethod for (dispatch-fn args...), or the :default one." [name dispatch-fn]
   (let* [methods-sym (symbol (str name "-__methods"))
          dispatch-sym (symbol (str name "-__dispatch"))
          dv-sym (gensym "dv")
@@ -724,7 +784,7 @@
             (list 'apply m-sym 'args)
             err-expr))))))
 
-(defmacro defmethod [name dispatch-val params & body]
+(defmacro defmethod "Adds the method for dispatch-val to the multimethod name." [name dispatch-val params & body]
   (let* [methods-sym (symbol (str name "-__methods"))]
     (list 'def methods-sym
       (list 'assoc methods-sym dispatch-val
@@ -732,7 +792,7 @@
 
 
 ; time: evaluate expr, print the elapsed wall time, return its value
-(defmacro time [expr]
+(defmacro time "Evaluates expr, prints the elapsed time in milliseconds and returns its value." [expr]
   (let* [start (gensym "time__")
          ret (gensym "ret__")]
     (list 'let* [start '(nano-time)

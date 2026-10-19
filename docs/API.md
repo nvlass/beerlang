@@ -61,11 +61,17 @@ Prevent evaluation. Reader shorthand: `'form`.
 ```
 
 ### `loop` / `recur`
-Structured tail-recursive iteration.
+Structured tail-recursive iteration. Bindings may destructure, like `let`.
 ```clojure
 (loop [i 0 acc 0]
   (if (< i 10) (recur (+ i 1) (+ acc i)) acc))  ;=> 45
+(loop [[x & more] [1 2 3] acc 0]
+  (if x (recur more (+ acc x)) acc))            ;=> 6
 ```
+
+Map patterns (in `let`, `fn` params, `loop`, `doseq`): `{:keys [a b]}`,
+`{:strs [s]}`, `{:syms [q]}`, `{:or {b 0}}`, `{:as m}`, `{x :x}`, nested
+patterns, and keyword arguments with `(defn f [x & {:keys [opt]}] ...)`.
 
 ### `try` / `catch` / `finally` / `throw`
 Exception handling. Only maps can be thrown.
@@ -124,11 +130,26 @@ Send to / receive from a channel. Blocks the task if needed.
 (<! ch)  ;=> 42
 ```
 
+### `var`
+The Var a symbol names, resolved when the form is compiled (like code:
+home namespace, aliases, then `beer.core`; an unknown name is a compile
+error). Reader shorthand: `#'sym`. Calling a var calls its current value,
+so a var stored in a map, handed to `spawn` or given to a server sees
+later redefinitions; `@#'f` / `deref` reads it (dynamic bindings
+included), `meta` and `alter-meta!` take it, `var?` tests for one.
+```clojure
+(defn handler [req] "v1")
+(def routes {"/" #'handler})
+(defn handler [req] "v2")
+((routes "/") {})   ;=> "v2"
+#'handler           ;=> #'user/handler
+```
+
 ---
 
 ## Callable Non-Functions
 
-Keywords, hash maps, and vectors can be used in head (call) position, like Clojure's `IFn`:
+Keywords, hash maps, sets, vectors and vars (`#'f` calls f's current value) can be used in head (call) position, like Clojure's `IFn`:
 
 ```clojure
 ;; Keyword as map lookup (1-2 args)
@@ -199,6 +220,10 @@ All arithmetic supports fixnum, bigint, and float with automatic promotion.
 | `reduce-kv` | Reduce over map key-value pairs | `(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2})` → `3` |
 | `contains?` | Check key existence (maps and vector indices) | `(contains? {:a 1} :a)` → `true` |
 | `concat` | Concatenate sequences | `(concat [1 2] [3 4])` → `(1 2 3 4)` |
+| `seq` | `nil` if empty, else a list of the elements (`[k v]` entries for a map, chars for a string) | `(seq {:a 1})` → `([:a 1])` |
+
+Maps are seqable like in Clojure: `first`, `rest`, `map`, `filter`,
+`reduce`, `doseq`, `into`, `sort`, ... see `[k v]` entries.
 
 ### Type Predicates
 
@@ -220,12 +245,13 @@ All arithmetic supports fixnum, bigint, and float with automatic promotion.
 | `task?` | Task | `(task? (spawn 1))` → `true` |
 | `channel?` | Channel | `(channel? (chan))` → `true` |
 | `atom?` | Atom | `(atom? (atom 0))` → `true` |
+| `var?` | Var | `(var? #'map)` → `true` |
 
 ### String Functions
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `str` | Concatenate as string | `(str "hi" " " 42)` → `"hi 42"` |
+| `str` | Concatenate as string; nil adds nothing | `(str "hi" " " 42 nil)` → `"hi 42"` |
 | `subs` | Substring | `(subs "hello" 1 3)` → `"el"` |
 | `str/upper-case` | Uppercase | `(str/upper-case "hi")` → `"HI"` |
 | `str/lower-case` | Lowercase | `(str/lower-case "HI")` → `"hi"` |
@@ -300,7 +326,7 @@ installs a map:
 | `macroexpand` | Fully expand macros | `(macroexpand '(when true 1))` |
 | `set-macro!` | Mark a var as a macro | `(set-macro! 'my-macro)` |
 | `in-ns` | Switch/create namespace | `(in-ns 'my.ns)` |
-| `require` | Load namespaces, with optional alias/refer; specs as vectors or flat | `(require '[foo.bar :as fb :refer [x]] 'baz)`, `(require 'foo.bar :as 'fb)` |
+| `require` | Load namespaces, with optional alias/refer; specs as vectors or flat. A natives-only namespace (`beer.bytes`) needs no file | `(require '[foo.bar :as fb :refer [x]] 'baz)`, `(require 'foo.bar :as 'fb)` |
 | `eval` | Compile and execute a form in the calling task; a top-level `do` is evaluated subform by subform (Clojure); exceptions pass through unchanged | `(eval '(+ 1 2))` → `3` |
 | `read-string` | Parse a string into a beerlang value (one form) | `(read-string "(+ 1 2)")` → `(+ 1 2)` |
 | `keyword` | Create keyword from string | `(keyword "foo")` → `:foo` |
@@ -350,6 +376,9 @@ Functions and vars can carry metadata (arbitrary maps).
 | `with-meta` | Return function with new metadata | `(with-meta f {:tag "x"})` |
 | `alter-meta!` | Apply fn to var's current metadata | `(alter-meta! 'foo assoc :added true)` |
 | `doc` | Print documentation for a symbol (macro) | `(doc map)` |
+
+Natives carry `:arglists` and `:doc` too (from C doc tables, built on first
+`meta`), so `(doc conj)` works for every public `beer.core` var.
 
 `defn` and `defmacro` record `:arglists` (one parameter vector per arity) and
 support an optional docstring after the name; `doc` prints both:
@@ -653,15 +682,17 @@ Actor handlers receive `(state msg)` and return `{:state new-state}` (or `{:stat
 | `when` | Conditional without else branch | `(when (> x 0) (println "pos"))` |
 | `if-let` | Bind and branch on truthiness | `(if-let [x (get m :a)] (inc x) 0)` |
 | `when-let` | Bind and run body when truthy | `(when-let [[a b] (find-pair)] (+ a b))` |
-| `and` | Short-circuit logical AND | `(and true 42)` → `42` |
+| `and` | Short-circuit logical AND: first falsy value, else the last | `(and true 42)` → `42`, `(and nil 1)` → `nil` |
 | `or` | Short-circuit logical OR | `(or nil false 42)` → `42` |
 | `cond` | Multi-branch conditional | `(cond (< x 0) "neg" (> x 0) "pos" :else "zero")` |
 | `->` | Thread-first | `(-> 5 (- 3) (* 2))` → `4` |
 | `->>` | Thread-last | `(->> [1 2 3] (map inc) (filter odd?))` → `(3)` |
-| `let` | Destructuring let bindings | `(let [[a b] [1 2]] (+ a b))` → `3` |
+| `let` | Destructuring let bindings (vectors and maps; also in `fn` params, `loop` and `doseq`) | `(let [[a b] [1 2]] (+ a b))` → `3`, `(let [{:keys [x y] :or {y 0} :as m} {:x 1}] [x y])` → `[1 0]` |
 | `with-open` | Auto-close resource | `(with-open [f (open "x" :read)] (read-line f))` |
 | `ns` | Declare namespace with requires | `(ns my.lib (:require [other :as o]))` |
 | `doseq` | Iterate sequence for side effects | `(doseq [x [1 2 3]] (println x))` |
+| `dotimes` | Run body n times with i bound to 0 .. n-1 | `(dotimes [i 3] (println i))` |
+| `with-out-str` | Evaluate body with `*out*` bound to a string stream; return what was printed | `(with-out-str (println "hi"))` → `"hi\n"` |
 | `binding` | Task-local values for dynamic vars while the body runs (inherited by spawned tasks, restored after, also on throw) | `(binding [*out* f] (println "to f"))` |
 | `set!` | Change the running task's binding of a dynamic var | `(binding [*x* 1] (set! *x* 2) *x*)` → `2` |
 

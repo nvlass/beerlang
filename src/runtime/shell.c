@@ -12,6 +12,7 @@
 #include "hashmap.h"
 #include "symbol.h"
 #include "namespace.h"
+#include "docs.h"
 #include "memory.h"
 #include "core.h"
 #include "native.h"
@@ -151,7 +152,12 @@ static void register_native_in(Namespace* ns, const char* name, NativeFn fn) {
     object_release(fn_val);
 }
 
+static const NativeDoc shell_docs[] = {
+    { "shell-exec", "([cmd & args])", "Runs the program cmd with args (no shell) and waits: {:exit n :out s :err s}." },
+};
+
 void core_register_shell(void) {
+    docs_register("beer.shell", shell_docs, sizeof(shell_docs) / sizeof(shell_docs[0]));
     Namespace* shell_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.shell");
     if (!shell_ns) return;
     register_native_in(shell_ns, "shell-exec", native_shell_exec);

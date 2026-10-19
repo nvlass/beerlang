@@ -348,8 +348,21 @@ static int cmd_new(const char* dir) {
     return eval_form(expr, "<beer new>");
 }
 
-static int cmd_run(void) {
-    return eval_form("(do (require 'beer.tools) (beer.tools/run))", "<beer run>");
+static int cmd_run(const char* tar_path) {
+    if (!tar_path) {
+        return eval_form("(do (require 'beer.tools) (beer.tools/run))", "<beer run>");
+    }
+    Value path = string_from_cstr(tar_path);
+    char* quoted = NULL;
+    size_t cap = 0;
+    size_t len = value_sprint_readable(path, &quoted, &cap, 0);
+    object_release(path);
+    char* expr = xmalloc(len + 64);
+    snprintf(expr, len + 64, "(do (require 'beer.tools) (beer.tools/run %s))", quoted);
+    int result = eval_form(expr, "<beer run>");
+    free(expr);
+    free(quoted);
+    return result;
 }
 
 static int cmd_build(void) {
@@ -592,7 +605,7 @@ static void print_usage(void) {
     printf("Usage: beer [command] [options]\n\n");
     printf("Commands:\n");
     printf("  new <name>     Create a new project\n");
-    printf("  run            Run the project's -main function\n");
+    printf("  run [app.tar]  Run the project's (or a package's) -main function\n");
     printf("  build          Build project into a .tar archive\n");
     printf("  ubertar        Build standalone .tar with dependencies\n");
     printf("  compile [dir]  Compile stale .beer files to .beerc\n");
@@ -696,7 +709,7 @@ int main(int argc, char** argv) {
         if (strcmp(subcommand, "new") == 0) {
             result = cmd_new(subcmd_arg);
         } else if (strcmp(subcommand, "run") == 0) {
-            result = cmd_run();
+            result = cmd_run(subcmd_arg);
         } else if (strcmp(subcommand, "build") == 0) {
             result = cmd_build();
         } else if (strcmp(subcommand, "ubertar") == 0) {

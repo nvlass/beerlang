@@ -15,6 +15,7 @@
 #include "vm.h"
 #include "value.h"
 #include "memory.h"
+#include "docs.h"
 #include "fixnum.h"
 #include "bigint.h"
 #include "bstring.h"
@@ -725,21 +726,21 @@ static SortItem* sort_items_from(Value coll, size_t* n, bool* ok) {
     if (is_vector(coll) || is_set(coll)) {
         Value vec = is_set(coll) ? set_elements(coll) : coll;
         *n = vector_length(vec);
-        items = malloc((*n ? *n : 1) * sizeof(SortItem));
+        items = xmalloc((*n ? *n : 1) * sizeof(SortItem));
         for (size_t i = 0; i < *n; i++) {
             items[i].key = items[i].val = vector_get(vec, i);
         }
         if (is_set(coll)) object_release(vec);   /* elements live in the set */
     } else if (is_cons(coll)) {
         *n = (size_t)list_length(coll);
-        items = malloc((*n ? *n : 1) * sizeof(SortItem));
+        items = xmalloc((*n ? *n : 1) * sizeof(SortItem));
         size_t i = 0;
         for (Value c = coll; is_cons(c); c = cdr(c), i++) {
             items[i].key = items[i].val = car(c);
         }
     } else if (is_string(coll)) {
         *n = string_char_length(coll);
-        items = malloc((*n ? *n : 1) * sizeof(SortItem));
+        items = xmalloc((*n ? *n : 1) * sizeof(SortItem));
         for (size_t i = 0; i < *n; i++) {
             items[i].key = items[i].val = make_char(string_char_at(coll, i));
         }
@@ -760,12 +761,14 @@ static Value sort_items_to_list(VM* vm, SortItem* items, size_t n) {
         vm_error(vm, msg);
         return VALUE_NIL;
     }
-    Value* vals = malloc((n ? n : 1) * sizeof(Value));
+    Value* vals = xmalloc((n ? n : 1) * sizeof(Value));
     for (size_t i = 0; i < n; i++) vals[i] = items[i].val;
     Value result = list_from_array(vals, n);
     free(vals);
     return result;
 }
+
+static Value native_seq_internal(VM* vm, int argc, Value* argv);
 
 /* __sort-native: (__sort-native coll) => coll's elements sorted by compare */
 static Value native_sort_native(VM* vm, int argc, Value* argv) {
@@ -775,13 +778,16 @@ static Value native_sort_native(VM* vm, int argc, Value* argv) {
     }
     size_t n;
     bool ok;
-    SortItem* items = sort_items_from(argv[0], &n, &ok);
+    /* A map sorts its [k v] entries, which must outlive the items */
+    Value coll = is_hashmap(argv[0]) ? native_seq_internal(vm, 1, argv) : argv[0];
+    SortItem* items = sort_items_from(coll, &n, &ok);
     if (!ok) {
-        vm_error(vm, "sort: argument must be a vector, list, set, string or nil");
+        vm_error(vm, "sort: argument must be a vector, list, set, map, string or nil");
         return VALUE_NIL;
     }
     Value result = sort_items_to_list(vm, items, n);
     free(items);
+    if (!value_identical(coll, argv[0])) object_release(coll);
     return result;
 }
 
@@ -979,6 +985,14 @@ static Value native_first(VM* vm, int argc, Value* argv) {
         object_release(elems);
         return v;
     }
+    if (is_hashmap(coll)) {
+        if (hashmap_size(coll) == 0) return VALUE_NIL;
+        Value entries = hashmap_entries(coll);
+        Value v = vector_get(entries, 0);
+        object_retain(v);
+        object_release(entries);
+        return v;
+    }
     vm_error(vm, "first: argument must be a sequence");
     return VALUE_NIL;
 }
@@ -1021,6 +1035,16 @@ static Value native_rest(VM* vm, int argc, Value* argv) {
         Value lst = vector_to_list(tail);
         object_release(tail);
         object_release(elems);
+        return lst;
+    }
+    if (is_hashmap(coll)) {
+        size_t len = hashmap_size(coll);
+        if (len <= 1) return VALUE_NIL;
+        Value entries = hashmap_entries(coll);
+        Value tail = vector_slice(entries, 1, len);
+        Value lst = vector_to_list(tail);
+        object_release(tail);
+        object_release(entries);
         return lst;
     }
     vm_error(vm, "rest: argument must be a sequence");
@@ -1267,8 +1291,42 @@ static Value native_seq_internal(VM* vm, int argc, Value* argv) {
         object_release(elems);
         return lst;
     }
+    if (is_hashmap(coll)) {
+        Value entries = hashmap_entries(coll);
+        Value lst = vector_to_list(entries);
+        object_release(entries);
+        return lst;
+    }
     if (is_pointer(coll)) object_retain(coll);
     return coll;
+}
+
+/* seq: (seq coll) => nil if coll is empty, else a list of its elements:
+ * [k v] entries for a map, characters for a string */
+static Value native_seq(VM* vm, int argc, Value* argv) {
+    if (argc != 1) {
+        vm_error(vm, "seq: requires exactly 1 argument");
+        return VALUE_NIL;
+    }
+    Value coll = argv[0];
+    if (is_nil(coll) || is_cons(coll)) {
+        if (is_pointer(coll)) object_retain(coll);
+        return coll;
+    }
+    if (is_string(coll)) {
+        Value result = VALUE_NIL;
+        for (size_t i = string_char_length(coll); i > 0; i--) {
+            Value next = cons(make_char(string_char_at(coll, i - 1)), result);
+            if (is_pointer(result)) object_release(result);
+            result = next;
+        }
+        return result;
+    }
+    if (!is_vector(coll) && !is_set(coll) && !is_hashmap(coll)) {
+        vm_error(vm, "seq: argument must be a collection, string or nil");
+        return VALUE_NIL;
+    }
+    return native_seq_internal(vm, argc, argv);
 }
 
 /* hash-set: (hash-set & xs) => set of the args (what #{...} reads as) */
@@ -1739,6 +1797,7 @@ static Value native_str(VM* vm, int argc, Value* argv) {
     size_t len = 0;
 
     for (int i = 0; i < argc; i++) {
+        if (is_nil(argv[i])) continue;   /* (str nil) is "" as in Clojure */
         len = is_collection(argv[i])
             ? value_sprint_readable(argv[i], &buf, &cap, len)
             : value_sprint(argv[i], &buf, &cap, len);
@@ -1882,6 +1941,7 @@ static Value native_type(VM* vm, int argc, Value* argv) {
             case TYPE_FUNCTION:  name = "function";  break;
             case TYPE_NATIVE_FN: name = "function";  break;
             case TYPE_ATOM:      name = "atom";      break;
+            case TYPE_VAR:       name = "var";       break;
             case TYPE_STRBUILDER: name = "string-builder"; break;
             default:             name = "unknown";   break;
         }
@@ -2093,6 +2153,17 @@ static Value native_tar_read(VM* vm, int argc, Value* argv) {
     return result;
 }
 
+/* (__tar-add! "app.tar") => number of .beer entries added to the tar index
+ * (they win over BEERPATH's), or nil if the file can't be read */
+static Value native_tar_add(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_string(argv[0])) {
+        vm_error(vm, "__tar-add!: requires a path string");
+        return VALUE_NIL;
+    }
+    int n = tar_index_add_file(&global_tar_index, string_cstr(argv[0]));
+    return n < 0 ? VALUE_NIL : make_fixnum(n);
+}
+
 /* (__current-ns) => symbol naming the current namespace */
 static Value native_current_ns(VM* vm, int argc, Value* argv) {
     (void)argv;
@@ -2195,8 +2266,9 @@ static Value native_apply(VM* vm, int argc, Value* argv) {
     Value fn = argv[0];
     if (!is_function(fn) && !is_native_function(fn) &&
         !(is_pointer(fn) && (object_type(fn) == TYPE_KEYWORD || object_type(fn) == TYPE_HASHMAP ||
-                             object_type(fn) == TYPE_VECTOR || object_type(fn) == TYPE_SET))) {
-        vm_error(vm, "apply: first argument must be a function (or a keyword, map, vector or set)");
+                             object_type(fn) == TYPE_VECTOR || object_type(fn) == TYPE_SET ||
+                             object_type(fn) == TYPE_VAR))) {
+        vm_error(vm, "apply: first argument must be a function (or a keyword, map, vector, set or var)");
         return VALUE_NIL;
     }
 
@@ -3012,6 +3084,7 @@ static void sb_append_values(Value sbv, int argc, Value* argv) {
     StringBuilder* sb = (StringBuilder*)untag_pointer(sbv);
     for (int i = 0; i < argc; i++) {
         Value x = argv[i];
+        if (is_nil(x)) continue;
         if (is_string(x)) {
             strbuilder_append(sbv, string_cstr(x), string_byte_length(x));
         } else if (value_identical(x, sbv)) {
@@ -3246,6 +3319,7 @@ void core_register_collections(void) {
     register_native(core_ns, "assoc", native_assoc);
     register_native(core_ns, "dissoc", native_dissoc);
     register_native(core_ns, "__seq", native_seq_internal);
+    register_native(core_ns, "seq", native_seq);
     register_native(core_ns, "hash-set", native_hash_set);
     register_native(core_ns, "set", native_set);
     register_native(core_ns, "disj", native_disj);
@@ -3315,6 +3389,7 @@ void core_register_utility(void) {
     register_native(core_ns, "current-task", native_current_task);
     register_native(core_ns, "__file-read", native_file_read);
     register_native(core_ns, "__tar-read", native_tar_read);
+    register_native(core_ns, "__tar-add!", native_tar_add);
     register_native(core_ns, "__current-ns", native_current_ns);
     register_native(core_ns, "__alias!", native_alias);
     register_native(core_ns, "__push-bindings", native_push_bindings);
@@ -3406,7 +3481,24 @@ void core_register_utility(void) {
  * beer.string Namespace Registration
  * ================================================================= */
 
+static const NativeDoc string_docs[] = {
+    { "upper-case", "([s])", "s with ASCII letters upper-cased." },
+    { "lower-case", "([s])", "s with ASCII letters lower-cased." },
+    { "trim", "([s])", "s without leading and trailing whitespace." },
+    { "join", "([coll] [sep coll])", "The elements of coll as by str, separated by sep (default none)." },
+    { "split", "([s delim])", "A vector of the parts of s between occurrences of the string delim." },
+    { "includes?", "([s sub])", "True if s contains sub." },
+    { "starts-with?", "([s prefix])", "True if s starts with prefix." },
+    { "ends-with?", "([s suffix])", "True if s ends with suffix." },
+    { "replace", "([s target replacement])", "s with every occurrence of the string target replaced." },
+    { "subs", "([s start] [s start end])", "The substring of s from start (inclusive) to end (exclusive, default the length), in characters." },
+    { "byte-count", "([s])", "The UTF-8 length of s in bytes (count is characters)." },
+    { "builder", "([& xs])", "A new mutable string builder, seeded with the xs as by str. (str b) gives its contents." },
+    { "append!", "([b & xs])", "Appends the xs to builder b as str would and returns b. Use instead of (str acc x) in loops." },
+};
+
 void core_register_string(void) {
+    docs_register("beer.string", string_docs, sizeof(string_docs) / sizeof(string_docs[0]));
     Namespace* str_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.string");
     if (!str_ns) return;
 
@@ -3730,6 +3822,23 @@ static Value native_spit(VM* vm, int argc, Value* argv) {
     return VALUE_NIL;
 }
 
+/* (__string-stream) => a write-only stream that keeps what is written */
+static Value native_string_stream(VM* vm, int argc, Value* argv) {
+    (void)argv;
+    if (argc != 0) { vm_error(vm, "__string-stream: takes no arguments"); return VALUE_NIL; }
+    return stream_string_new();
+}
+
+/* (__string-stream-contents s) => what was written to s so far */
+static Value native_string_stream_contents(VM* vm, int argc, Value* argv) {
+    if (argc != 1 || !is_stream(argv[0]) ||
+        ((Stream*)untag_pointer(argv[0]))->kind != STREAM_STRING) {
+        vm_error(vm, "__string-stream-contents: requires a string stream");
+        return VALUE_NIL;
+    }
+    return stream_string_contents(argv[0]);
+}
+
 /* stream?: (stream? x) */
 static Value native_stream_q(VM* vm, int argc, Value* argv) {
     if (argc != 1) {
@@ -3754,6 +3863,8 @@ void core_register_streams(void) {
     register_native(core_ns, "__slurp", native_slurp);
     register_native(core_ns, "__spit", native_spit);
     register_native(core_ns, "stream?", native_stream_q);
+    register_native(core_ns, "__string-stream", native_string_stream);
+    register_native(core_ns, "__string-stream-contents", native_string_stream_contents);
 }
 
 /* =================================================================
@@ -3940,7 +4051,14 @@ static Value native_tar_create(VM* vm, int argc, Value* argv) {
     return VALUE_NIL;
 }
 
+static const NativeDoc tar_docs[] = {
+    { "tar-list", "([path])", "The entries of the tar file at path: a vector of {:name :size :offset} maps." },
+    { "tar-read-entry", "([path name])", "The contents of entry name in the tar file at path, as a string. Throws if there is no such entry." },
+    { "tar-create", "([path files])", "Writes a tar file at path from a map of entry name to contents string." },
+};
+
 void core_register_tar(void) {
+    docs_register("beer.tar", tar_docs, sizeof(tar_docs) / sizeof(tar_docs[0]));
     Namespace* tar_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.tar");
     if (!tar_ns) return;
     register_native(tar_ns, "tar-list", native_tar_list);
@@ -4030,8 +4148,8 @@ static Value native_task_watch(VM* vm, int argc, Value* argv) {
         vm_error(vm, "task-watch: first argument must be a task");
         return VALUE_NIL;
     }
-    if (!is_function(argv[1]) && !is_native_function(argv[1])) {
-        vm_error(vm, "task-watch: second argument must be a function");
+    if (!is_function(argv[1]) && !is_native_function(argv[1]) && !is_var(argv[1])) {
+        vm_error(vm, "task-watch: second argument must be a function or a var");
         return VALUE_NIL;
     }
 
@@ -4091,8 +4209,13 @@ static Value native_deref(VM* vm, int argc, Value* argv) {
         vm_error(vm, "deref expects 1 argument");
         return VALUE_NIL;
     }
+    if (is_var(argv[0])) {
+        Value v = var_get_value((Var*)untag_pointer(argv[0]));
+        if (is_pointer(v)) object_retain(v);
+        return v;
+    }
     if (!is_atom(argv[0])) {
-        vm_error(vm, "deref expects an atom");
+        vm_error(vm, "deref expects an atom or a var");
         return VALUE_NIL;
     }
     Value val = atom_deref(argv[0]);
@@ -4131,6 +4254,12 @@ static Value native_compare_and_set(VM* vm, int argc, Value* argv) {
     return atom_compare_and_set(argv[0], argv[1], argv[2]) ? VALUE_TRUE : VALUE_FALSE;
 }
 
+/* (var? x) */
+static Value native_var_q(VM* vm, int argc, Value* argv) {
+    if (argc != 1) { vm_error(vm, "var?: requires exactly 1 argument"); return VALUE_NIL; }
+    return is_var(argv[0]) ? VALUE_TRUE : VALUE_FALSE;
+}
+
 /* (atom? x) */
 static Value native_atom_q(VM* vm, int argc, Value* argv) {
     (void)vm;
@@ -4147,6 +4276,7 @@ void core_register_atoms(void) {
     register_native(core_ns, "reset!", native_reset);
     register_native(core_ns, "compare-and-set!", native_compare_and_set);
     register_native(core_ns, "atom?", native_atom_q);
+    register_native(core_ns, "var?", native_var_q);
 }
 
 /* =================================================================
@@ -4156,28 +4286,23 @@ void core_register_atoms(void) {
 /* Helper: resolve a symbol to its Var. Unqualified: current ns, then
  * beer.core. Qualified: the current ns's aliases, then the namespace. */
 static Var* resolve_symbol_to_var(VM* vm __attribute__((unused)), Value sym) {
-    Namespace* ns = namespace_registry_current(global_namespace_registry);
-    if (!ns) return NULL;
-    if (symbol_has_namespace(sym)) {
-        const char* full = symbol_str(sym);
-        const char* slash = strchr(full, '/');
-        char ns_name[256];
-        size_t ns_len = slash ? (size_t)(slash - full) : 0;
-        if (!slash || ns_len >= sizeof(ns_name)) return NULL;
-        memcpy(ns_name, full, ns_len);
-        ns_name[ns_len] = '\0';
-        const char* target = namespace_resolve_alias(ns, symbol_intern(ns_name));
-        Namespace* target_ns = namespace_registry_get(global_namespace_registry,
-                                                      target ? target : ns_name);
-        return target_ns ? namespace_lookup(target_ns, symbol_intern(slash + 1)) : NULL;
+    return namespace_resolve_var(namespace_registry_current(global_namespace_registry), sym);
+}
+
+/* A var's metadata (owned). Natives get theirs from the doc tables on
+ * first use; (def alias native) in the native's namespace finds the
+ * native's entry. */
+static Value var_meta(Var* var) {
+    if (is_nil(var->meta) && !is_nil(var->ns)) {
+        const char* ns_name = symbol_str(var->ns);
+        var->meta = docs_lookup(ns_name, symbol_str(var->name));
+        if (is_nil(var->meta) && is_native_function(var->value)) {
+            var->meta = docs_lookup(ns_name, native_function_name(var->value));
+        }
     }
-    Var* var = namespace_lookup(ns, sym);
-    if (var) return var;
-    Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
-    if (core_ns && core_ns != ns) {
-        var = namespace_lookup(core_ns, sym);
-    }
-    return var;
+    Value m = var->meta;
+    if (is_pointer(m)) object_retain(m);
+    return m;
 }
 
 /* (meta x) — if x is symbol, resolve to Var and return its meta;
@@ -4186,11 +4311,12 @@ static Var* resolve_symbol_to_var(VM* vm __attribute__((unused)), Value sym) {
 /* (__set-meta! sym m) — set var sym's metadata; returns m (alter-meta! in
  * lib/core.beer) */
 static Value native_set_meta(VM* vm, int argc, Value* argv) {
-    if (argc != 2 || !is_pointer(argv[0]) || object_type(argv[0]) != TYPE_SYMBOL) {
-        vm_error(vm, "alter-meta!: first argument must be a symbol");
+    bool sym = is_pointer(argv[0]) && object_type(argv[0]) == TYPE_SYMBOL;
+    if (argc != 2 || !(sym || is_var(argv[0]))) {
+        vm_error(vm, "alter-meta!: first argument must be a symbol or a var");
         return VALUE_NIL;
     }
-    Var* var = resolve_symbol_to_var(vm, argv[0]);
+    Var* var = sym ? resolve_symbol_to_var(vm, argv[0]) : (Var*)untag_pointer(argv[0]);
     if (!var) {
         char buf[256];
         snprintf(buf, sizeof(buf), "alter-meta!: var not found: %s", symbol_str(argv[0]));
@@ -4214,11 +4340,10 @@ static Value native_meta(VM* vm, int argc, Value* argv) {
 
     if (is_pointer(x) && object_type(x) == TYPE_SYMBOL) {
         Var* var = resolve_symbol_to_var(vm, x);
-        if (!var) return VALUE_NIL;
-        Value m = var->meta;
-        if (is_pointer(m)) object_retain(m);
-        return m;
+        return var ? var_meta(var) : VALUE_NIL;
     }
+
+    if (is_var(x)) return var_meta((Var*)untag_pointer(x));
 
     if (is_function(x)) {
         Value m = function_get_meta(x);

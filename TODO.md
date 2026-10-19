@@ -6,26 +6,20 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 687 (`bash tests/smoke_test.sh`)
+- REPL smoke tests: 733 (`bash tests/smoke_test.sh`)
 - **Last Updated:** 2026-10-19
 
 ## Open Items at a Glance
 
 Small / concrete:
-- beeros requests still open: docs (`:doc`/`:arglists`) on natives (#12);
-  `beer run app.tar`
-  (host CLI); `*fs*` for `open`/`beer.tar` (not needed by beeros now) —
+- beeros requests still open: `*fs*` for `open`/`beer.tar` (not needed by
+  beeros now) —
   see "beeros requests" below
 - `::kw` isn't auto-resolved (reads as a keyword named `:kw`). Resolving
   at read time needs `load`, the file runner and `beerc` to read
   form-by-form instead of `reader_read_all` up front, or the file's
   `(ns ...)` hasn't run yet
-- Maps aren't seqable: `seq`/`map`/`reduce`/`doseq` over a map fail
-  (`reduce-kv` works)
-- No string output stream: `with-out-str`, and `:out` messages in the EDN
-  nREPL (whose sessions bind `*ns*` but not `*out*`), need one
-- Destructuring is vectors only: no map destructuring (`{:keys [a]}`) in
-  `let` or `fn`; `loop` doesn't destructure
+
 - `make asan` races under `-j` (`asan: clean all` runs clean in parallel);
   run it as `make asan -j1` or twice
 - stdin/stdout/stderr stay blocking fds: `(read-line *in*)` inside a task
@@ -34,7 +28,6 @@ Small / concrete:
   `(str 3.14159265)` → `"3.14159"`, `-250.0` prints as `-250`. `json/emit`
   uses shortest round-trip formatting; the core printer should too
 - String literals don't support `\uXXXX` escapes in the reader
-- `(str nil)` is `"nil"` (Clojure: `""`), so `(str "a" nil)` is `"anil"`
 - `(str coll)` / `pr-str` of collections go through `open_memstream` +
   `value_print_readable` (`value_sprint_readable` in value.c): a stream
   per call. Fine for now; worth a direct buffer printer if it shows up
@@ -466,8 +459,9 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
 5. **Tar packages that know their entry point.** beeros wants to run a
    `.tar` the same way `beer run` runs a project:
    - ~~Include `beer.edn` in what `beer build` / `beer ubertar` write~~
-     (done); still to do: let `beer run app.tar` read `:main` (and later
-     other keys) from it.
+     (done); `beer run app.tar` reads `:main` from it and runs it with the
+     tar's entries ahead of BEERPATH's (done 2026-10-19,
+     `tar_index_add_file` / `__tar-add!`).
      The project file doubles as the package description; no new
      manifest format.
    - ~~Index a tar from memory~~: not needed by beeros any more (checked
@@ -636,8 +630,19 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
     name or nil), `meta`/`alter-meta!` on qualified and aliased symbols
     (aliases of the current ns, like unqualified lookup), `:arglists` from
     `defn` and `defmacro` (so every defn now calls `alter-meta!` at load:
-    ~0.2 ms on a 4 ms startup), `doc` prints the arglists. Still open:
-    docs on natives (below). Original request:
+    ~0.2 ms on a 4 ms startup), `doc` prints the arglists.
+    Docs on natives, done (2026-10-19): `NativeDoc` tables
+    (`include/docs.h`) registered per namespace with `docs_register`;
+    `meta` on a var with no metadata builds `{:arglists :doc}` from its
+    home namespace's table once and keeps it on the var (vars now record
+    their namespace). `(def alias native)` finds the native's entry. Every
+    public `beer.core` var has a docstring (smoke test keeps it so), as do
+    `beer.string`, `beer.bytes`, `json`, `tar`, `tcp`, `udp`, `shell`,
+    `crypto`, `beerc` and `beer.test`; `range` is multi-arity and
+    `max`/`min` take `[x & more]` for useful arglists. `require` of a
+    natives-only namespace (`beer.bytes`) works now. Cost: ~0.1 ms startup,
+    ~17 KB binary. beeros: `docs_register("beer.gfx", ...)` for its natives.
+    Original request:
     beeros's browsable docs (`beer.help`: `describe`, `apropos`,
     `namespaces`, F1 in its WM) work around three gaps:
     - **`all-ns`** (and `find-ns`): neither exists. beer.help guesses the
@@ -657,6 +662,35 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
       `:arglists`), or docs set from a .beer file after registration.
     beeros also lists a native-namespace docs pass and fn docstrings in
     its own `lib/*.beer`; those are on its side.
+
+13. **`var` / `#'` and callable vars — done (2026-10-19):** `(var sym)`
+    is a special form resolved at compile time (`namespace_resolve_var`,
+    shared with `meta` and macro lookup; unknown name = compile error),
+    the Var goes into the constant pool. CALL/TAIL_CALL on a Var call its
+    current value (`var_get_value`, so bindings apply), which also covers
+    `apply`, `spawn`, `map` and `task-watch`. `deref`/`@`, `var?`,
+    `(type v)` = `:var`, `meta`/`alter-meta!` on a var, printing
+    `#'ns/name` (vars record their namespace now), `.beerc` constant tag
+    `BEERC_VAR`. Original request: Calls
+    by name already see redefinitions (a fn body looks its vars up at
+    call time), but a fn *value* stored in a map or handed to `spawn`
+    keeps the old code. Clojure's answer is to store the var:
+    `(run-server #'app)`, `{"C-f" #'forward-char}`; calling a var calls
+    its current value. beerlang has neither: `(var handler)` is
+    "undefined var 'var'", and the reader has no `#'`.
+    - Wanted: `(var sym)` special form returning the Var (resolved like
+      the compiler does: aliases, home ns, beer.core), `#'sym` reader
+      sugar, and vars callable (`apply` / `OP_CALL` on a Var calls
+      `var_get_value`, dynamic bindings included), plus `deref`/`@` on a
+      var. `var?`, and `meta` on a var (would also help #12).
+    - Size: a compiler special form + a reader dispatch + one case in
+      the call path; vars are already objects (`Var*`), so mostly
+      exposing them as a Value type if they aren't one yet.
+    - Usefulness: moderate. beeros can work around it (store symbols and
+      `resolve`, or `(fn [& a] (apply f a))` wrappers), but for a
+      live-patching, teaching system the Clojure idiom is what people
+      will type, and it makes keymaps / WM handlers / routes hot-swappable
+      without restarts. Low priority next to #12.
 
 Not needed from beerlang after all (checked against beeros 2026-10-19):
 user-defined streams. beeros's terminal and beermacs's eval output use

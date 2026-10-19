@@ -17,6 +17,7 @@
 #include "strbuilder.h"
 #include "scheduler.h"
 #include "core.h"
+#include "docs.h"
 #include "aot.h"
 #include "cffi.h"
 
@@ -47,6 +48,7 @@ Var* var_new(Value name) {
     var->name = name;
     /* Don't retain — interned symbols are managed by the intern table */
 
+    var->ns = VALUE_NIL;
     var->value = VALUE_NIL;
     var->is_macro = false;
     var->is_dynamic = false;
@@ -137,6 +139,7 @@ Var* namespace_define(Namespace* ns, Value symbol, Value value) {
         /* Create new var */
         var = var_new(symbol);
         if (!var) return NULL;
+        var->ns = symbol_intern(ns->name);
 
         /* Store Var as tagged pointer in hashmap (ref-counted) */
         Value tagged_var = tag_pointer(var);
@@ -413,6 +416,7 @@ void namespace_init_bare(void) {
     namespace_registry_set_current(global_namespace_registry, user_ns);
 
     /* Register core native functions (into beer.core) */
+    docs_register_core();
     core_register_arithmetic();
     core_register_io();
     core_register_comparison();
@@ -490,4 +494,27 @@ void namespace_shutdown(void) {
         global_namespace_registry = NULL;
     }
     namespace_generation++;
+}
+
+Var* namespace_resolve_var(Namespace* home, Value sym) {
+    if (!home || !global_namespace_registry || !is_pointer(sym) || object_type(sym) != TYPE_SYMBOL) {
+        return NULL;
+    }
+    if (symbol_has_namespace(sym)) {
+        const char* full = symbol_str(sym);
+        const char* slash = strchr(full, '/');
+        char ns_name[256];
+        size_t ns_len = slash ? (size_t)(slash - full) : 0;
+        if (!slash || ns_len >= sizeof(ns_name)) return NULL;
+        memcpy(ns_name, full, ns_len);
+        ns_name[ns_len] = '\0';
+        const char* target = namespace_resolve_alias(home, symbol_intern(ns_name));
+        Namespace* target_ns = namespace_registry_get(global_namespace_registry,
+                                                      target ? target : ns_name);
+        return target_ns ? namespace_lookup(target_ns, symbol_intern(slash + 1)) : NULL;
+    }
+    Var* var = namespace_lookup(home, sym);
+    if (var) return var;
+    Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
+    return (core_ns && core_ns != home) ? namespace_lookup(core_ns, sym) : NULL;
 }

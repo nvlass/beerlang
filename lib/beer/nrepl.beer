@@ -9,6 +9,7 @@
     {:op \"describe\"                    :id \"id-3\"}
 
   Server → client (one or more messages per request):
+    {:id \"id-1\" :out \"printed text\"}   (only if the form printed)
     {:id \"id-1\" :value \"3\"}
     {:id \"id-1\" :status \"done\"}
 
@@ -33,11 +34,18 @@
 
 ;; ── Op handlers ───────────────────────────────────────────────────────────────
 
+; What the form prints goes back as one {:out ...} message before its
+; value (or error), once it has finished
 (defn handle-eval [stream id code]
-  (let [result (try
-                 {:id id :value (pr-str (eval (read-string code)))}
-                 (catch e
-                   {:id id :err (str (:message e))}))]
+  (let [out     (__string-stream)
+        result  (binding [*out* out]
+                  (try
+                    {:id id :value (pr-str (eval (read-string code)))}
+                    (catch e
+                      {:id id :err (str (:message e))})))
+        printed (__string-stream-contents out)]
+    (when (not= printed "")
+      (send-msg stream {:id id :out printed}))
     (send-msg stream result)
     (send-done stream id)))
 
@@ -72,7 +80,7 @@
 ;; ── Client loop ───────────────────────────────────────────────────────────────
 
 ; Each connection is a session with its own current namespace, starting in
-; user. (Output isn't captured yet: *out* stays the server's.)
+; user. Output of each eval is captured and sent as :out.
 (defn handle-client [stream]
   (swap! *clients* inc)
   (try

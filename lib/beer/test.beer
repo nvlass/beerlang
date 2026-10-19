@@ -19,7 +19,7 @@
 (defn -inc-fail-count! []
   (swap! beer.test/*fail-count* inc))
 
-(defmacro is [expr]
+(defmacro is "Asserts that expr is truthy and counts the result; (is (= expected actual)) prints both on failure." [expr]
   (if (and (list? expr) (= (first expr) (quote =)) (= (count expr) 3))
     ;; Special case: (is (= expected actual))
     (let* [expected-sym (gensym "expected")
@@ -44,17 +44,17 @@
                       (list (quote beer.test/-inc-fail-count!))
                       (list (quote println) (str "FAIL: " (pr-str expr))))))))
 
-(defmacro deftest [name & body]
+(defmacro deftest "Defines a no-argument test fn name running body and registers it for run-tests." [name & body]
   (list (quote do)
         (list (quote def) name (list (quote fn) (quote []) (cons (quote do) body)))
         (list (quote beer.test/-register-test!) (pr-str name) name)))
 
-(defmacro testing [description & body]
+(defmacro testing "Prints description, then evaluates body." [description & body]
   (cons (quote do)
         (cons (list (quote println) description)
               body)))
 
-(defn run-tests []
+(defn run-tests "Runs every registered test, printing failures and a summary; returns 0 if all passed, else 1." []
   (reset! beer.test/*test-count* 0)
   (reset! beer.test/*pass-count* 0)
   (reset! beer.test/*fail-count* 0)

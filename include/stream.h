@@ -18,6 +18,7 @@ typedef enum {
     STREAM_STDOUT,
     STREAM_STDERR,
     STREAM_SOCKET,
+    STREAM_STRING,   /* no fd: writes collect in write_buf (with-out-str) */
 } StreamKind;
 
 /* Stream operation result codes */
@@ -55,6 +56,11 @@ typedef struct {
 static inline bool is_stream(Value v) {
     return is_pointer(v) && object_type(v) == TYPE_STREAM;
 }
+
+/* A write-only stream with no fd that keeps everything written to it */
+Value stream_string_new(void);
+/* What a string stream holds so far, as a new string */
+Value stream_string_contents(Value stream);
 
 /* Create a stream from an existing fd */
 Value stream_from_fd(int fd, bool readable, bool writable, bool owns_fd, StreamKind kind);

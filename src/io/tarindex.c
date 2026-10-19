@@ -153,6 +153,31 @@ int tar_index_scan_dir(TarIndex* idx, const char* dir) {
     return total;
 }
 
+int tar_index_add_file(TarIndex* idx, const char* tar_path) {
+    TarIndex added;
+    tar_index_init(&added);
+    int n = tar_scan_file(&added, tar_path);
+    int sorted_count = idx->count;   /* lookups only search the sorted part */
+    for (int i = 0; i < added.count; i++) {
+        TarIndex sorted = { idx->entries, sorted_count, idx->capacity };
+        TarEntry* old = tar_index_lookup(&sorted, added.entries[i].ns_path);
+        if (old) {
+            *old = added.entries[i];
+            continue;
+        }
+        if (idx->count == idx->capacity) {
+            idx->capacity = idx->capacity ? idx->capacity * 2 : 64;
+            idx->entries = xrealloc(idx->entries, (size_t)idx->capacity * sizeof(TarEntry));
+        }
+        idx->entries[idx->count++] = added.entries[i];
+    }
+    tar_index_free(&added);
+    if (idx->count > 1) {
+        qsort(idx->entries, (size_t)idx->count, sizeof(TarEntry), tar_entry_cmp);
+    }
+    return n;
+}
+
 TarEntry* tar_index_lookup(TarIndex* idx, const char* rel_path) {
     /* Binary search */
     int lo = 0, hi = idx->count - 1;

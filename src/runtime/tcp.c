@@ -20,6 +20,7 @@
 #include "stream.h"
 #include "symbol.h"
 #include "namespace.h"
+#include "docs.h"
 #include "memory.h"
 #include "native.h"
 #include "scheduler.h"
@@ -323,7 +324,15 @@ static void register_native_in_ns(Namespace* ns, const char* name, NativeFn fn) 
     object_release(fn_val);
 }
 
+static const NativeDoc tcp_docs[] = {
+    { "tcp-listen", "([port] [port backlog])", "A listening socket on port (0 picks a free one); pass it to accept." },
+    { "tcp-accept", "([listener])", "Waits for the next connection on listener (other tasks keep running) and returns its stream." },
+    { "tcp-connect", "([host port] [host port timeout-ms])", "A stream connected to host:port. Throws on failure or after timeout-ms." },
+    { "tcp-local-port", "([sock])", "The local port of a socket or stream." },
+};
+
 void core_register_tcp(void) {
+    docs_register("beer.tcp", tcp_docs, sizeof(tcp_docs) / sizeof(tcp_docs[0]));
     Namespace* tcp_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.tcp");
     if (!tcp_ns) return;
     register_native_in_ns(tcp_ns, "tcp-listen", native_tcp_listen);

@@ -59,12 +59,28 @@
 ;; beer run
 ;; ----------------------------------------------------------------
 
-(defn run []
-  (let [config  (read-config)
-        main-ns (str (:main config))]
-    (prepend-paths! (:paths config))
-    (eval (read-string
-            (str "(do (require '" main-ns ") (" main-ns "/-main))")))))
+(defn run-main [main-ns]
+  (eval (read-string
+          (str "(do (require '" main-ns ") (" main-ns "/-main))"))))
+
+;; (run) runs the project in the current directory; (run "app.tar") a
+;; package from beer build / beer ubertar: its beer.edn names :main, and
+;; its entries are found by require ahead of BEERPATH's
+(defn run
+  ([]
+    (let [config (read-config)]
+      (prepend-paths! (:paths config))
+      (run-main (str (:main config)))))
+  ([tar-path]
+    (let [config (read-string
+                   (try (tar/read-entry tar-path "beer.edn")
+                     (catch e (throw (ex-info (str "beer run: can't read beer.edn from " tar-path
+                                                   ": " (:message e))
+                                              {:tar tar-path})))))]
+      (if (nil? (:main config))
+        (throw (ex-info (str "beer run: no :main in " tar-path "'s beer.edn") {:tar tar-path})))
+      (__tar-add! tar-path)
+      (run-main (str (:main config))))))
 
 ;; ----------------------------------------------------------------
 ;; beer build / beer ubertar
@@ -121,7 +137,7 @@
   (println "")
   (println "Commands:")
   (println "  new <name>     Create a new project")
-  (println "  run            Run the project's :main namespace")
+  (println "  run [app.tar]  Run the project's (or a package's) :main namespace")
   (println "  build          Build a distributable .tar")
   (println "  ubertar        Build a standalone .tar with all dependencies")
   (println "  compile [dir]  AOT-compile a project")

@@ -26,6 +26,7 @@
 #include "bytebuffer.h"
 #include "memory.h"
 #include "core.h"
+#include "docs.h"
 
 extern NamespaceRegistry* global_namespace_registry;
 
@@ -441,7 +442,7 @@ static Value native_bytes_hex(VM* vm, int argc, Value* argv) {
     }
     const uint8_t* data = bytebuffer_data(argv[0]);
     size_t n = bytebuffer_capacity(argv[0]);
-    char* out = malloc(n == 0 ? 1 : n * 3);
+    char* out = xmalloc(n == 0 ? 1 : n * 3);
     size_t pos = 0;
     for (size_t i = 0; i < n; i++) {
         if (i > 0) out[pos++] = ' ';
@@ -461,11 +462,77 @@ static Value native_bytes_addr(VM* vm, int argc, Value* argv) {
     return make_fixnum((int64_t)(uintptr_t)bytebuffer_data(argv[0]));
 }
 
+static const NativeDoc bytes_docs[] = {
+    { "alloc", "([n])", "A new zeroed buffer of n bytes; position 0, limit n." },
+    { "from-string", "([s])", "A new buffer holding the string's UTF-8 bytes." },
+    { "capacity", "([buf])", "Size of the buffer in bytes." },
+    { "position", "([buf])", "The cursor the relative get-/put- accessors read and write at." },
+    { "position!", "([buf n])", "Moves the position to n (0 <= n <= limit)." },
+    { "limit", "([buf])", "End of the readable/writable region for relative access." },
+    { "limit!", "([buf n])", "Sets the limit to n (0 <= n <= capacity); the position is pulled back to it if past it." },
+    { "remaining", "([buf])", "limit minus position." },
+    { "rewind!", "([buf])", "Sets the position to 0 (the limit stays)." },
+    { "clear!", "([buf])", "Sets the position to 0 and the limit to the capacity; the data stays." },
+    { "flip!", "([buf])", "Sets the limit to the position and the position to 0: switches from writing to reading what was written." },
+    { "u8", "([buf index])", "The unsigned 8-bit integer at byte index (ignores position and limit)." },
+    { "u16le", "([buf index])", "The unsigned 16-bit little-endian integer at byte index (ignores position and limit)." },
+    { "u16be", "([buf index])", "The unsigned 16-bit big-endian integer at byte index (ignores position and limit)." },
+    { "u32le", "([buf index])", "The unsigned 32-bit little-endian integer at byte index (ignores position and limit)." },
+    { "u32be", "([buf index])", "The unsigned 32-bit big-endian integer at byte index (ignores position and limit)." },
+    { "u64le", "([buf index])", "The unsigned 64-bit little-endian integer at byte index (ignores position and limit)." },
+    { "u64be", "([buf index])", "The unsigned 64-bit big-endian integer at byte index (ignores position and limit)." },
+    { "i8", "([buf index])", "The signed 8-bit integer at byte index (ignores position and limit)." },
+    { "i16le", "([buf index])", "The signed 16-bit little-endian integer at byte index (ignores position and limit)." },
+    { "i16be", "([buf index])", "The signed 16-bit big-endian integer at byte index (ignores position and limit)." },
+    { "i32le", "([buf index])", "The signed 32-bit little-endian integer at byte index (ignores position and limit)." },
+    { "i32be", "([buf index])", "The signed 32-bit big-endian integer at byte index (ignores position and limit)." },
+    { "i64le", "([buf index])", "The signed 64-bit little-endian integer at byte index (ignores position and limit)." },
+    { "i64be", "([buf index])", "The signed 64-bit big-endian integer at byte index (ignores position and limit)." },
+    { "u8!", "([buf index x])", "Stores x as an unsigned 8-bit integer at byte index (low bits kept); ignores position and limit." },
+    { "u16le!", "([buf index x])", "Stores x as an unsigned 16-bit little-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "u16be!", "([buf index x])", "Stores x as an unsigned 16-bit big-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "u32le!", "([buf index x])", "Stores x as an unsigned 32-bit little-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "u32be!", "([buf index x])", "Stores x as an unsigned 32-bit big-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "u64le!", "([buf index x])", "Stores x as an unsigned 64-bit little-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "u64be!", "([buf index x])", "Stores x as an unsigned 64-bit big-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "i8!", "([buf index x])", "Stores x as a signed 8-bit integer at byte index (low bits kept); ignores position and limit." },
+    { "i16le!", "([buf index x])", "Stores x as a signed 16-bit little-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "i16be!", "([buf index x])", "Stores x as a signed 16-bit big-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "i32le!", "([buf index x])", "Stores x as a signed 32-bit little-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "i32be!", "([buf index x])", "Stores x as a signed 32-bit big-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "i64le!", "([buf index x])", "Stores x as a signed 64-bit little-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "i64be!", "([buf index x])", "Stores x as a signed 64-bit big-endian integer at byte index (low bits kept); ignores position and limit." },
+    { "get-u8", "([buf])", "Reads an unsigned 8-bit integer at the position and advances it; throws past the limit." },
+    { "get-u16le", "([buf])", "Reads an unsigned 16-bit little-endian integer at the position and advances it; throws past the limit." },
+    { "get-u16be", "([buf])", "Reads an unsigned 16-bit big-endian integer at the position and advances it; throws past the limit." },
+    { "get-u32le", "([buf])", "Reads an unsigned 32-bit little-endian integer at the position and advances it; throws past the limit." },
+    { "get-u32be", "([buf])", "Reads an unsigned 32-bit big-endian integer at the position and advances it; throws past the limit." },
+    { "get-u64le", "([buf])", "Reads an unsigned 64-bit little-endian integer at the position and advances it; throws past the limit." },
+    { "get-u64be", "([buf])", "Reads an unsigned 64-bit big-endian integer at the position and advances it; throws past the limit." },
+    { "put-u8!", "([buf x])", "Writes x as an unsigned 8-bit integer at the position and advances it; throws past the limit." },
+    { "put-u16le!", "([buf x])", "Writes x as an unsigned 16-bit little-endian integer at the position and advances it; throws past the limit." },
+    { "put-u16be!", "([buf x])", "Writes x as an unsigned 16-bit big-endian integer at the position and advances it; throws past the limit." },
+    { "put-u32le!", "([buf x])", "Writes x as an unsigned 32-bit little-endian integer at the position and advances it; throws past the limit." },
+    { "put-u32be!", "([buf x])", "Writes x as an unsigned 32-bit big-endian integer at the position and advances it; throws past the limit." },
+    { "put-u64le!", "([buf x])", "Writes x as an unsigned 64-bit little-endian integer at the position and advances it; throws past the limit." },
+    { "put-u64be!", "([buf x])", "Writes x as an unsigned 64-bit big-endian integer at the position and advances it; throws past the limit." },
+    { "fill!", "([buf start len byte])", "Sets len bytes from start to byte." },
+    { "copy!", "([dst dst-off src src-off len])", "Copies len bytes from src at src-off to dst at dst-off (overlap is fine)." },
+    { "blit-from-addr!", "([buf off addr len])", "Copies len bytes from raw memory address addr into buf at off. The address is trusted." },
+    { "blit-to-addr!", "([buf off addr len])", "Copies len bytes of buf from off to raw memory address addr. The address is trusted." },
+    { "slice", "([buf start len])", "A new buffer with a copy of len bytes from start." },
+    { "->string", "([buf])", "The whole buffer as a string, or nil if it is not valid UTF-8." },
+    { "->string-lossy", "([buf])", "The whole buffer as a string; invalid UTF-8 bytes become U+FFFD." },
+    { "hex", "([buf])", "The bytes as space-separated hex pairs: \"de ad be ef\"." },
+    { "addr", "([buf])", "The raw address of the first byte, for DMA and C calls. Valid while buf is alive." },
+};
+
 /* =================================================================
  * Registration
  * ================================================================= */
 
 void core_register_bytes(void) {
+    docs_register("beer.bytes", bytes_docs, sizeof(bytes_docs) / sizeof(bytes_docs[0]));
     Namespace* ns = namespace_registry_get_or_create(global_namespace_registry, "beer.bytes");
     if (!ns) return;
 

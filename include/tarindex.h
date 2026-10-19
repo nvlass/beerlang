@@ -24,6 +24,9 @@ void tar_index_free(TarIndex* idx);
 /* Scan directory for *.tar files and index their .beer entries */
 int tar_index_scan_dir(TarIndex* idx, const char* dir);
 
+/* Index the .beer entries of one tar file; they replace entries with the
+ * same path already indexed. Returns the number added, -1 if unreadable. */
+int tar_index_add_file(TarIndex* idx, const char* tar_path);
 /* Look up a relative path (e.g. "mylib/utils.beer") */
 TarEntry* tar_index_lookup(TarIndex* idx, const char* rel_path);
 

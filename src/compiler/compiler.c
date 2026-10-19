@@ -895,6 +895,22 @@ static void compile_list(Compiler* c, Value form, bool in_tail_pos) {
             Value quoted = list_nth_or_nil(form, 1);
             compile_literal(c, quoted);
             return;
+        } else if (strcmp(name, "var") == 0) {
+            /* (var sym) / #'sym => the Var itself, resolved now like Clojure */
+            Value sym = list_nth_or_nil(form, 1);
+            if (!is_pointer(sym) || object_type(sym) != TYPE_SYMBOL || !is_nil(list_nth_or_nil(form, 2))) {
+                compile_error(c, "var: expects a single symbol");
+                return;
+            }
+            Var* var = global_namespace_registry
+                ? namespace_resolve_var(namespace_registry_current(global_namespace_registry), sym)
+                : NULL;
+            if (!var) {
+                compile_error(c, "var: unable to resolve var '%s'", symbol_str(sym));
+                return;
+            }
+            compile_literal(c, tag_pointer(var));
+            return;
         } else if (strcmp(name, "quasiquote") == 0) {
             /* (quasiquote form) => expand and compile */
             Value quoted = list_nth_or_nil(form, 1);
@@ -981,39 +997,7 @@ static void compile_list(Compiler* c, Value form, bool in_tail_pos) {
         if (global_namespace_registry) {
             Namespace* ns = namespace_registry_current(global_namespace_registry);
             if (ns) {
-                Var* var = NULL;
-
-                if (symbol_has_namespace(first)) {
-                    /* Qualified symbol: t/deftest — resolve via alias */
-                    const char* sym_str = symbol_str(first);
-                    const char* slash = strchr(sym_str, '/');
-                    if (slash) {
-                        size_t ns_len = (size_t)(slash - sym_str);
-                        char ns_name[256];
-                        if (ns_len < sizeof(ns_name)) {
-                            memcpy(ns_name, sym_str, ns_len);
-                            ns_name[ns_len] = '\0';
-                            Value alias_sym = symbol_intern(ns_name);
-                            const char* resolved = namespace_resolve_alias(ns, alias_sym);
-                            const char* target_name = resolved ? resolved : ns_name;
-                            Namespace* target_ns = namespace_registry_get(global_namespace_registry, target_name);
-                            if (target_ns) {
-                                const char* name_part = slash + 1;
-                                Value name_sym = symbol_intern(name_part);
-                                var = namespace_lookup(target_ns, name_sym);
-                            }
-                        }
-                    }
-                } else {
-                    /* Unqualified: check current ns, then beer.core */
-                    var = namespace_lookup(ns, first);
-                    if (!var) {
-                        Namespace* core_ns = namespace_registry_get_core(global_namespace_registry);
-                        if (core_ns && core_ns != ns) {
-                            var = namespace_lookup(core_ns, first);
-                        }
-                    }
-                }
+                Var* var = namespace_resolve_var(ns, first);
 
                 if (var && var->is_macro) {
                     Value macro_fn = var_get_value(var);
@@ -1291,7 +1275,7 @@ static void compile_defmacro(Compiler* c, Value form) {
  * Special Form: fn
  * ================================================================= */
 
-/* (fn name? [a [b c] & [d]] body...) => (fn name? [a p__1 & p__2] (let [[b c] p__1 [d] p__2] body...))
+/* (fn name? [a [b c] & {:keys [d]}] body...) => (fn name? [a p__1 & p__2] (let [[b c] p__1 {:keys [d]} p__2] body...))
  * Returns an owned rewritten form, or nil when no parameter is a vector
  * pattern. Destructuring itself is the `let` macro's job. */
 static Value destructure_fn_params(Value form) {
@@ -1311,7 +1295,7 @@ static Value destructure_fn_params(Value form) {
     size_t n = vector_length(params);
     bool any = false;
     for (size_t i = 0; i < n; i++) {
-        if (is_vector(vector_get(params, i))) any = true;
+        if (is_vector(vector_get(params, i)) || is_hashmap(vector_get(params, i))) any = true;
     }
     if (!any) return VALUE_NIL;
 
@@ -1319,7 +1303,7 @@ static Value destructure_fn_params(Value form) {
     Value bindings = vector_create(0);
     for (size_t i = 0; i < n; i++) {
         Value p = vector_get(params, i);
-        if (is_vector(p)) {
+        if (is_vector(p) || is_hashmap(p)) {
             char buf[32];
             snprintf(buf, sizeof(buf), "p__destr%d", counter++);
             Value g = symbol_intern(buf);
@@ -1865,6 +1849,68 @@ static void compile_let(Compiler* c, Value form, bool in_tail_pos) {
  * Special Form: loop
  * ================================================================= */
 
+/* (loop [[a b] v n 0] body...) =>
+ *   (let [G1 v [a b] G1 n 0] (loop [G1 G1 n n] (let [[a b] G1] body...)))
+ * Later inits see earlier names, recur passes the values to the G's.
+ * Returns an owned form, or nil when every binding name is a symbol. */
+static Value destructure_loop(Value bindings_vec, Value body) {
+    static int counter = 0;
+    size_t n = vector_length(bindings_vec);
+    bool any = false;
+    for (size_t i = 0; i < n; i += 2) {
+        Value p = vector_get(bindings_vec, i);
+        if (is_vector(p) || is_hashmap(p)) any = true;
+    }
+    if (!any) return VALUE_NIL;
+
+    Value outer = vector_create(0);
+    Value loop_bindings = vector_create(0);
+    Value inner = vector_create(0);
+    for (size_t i = 0; i + 1 < n; i += 2) {
+        Value p = vector_get(bindings_vec, i);
+        Value init = vector_get(bindings_vec, i + 1);
+        if (is_vector(p) || is_hashmap(p)) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "loop__destr%d", counter++);
+            Value g = symbol_intern(buf);
+            vector_push(outer, g);
+            vector_push(outer, init);
+            vector_push(outer, p);
+            vector_push(outer, g);
+            vector_push(loop_bindings, g);
+            vector_push(loop_bindings, g);
+            vector_push(inner, p);
+            vector_push(inner, g);
+        } else {
+            vector_push(outer, p);
+            vector_push(outer, init);
+            vector_push(loop_bindings, p);
+            vector_push(loop_bindings, p);
+        }
+    }
+
+    Value let_sym = symbol_intern("let");
+    Value tmp = cons(inner, body);
+    Value inner_let = cons(let_sym, tmp);
+    object_release(tmp);
+    Value loop_body = cons(inner_let, VALUE_NIL);
+    object_release(inner_let);
+    tmp = cons(loop_bindings, loop_body);
+    object_release(loop_body);
+    Value loop_form = cons(symbol_intern("loop"), tmp);
+    object_release(tmp);
+    Value outer_body = cons(loop_form, VALUE_NIL);
+    object_release(loop_form);
+    tmp = cons(outer, outer_body);
+    object_release(outer_body);
+    Value result = cons(let_sym, tmp);
+    object_release(tmp);
+    object_release(outer);
+    object_release(loop_bindings);
+    object_release(inner);
+    return result;
+}
+
 static void compile_loop(Compiler* c, Value form, bool in_tail_pos) {
     /* Parse: (loop [bindings] body...) */
     Value rest = cdr(form);  /* Skip 'loop' symbol */
@@ -1896,6 +1942,13 @@ static void compile_loop(Compiler* c, Value form, bool in_tail_pos) {
     size_t bindings_len = vector_length(bindings_vec);
     if (bindings_len % 2 != 0) {
         compile_error(c, "loop: bindings must be even (symbol/value pairs)");
+        return;
+    }
+
+    Value rewritten = destructure_loop(bindings_vec, body);
+    if (!is_nil(rewritten)) {
+        compile_expr(c, rewritten, in_tail_pos);
+        object_release(rewritten);
         return;
     }
 

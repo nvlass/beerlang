@@ -20,6 +20,7 @@
 #include "vm.h"
 #include "value.h"
 #include "namespace.h"
+#include "docs.h"
 #include "symbol.h"
 #include "bstring.h"
 #include "memory.h"
@@ -602,7 +603,13 @@ static Value native_json_emit(VM* vm, int argc, Value* argv) {
     return s;
 }
 
+static const NativeDoc json_docs[] = {
+    { "parse", "([s])", "The value of the JSON text s: objects become maps with string keys, arrays vectors, integers fixnums (bigints when large), other numbers floats. Strict; errors are catchable." },
+    { "emit", "([x])", "x as JSON text. Takes maps, vectors, lists and sets (as arrays), strings, keywords and symbols (as strings), chars, numbers, booleans and nil." },
+};
+
 void core_register_json(void) {
+    docs_register("beer.json", json_docs, sizeof(json_docs) / sizeof(json_docs[0]));
     Namespace* json_ns = namespace_registry_get_or_create(global_namespace_registry, "beer.json");
     if (!json_ns) return;
 

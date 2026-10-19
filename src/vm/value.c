@@ -15,6 +15,7 @@ FILE* g_value_pr_out = NULL;
 #include "function.h"
 #include "native.h"
 #include "atom.h"
+#include "namespace.h"
 #include "strbuilder.h"
 #ifdef BEER_CFFI
 #include "cpointer.h"
@@ -100,6 +101,12 @@ void value_print(Value v) {
             case TYPE_CHANNEL:
                 printf("#<channel>");
                 break;
+            case TYPE_VAR: {
+                Var* var = (Var*)untag_pointer(v);
+                if (is_nil(var->ns)) printf("#'%s", symbol_str(var->name));
+                else printf("#'%s/%s", symbol_str(var->ns), symbol_str(var->name));
+                break;
+            }
             case TYPE_ATOM: {
                 Atom* a = (Atom*)untag_pointer(v);
                 printf("#<atom ");
@@ -234,6 +241,12 @@ void value_print_readable(Value v) {
             case TYPE_CHANNEL:
                 fprintf(PR_OUT, "#<channel>");
                 break;
+            case TYPE_VAR: {
+                Var* var = (Var*)untag_pointer(v);
+                if (is_nil(var->ns)) fprintf(PR_OUT, "#'%s", symbol_str(var->name));
+                else fprintf(PR_OUT, "#'%s/%s", symbol_str(var->ns), symbol_str(var->name));
+                break;
+            }
             case TYPE_ATOM: {
                 Atom* a = (Atom*)untag_pointer(v);
                 fprintf(PR_OUT, "#<atom ");
@@ -266,7 +279,7 @@ void value_print_readable(Value v) {
 /* Sprint readable: append readable representation to growable buffer */
 static size_t sprint_str_readable(const char* s, char** buf, size_t* cap, size_t len) {
     /* Ensure space for opening quote */
-    while (len + 2 > *cap) { *cap = (*cap < 64) ? 64 : *cap * 2; *buf = realloc(*buf, *cap); }
+    while (len + 2 > *cap) { *cap = (*cap < 64) ? 64 : *cap * 2; *buf = xrealloc(*buf, *cap); }
     (*buf)[len++] = '"';
 
     while (*s) {
@@ -382,6 +395,18 @@ size_t value_sprint_readable(Value v, char** buf, size_t* cap, size_t len) {
                 }
                 s = value_type_name(v);
                 slen = strlen(s);
+                break;
+            }
+            case TYPE_VAR: {
+                Var* var = (Var*)untag_pointer(v);
+                const char* nsn = is_nil(var->ns) ? NULL : symbol_str(var->ns);
+                const char* nm = symbol_str(var->name);
+                size_t n = 2 + (nsn ? strlen(nsn) + 1 : 0) + strlen(nm);
+                owned = xmalloc(n + 1);
+                if (nsn) snprintf(owned, n + 1, "#'%s/%s", nsn, nm);
+                else snprintf(owned, n + 1, "#'%s", nm);
+                s = owned;
+                slen = n;
                 break;
             }
             case TYPE_STRBUILDER:

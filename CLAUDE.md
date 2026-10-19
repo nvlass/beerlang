@@ -146,7 +146,7 @@ Special forms are the minimal set of primitives that cannot be implemented as fu
       (list 'if test (cons 'do body) nil))
     ```
 
-> **Note:** `var` (special form #11 in original design) is not yet implemented. Instead, metadata functions (`meta`, `alter-meta!`) accept quoted symbols and resolve them to Vars internally. `disasm` and `asm` are implemented as native functions rather than special forms. See the Bytecode Metaprogramming section for details.
+> **Note:** `var` / `#'sym` returns the Var (resolved at compile time); vars are callable (they call their current value) and derefable, and `meta`/`alter-meta!` take either a var or a quoted symbol. `disasm` and `asm` are implemented as native functions rather than special forms. See the Bytecode Metaprogramming section for details.
 
 #### Everything Else is Macros
 
@@ -956,7 +956,7 @@ Then iterate to add remaining features!
 
 **All phases complete — feature-rich language runtime.** See PROGRESS.md for full details.
 
-**Test suite:** 330 unit tests + 687 REPL smoke tests (100% pass rate)
+**Test suite:** 330 unit tests + 733 REPL smoke tests (100% pass rate)
 
 **What's implemented:**
 - All 11 planned phases plus extensive post-plan work
