@@ -6,7 +6,7 @@
 
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
-- REPL smoke tests: 676 (`bash tests/smoke_test.sh`)
+- REPL smoke tests: 677 (`bash tests/smoke_test.sh`)
 - **Last Updated:** 2026-10-19
 
 ## Open Items at a Glance
@@ -32,6 +32,7 @@ Small / concrete:
   `(str 3.14159265)` → `"3.14159"`, `-250.0` prints as `-250`. `json/emit`
   uses shortest round-trip formatting; the core printer should too
 - String literals don't support `\uXXXX` escapes in the reader
+- `(str nil)` is `"nil"` (Clojure: `""`), so `(str "a" nil)` is `"anil"`
 - `(str coll)` / `pr-str` of collections go through `open_memstream` +
   `value_print_readable` (`value_sprint_readable` in value.c): a stream
   per call. Fine for now; worth a direct buffer printer if it shows up
@@ -402,8 +403,7 @@ now builds from beerlang.mk (no hand-listed sources, no `stubs.c`).
 beeros migration checklist: docs/EMBEDDING.md §5. Language vs platform:
 drivers, `beer.mem`, `beer.gfx`, console/term, fs/ext2/ustar, packages
 stay in beeros. Open in beerlang: `*fs*` doesn't cover `open`/streams/
-`beer.tar`; `beer.hive` requires `beer.tcp`/`beer.crypto` even for local
-actors, so it doesn't load on `BEER_PLATFORM=none`; ByteBuffer raw-address
+`beer.tar`; ByteBuffer raw-address
 ops (`addr`, `blit-*-addr!`) could move behind an opt-in.
 
 Context: beeros (bare-metal, `beerlang/` as an unmodified submodule) has
@@ -603,7 +603,17 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
     for the same pattern elsewhere (unsigned length differences,
     unchecked `malloc`). beeros works around it with split/join.
 
-11. **`beer.hive` without the network (2026-10-19).** The local half —
+11. **`beer.hive` without the network — done (2026-10-19):** `beer.hive`
+    no longer requires `beer.hive.node` at load; `-node!` requires it on
+    first remote use (`send`/`ask` to a remote pid, `start-node!`,
+    `connect-node!`, `monitor`) and hands it the local dispatch fn. Without
+    networking that throws "beer.hive: remote actors need beer.tcp and
+    beer.crypto ..." with the load error appended; `node-id`, `stop-node!`
+    and `demonitor` return nil when the node layer isn't loaded. Checked
+    with a `BEER_NET=0` build; the smoke test checks that local actors
+    leave `beer.hive.node` and `beer.tcp` unloaded (the suite runs the
+    default build only).
+    Original report: The local half —
     actors, mailboxes, `ask`/`reply`, `register`/`whereis`, supervisors,
     `monitor` — needs no sockets, but `(ns beer.hive (:require
     [beer.hive.node ...]))` pulls in `beer.tcp` and `beer.crypto` at load,

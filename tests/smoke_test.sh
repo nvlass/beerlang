@@ -1523,6 +1523,11 @@ check_multi '(require (quote beer.hive) :as (quote hive))
 (spawn (fn [] (>! ch (hive/ask pid [:read]))))
 (<! ch)' '3' "actor ask with state update"
 
+check_multi '(require (quote beer.hive) :as (quote hive))
+(def pid (hive/spawn-actor (fn [s m] {:reply (+ s m) :state (+ s m)}) 0 {:name :acc}))
+(hive/send pid 2)
+(str (hive/ask (hive/whereis :acc) 5) "," (hive/node-id) "," (get *loaded-libs* :beer.hive.node) "," (get *loaded-libs* :beer.tcp))' '"7,nil,nil,nil"' 'hive local actors without loading the node layer'
+
 # --- Supervisor ---
 echo ""
 echo "--- beer.hive supervisor ---"

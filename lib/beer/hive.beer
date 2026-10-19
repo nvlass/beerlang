@@ -16,8 +16,10 @@
     (stop-node!)
 
   Remote PIDs: {:node node-id-str :actor actor-name-str}
-  send/ask detect remote PIDs automatically."
-  (:require [beer.hive.node :as node]))
+  send/ask detect remote PIDs automatically.
+
+  The node layer (beer.hive.node: beer.tcp, beer.crypto) loads on first
+  remote use, so local actors work in builds without networking.")
 
 ;; ================================================================
 ;; Local actor system (Phase 1)
@@ -90,13 +92,30 @@
           (>! (:mailbox pid) [:call msg reply-ch])
           (spawn (fn []
                    (let [result (<! reply-ch)]
-                     (node/remote-send! reply-to result)))))
+                     (beer.hive.node/remote-send! reply-to result)))))
         ;; send: enqueue as :cast
         (>! (:mailbox pid) [:cast msg])))))
 
-;; Wire up the dispatch fn so node.beer can deliver inbound messages
-;; without a circular require. This runs at namespace load time.
-(reset! node/*dispatch-fn* -local-dispatch!)
+;; ================================================================
+;; Node layer, loaded on first remote use
+;; ================================================================
+
+(defn -node-loaded? []
+  (get *loaded-libs* :beer.hive.node))
+
+(defn -node!
+  "Load beer.hive.node if needed and hand it the local dispatch fn."
+  []
+  (if (not (-node-loaded?))
+    (try
+      (require 'beer.hive.node)
+      (catch e
+        (throw (ex-info (str "beer.hive: remote actors need beer.tcp and beer.crypto, "
+                             "which this build may lack: " (:message e))
+                        {:cause e})))))
+  (if (nil? @beer.hive.node/*dispatch-fn*)
+    (reset! beer.hive.node/*dispatch-fn* -local-dispatch!))
+  nil)
 
 ;; ================================================================
 ;; send / ask / stop
@@ -109,7 +128,7 @@
   "Send a message to a local or remote actor."
   [pid msg]
   (if (-remote-pid? pid)
-    (node/remote-send! pid msg)
+    (do (-node!) (beer.hive.node/remote-send! pid msg))
     (do
       (>! (get pid :mailbox) [:cast msg])
       true)))
@@ -118,7 +137,7 @@
   "Send a message and wait for reply. Works for local and remote PIDs."
   [pid msg]
   (if (-remote-pid? pid)
-    (node/remote-ask! pid msg)
+    (do (-node!) (beer.hive.node/remote-ask! pid msg))
     (let* [reply-ch (chan 1)]
       (>! (get pid :mailbox) [:call msg reply-ch])
       (<! reply-ch))))
@@ -203,23 +222,24 @@
   "Start the cluster node listener on the given port.
   config: {:host str :port int :secret str}
   Returns the node-id string."
-  ([config]        (node/start! config))
-  ([config node-id] (node/start! config node-id)))
+  ([config]        (-node!) (beer.hive.node/start! config))
+  ([config node-id] (-node!) (beer.hive.node/start! config node-id)))
 
 (defn connect-node!
   "Connect to a peer node. Adds to membership and opens a TCP connection."
   [node-id host port]
-  (node/connect! node-id host port))
+  (-node!)
+  (beer.hive.node/connect! node-id host port))
 
 (defn stop-node!
   "Gracefully shut down the cluster node."
   []
-  (node/stop!))
+  (if (-node-loaded?) (beer.hive.node/stop!)))
 
 (defn node-id
   "Return this node's ID, or nil if not started."
   []
-  (node/node-id))
+  (if (-node-loaded?) (beer.hive.node/node-id)))
 
 ;; ================================================================
 ;; Monitoring — observe remote actor/node health (Phase 3)
@@ -231,17 +251,18 @@
   Works only for remote PIDs ({:node ... :actor ...})."
   [remote-pid]
   (when (-remote-pid? remote-pid)
-    (let [mon (node/add-monitor! remote-pid)]
+    (-node!)
+    (let [mon (beer.hive.node/add-monitor! remote-pid)]
       (:ch mon))))
 
 (defn demonitor
   "Cancel a monitor channel returned by (monitor pid).
   Pass the channel — no-op if already triggered or nil."
   [mon-ch]
-  (when mon-ch
+  (when (and mon-ch (-node-loaded?))
     ;; Find and remove the monitor entry for this channel
-    (doseq [ref (keys @node/*monitors*)]
-      (let [ch (get @node/*monitors* ref)]
+    (doseq [ref (keys @beer.hive.node/*monitors*)]
+      (let [ch (get @beer.hive.node/*monitors* ref)]
         (when (= ch mon-ch)
-          (node/remove-monitor! ref))))
+          (beer.hive.node/remove-monitor! ref))))
     nil))
