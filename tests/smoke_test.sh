@@ -1344,6 +1344,19 @@ check '(let [a (atom []) ] (dotimes [i 3] (swap! a conj i)) @a)'   '[0 1 2]'
 check '[(with-out-str (println "a" 1) (print :b)) (with-out-str) (count (with-out-str (dotimes [i 5000] (print "xx"))))]' '["a 1\n:b" "" 10000]'
 check '[(with-out-str (print "x") (print (with-out-str (print "in")))) (with-out-str (await (spawn (fn [] (print "t")))))]' '["xin" "t"]'
 
+# --- merge (starts from the largest map), defonce, resolve ---
+check '[(merge) (merge nil) (merge {:a 1} nil) (merge nil {:a 1} nil)]' '[{} {} {:a 1} {:a 1}]'
+check '[(= (merge {:a 1 :b 2} {:b 3 :c 4}) {:a 1 :b 3 :c 4}) (= (merge {:a 1} {:a 2 :b 2 :c 3} {:c 9}) {:a 2 :b 2 :c 9})]' '[true true]'
+check '[(= (merge {:a 1 :b 1} {:a 2} {:a 3 :x 1 :y 2}) {:a 3 :b 1 :x 1 :y 2}) (= (merge {:x 0} {:a 1 :b 2 :x 1} {:x 2}) {:a 1 :b 2 :x 2})]' '[true true]'
+check_multi '(def dfo-inits (atom 0))
+(defonce dfo (do (swap! dfo-inits inc) (atom 0)))
+(swap! dfo inc)
+(defonce dfo (do (swap! dfo-inits inc) (atom 100)))
+[@dfo @dfo-inits]' '[1 1]' "defonce doesn't re-evaluate init"
+check_multi '(defonce count 5)
+[count (pr-str (resolve (quote count)))]' '[5 "#'"'"'user/count"]' "defonce defines in the current ns, not beer.core"
+check '[(pr-str (resolve (quote map))) (resolve (quote no-such-var)) (bound? #'"'"'inc)]' '["#'"'"'beer.core/map" nil true]'
+
 # --- Vars: (var sym), #'sym, callable vars ---
 echo ""
 echo "--- Vars ---"

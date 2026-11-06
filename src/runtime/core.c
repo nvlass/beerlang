@@ -4260,6 +4260,30 @@ static Value native_var_q(VM* vm, int argc, Value* argv) {
     return is_var(argv[0]) ? VALUE_TRUE : VALUE_FALSE;
 }
 
+static Var* resolve_symbol_to_var(VM* vm, Value sym);
+
+/* (resolve sym) — the var sym names, as meta resolves it, or nil */
+static Value native_resolve(VM* vm, int argc, Value* argv) {
+    if (argc != 1) { vm_error(vm, "resolve: requires exactly 1 argument"); return VALUE_NIL; }
+    if (!is_pointer(argv[0]) || object_type(argv[0]) != TYPE_SYMBOL) {
+        vm_error(vm, "resolve: argument must be a symbol");
+        return VALUE_NIL;
+    }
+    Var* var = resolve_symbol_to_var(vm, argv[0]);
+    if (!var) return VALUE_NIL;
+    Value v = tag_pointer(var);
+    object_retain(v);
+    return v;
+}
+
+/* (bound? & vars) — a def always gives a var a value, so every var is */
+static Value native_bound_q(VM* vm, int argc, Value* argv) {
+    for (int i = 0; i < argc; i++) {
+        if (!is_var(argv[i])) { vm_error(vm, "bound?: arguments must be vars"); return VALUE_NIL; }
+    }
+    return VALUE_TRUE;
+}
+
 /* (atom? x) */
 static Value native_atom_q(VM* vm, int argc, Value* argv) {
     (void)vm;
@@ -4277,6 +4301,8 @@ void core_register_atoms(void) {
     register_native(core_ns, "compare-and-set!", native_compare_and_set);
     register_native(core_ns, "atom?", native_atom_q);
     register_native(core_ns, "var?", native_var_q);
+    register_native(core_ns, "resolve", native_resolve);
+    register_native(core_ns, "bound?", native_bound_q);
 }
 
 /* =================================================================

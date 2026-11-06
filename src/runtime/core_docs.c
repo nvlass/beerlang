@@ -71,6 +71,8 @@ static const NativeDoc core_docs[] = {
     { "channel?", "([x])", "True for channels." },
     { "atom?", "([x])", "True for atoms." },
     { "var?", "([x])", "True for vars (what (var sym) and #'sym return)." },
+    { "resolve", "([sym])", "The var sym names in the current namespace (unqualified: there, then beer.core; qualified: through its aliases), or nil." },
+    { "bound?", "([& vars])", "True if all the vars have a value. A def always gives one, so every var is bound; for Clojure code." },
     { "not", "([x])", "True if x is nil or false, else false." },
 
     /* Strings, symbols, conversion */

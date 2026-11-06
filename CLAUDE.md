@@ -956,7 +956,7 @@ Then iterate to add remaining features!
 
 **All phases complete — feature-rich language runtime.** See PROGRESS.md for full details.
 
-**Test suite:** 330 unit tests + 733 REPL smoke tests (100% pass rate)
+**Test suite:** 330 unit tests + 739 REPL smoke tests (100% pass rate)
 
 **What's implemented:**
 - All 11 planned phases plus extensive post-plan work

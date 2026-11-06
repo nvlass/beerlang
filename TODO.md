@@ -7,13 +7,14 @@
 **All tests passing, 100% pass rate**
 - Unit test suites: 26 (`make test`)
 - REPL smoke tests: 733 (`bash tests/smoke_test.sh`)
-- **Last Updated:** 2026-10-19
+- **Last Updated:** 2026-11-06
 
 ## Open Items at a Glance
 
 Small / concrete:
 - beeros requests still open: `*fs*` for `open`/`beer.tar` (not needed by
-  beeros now) —
+  beeros now); parking on interrupts
+  and an idle wait for bare metal (item 16) —
   see "beeros requests" below
 - `::kw` isn't auto-resolved (reads as a keyword named `:kw`). Resolving
   at read time needs `load`, the file runner and `beerc` to read
@@ -41,6 +42,23 @@ Small / concrete:
   HTTP-date formatting, e.g. a `gmtime`-based native), no limit on
   request-line / header-line length (`read-line` is unbounded), no chunked
   request bodies (501), request bodies must be UTF-8 text
+
+Clojure alignment (see the direction note: closer to Clojure, not a clone):
+- `ns` takes one `(:require ...)` clause; Clojure allows several, plus
+  `(:refer-clojure ...)` etc. Same for `require` with several libspecs
+- `with-open` and `doseq` take one binding pair; Clojure takes several
+  (`doseq` nests, and also has `:let`/`:when`/`:while`)
+- To decide: laziness. Sequences are eager (`map`, `filter`, `range` build
+  lists), so infinite seqs (`(range)`, `iterate`, `repeat`) don't exist.
+  A lazy-seq type is a large change (printer, `=`, `count`, refcount
+  cycles through realised thunks); deliberate beerlang choice until decided
+- To decide: `rest`, `keys`, `vals`, `concat` return nil when empty; Clojure's
+  `rest` returns `()` (and `next` nil). Code that tests `(rest x)` for
+  truthiness works in beerlang and not in Clojure, so changing it breaks
+  existing beerlang code
+- To decide: `loop` is a special form (destructuring is a compiler rewrite);
+  Clojure has `loop*` plus a `loop` macro. Only matters for macro writers who
+  expand to `loop*`
 
 Performance — investigate / optimize:
 - VM dispatch, done 2026-10-17 (macOS empty-loop 173 -> 101 ns, fib 20
@@ -691,6 +709,98 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
       live-patching, teaching system the Clojure idiom is what people
       will type, and it makes keymaps / WM handlers / routes hot-swappable
       without restarts. Low priority next to #12.
+
+14. **`defonce` (2026-10-20, small) — DONE 2026-11-06:** `defonce`,
+    `resolve` (var or nil) and `bound?` in beer.core. beeros reloads namespaces from
+    their files (`beer.reload/ns!`); state has to survive a reload, which
+    is what Clojure's `defonce` is for. beerlang has none, so beeros
+    defines `beer.reload/defonce` as `(def x (try ns/x (catch e init)))`
+    — it relies on an unbound var throwing LOAD_VAR. Wanted: `defonce` in
+    core.beer (doesn't re-evaluate init when the var already has a root
+    value), ideally with a `bound?`/`resolve` to check without the
+    exception. beeros would then drop its own.
+
+15. **`merge` walks every map, the first one included (2026-11-05) —
+    DONE 2026-11-06:** core.beer's `merge` starts from the largest map;
+    maps before it fill in missing keys, maps after it win. Host, 38 + 3
+    keys: big+small 15 → 3.2 µs, small+big 15 → 2.7 µs (`assoc` of 3
+    keys: 0.7 µs). Still in beerlang, not native. core.beer's `merge` reduces from `{}`, so
+    `(merge big small)` re-`assoc`s all of `big`'s keys: beeros's TCP
+    updated its 38-key connection map with `(swap! tcb merge {...})`
+    and spent 23 µs per 3-key update (host; ~0.8 ms in QEMU), against
+    0.7 µs for `(assoc m :a 1 :b 2 :c 3)`. beeros switched to `assoc`.
+    Host timings, a 3-key and a 38-key map, 1000 runs:
+
+    | | big + small | small + big |
+    |---|---|---|
+    | core.beer today (from `{}`) | 23 µs | 22 µs |
+    | from the first map, assoc the rest | 2.7 µs | 20 µs |
+    | reversed: from the last map, add only missing keys (`contains?`) | 24 µs | 4.6 µs |
+
+    Each version starts from one map and walks the others, so it costs
+    the keys of the maps it walks: neither direction wins both cases.
+    One that does: start from the largest map (`count`), fill in from
+    the maps before it only the keys it lacks, then `assoc` the maps
+    after it, which win. Cost ~ the smaller maps' keys. A native
+    `merge` would also close the remaining per-key gap (keys + get +
+    assoc interpreted), but the aim is to keep core.beer from becoming
+    mostly native calls: weigh that first. Plain `merge`, not a
+    deep-merge.
+
+16. **Tasks that wait for interrupts, and an idle CPU (2026-11-06).**
+    beeros wants virtio-net receive (then UART, virtio-input) by
+    interrupt. Today every waiter polls: the network receiver checks its
+    used ring and yields, the tty yields, `repl_uart.c` runs
+    `scheduler_run_one_tick` while waiting for a char. So the scheduler
+    is never idle, QEMU sits at 100% host CPU, and a real board can't
+    `wfi`. beeros's `beer.mem/irq-wait!` doesn't park either: it runs
+    other tasks from inside its native (`scheduler_run_one_tick` in a
+    loop), which nests with a second waiter (eth0 + eth1, net + input):
+    the outer one can't return before the inner one's IRQ fires.
+
+    What beeros has: an IRQ handler (no scheduler access) that sets a
+    volatile pending bit per IRQ (`mem_irq_raise`). What's missing: a
+    way to park a task until a bit is set, a check of the bits by the
+    scheduler, and a hook for the idle wait.
+
+    **Proposal A: an embedder-supplied reactor backend (preferred).**
+    Since the reactor fold (2026-10-10) the scheduler only needs
+    `reactor.h` (`reactor_new`/`free`/`set`/`poll`) from a platform, and
+    `io_reactor.c` is plain C (stdlib only). `BEER_PLATFORM=none`
+    swaps both for `io_reactor_none.c`. Asked for: a build switch
+    (`BEER_REACTOR=embedder` in `beerlang.mk`?) that links `io_reactor.c`
+    and expects `reactor.h` from the embedder, instead of
+    `io_reactor_none.c`. Then, with no new API:
+    - beeros numbers IRQs as fds (say 1000 + IRQ). `irq-wait!` checks
+      the bit and otherwise `scheduler_park_native(vm, fd, false)`.
+    - beeros's `reactor_poll` reports the registered "fds" whose
+      pending bit is set (and clears them), in scheduler context, so
+      the ISR stays a bit-setter. When nothing is pending and
+      `timeout_ms` isn't 0, it `wfi`s until an interrupt or the timeout
+      (the timer interrupt bounds it).
+    - The scheduler already polls the reactor every `IO_CHECK_EVERY`
+      ticks and whenever nothing is ready, and blocked I/O counts in
+      `blocked_count`, so parked tasks keep `run_until_done` alive.
+    - The serial REPL waits on the UART "fd" through
+      `scheduler_run_until_readable`, like the host REPL on stdin.
+    A latched bit (set before the task parked) is reported on the next
+    poll, so no wakeup is lost between `irq-wait!`'s check and the park.
+
+    **Proposal B, if fds for IRQs feel wrong: numbered events.**
+    `scheduler_park_event(vm, n)` (a native parks the current task,
+    retry pattern), `scheduler_signal_event(n)` (callable from an IRQ
+    handler: latches bit n and a flag, like `vm_request_interrupt_task`;
+    the scheduler wakes event n's waiters at its next round),
+    `scheduler_run_until_event(sched, n)` (for the C REPL loop), and a
+    weak `beer_platform_wait(timeout_ms)` (default `usleep`; beeros:
+    `wfi`) for the idle wait. Also usable from WASM (browser
+    callbacks) or an embedder's other threads.
+
+    Either way beerlang never learns about IRQs, and no beerlang fn runs
+    in scheduler context: the handler is an ordinary task parked in
+    `irq-wait!` (`beer.mem/irq-loop!`). beeros keeps a fallback until
+    then: `irq-wait!` as yield-and-retry (a C check of the bit instead
+    of a beerlang `take-used!` per round; still never idle).
 
 Not needed from beerlang after all (checked against beeros 2026-10-19):
 user-defined streams. beeros's terminal and beermacs's eval output use

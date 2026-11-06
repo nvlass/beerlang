@@ -1,6 +1,6 @@
 # Beerlang Implementation Progress
 
-**Last Updated:** 2026-10-19
+**Last Updated:** 2026-11-06
 
 ## Current Status
 
@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 330 unit tests (26 suites)
-- 733 REPL smoke tests
+- 739 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)
@@ -210,6 +210,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - `all-ns` / `find-ns` (namespace names as symbols), `ns-publics`
 - `__print-doc` native for formatted doc output
 - `with-out-str` (string streams, `STREAM_STRING`); the EDN nREPL sends `:out`
+- `defonce`, `resolve`, `bound?`; `merge` starts from the largest map, so `(merge big small)` walks only `small` (15 → 3 µs for 38 + 3 keys)
 - Clojure semantics: `(str nil)` is `""`, `and` returns the first falsy value; `dotimes`
 - Map destructuring (`:keys`/`:strs`/`:syms`/`:or`/`:as`, `{x :x}`, keyword args
   via `& {:keys [...]}`) in `let`/`fn`/`loop`/`doseq`; `loop` destructures

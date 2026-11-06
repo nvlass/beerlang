@@ -57,6 +57,11 @@
   (list (quote __print-doc) (str sym) (list (quote meta) (list (quote quote) sym))))
 
 ; when: (when test body...) => (if test (do body...) nil)
+(defmacro defonce "Defines sym as the value of init unless the current namespace already has a var sym: init isn't evaluated then, and the var keeps its value (state that survives reloading a file)." [sym init]
+  (list (quote if) (list (quote resolve) (list (quote quote) (symbol (name *ns*) (name sym))))
+        nil
+        (list (quote def) sym init)))
+
 (defmacro when "Evaluates body if test is truthy, else nil." [test & body]
   (list (quote if) test (cons (quote do) body) nil))
 
@@ -526,11 +531,24 @@
            (apply update-in (get m (first ks) {}) (rest ks) f args))))
 
 (defn merge "A map of the entries of all the maps; later keys win. nil maps are skipped." [& maps]
-  (reduce (fn [acc m]
-            (if (nil? m) acc
-              (reduce (fn [a k] (assoc a k (get m k)))
-                      acc (keys m))))
-          {} maps))
+  ; Starts from the largest map so that only the smaller maps' keys are
+  ; walked: maps before it fill in the keys it lacks, maps after it win
+  (let* [ms (filter (fn [m] (not (nil? m))) maps)]
+    (if (empty? ms) {}
+      (let* [big (loop [r (rest ms) i 1 bi 0 bc (count (first ms))]
+                   (if (empty? r) bi
+                     (let* [c (count (first r))]
+                       (if (> c bc)
+                         (recur (rest r) (+ i 1) i c)
+                         (recur (rest r) (+ i 1) bi bc)))))]
+        (loop [ms ms i 0 acc (nth ms big)]
+          (if (empty? ms) acc
+            (let* [m (first ms)]
+              (recur (rest ms) (+ i 1)
+                     (cond (< i big) (reduce (fn [a k] (if (contains? a k) a (assoc a k (get m k))))
+                                             acc (keys m))
+                           (> i big) (reduce (fn [a k] (assoc a k (get m k))) acc (keys m))
+                           :else acc)))))))))
 
 ; --- I/O helpers ---
 (defmacro with-open "Binds name to init, evaluates body and closes name afterwards, also on throw. bindings: [name init]." [bindings & body]

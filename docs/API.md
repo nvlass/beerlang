@@ -145,6 +145,18 @@ included), `meta` and `alter-meta!` take it, `var?` tests for one.
 #'handler           ;=> #'user/handler
 ```
 
+`(resolve 'sym)` returns the var a symbol names at run time (current
+namespace, then `beer.core`; qualified names through aliases), or nil.
+`bound?` is there for Clojure code: a `def` always gives a var a value.
+
+### `defonce`
+`(defonce name init)` defines `name` only if the current namespace has no
+var of that name yet; otherwise `init` isn't evaluated and the var keeps
+its value. For state that should survive reloading a file:
+```clojure
+(defonce conns (atom {}))   ; reloading the file keeps the connections
+```
+
 ---
 
 ## Callable Non-Functions
