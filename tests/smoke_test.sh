@@ -1355,6 +1355,13 @@ check_multi '(def dfo-inits (atom 0))
 [@dfo @dfo-inits]' '[1 1]' "defonce doesn't re-evaluate init"
 check_multi '(defonce count 5)
 [count (pr-str (resolve (quote count)))]' '[5 "#'"'"'user/count"]' "defonce defines in the current ns, not beer.core"
+check '[(= (merge {:k 1} {:k 2} {:a 1 :b 2 :c 3}) {:k 2 :a 1 :b 2 :c 3}) (= (merge {:k 1} {:k 2 :z 0} {:k 3} {:a 1 :b 2 :c 3 :d 4} {:a 9}) {:k 3 :z 0 :a 9 :b 2 :c 3 :d 4})]' '[true true]'
+check_multi '(ns dfo.own)
+(def wrong (atom 0))
+(defn resolve [x] (swap! wrong inc) nil)
+(defonce y 1)
+(defonce y 2)
+[y @wrong]' '[1 0]' "defonce uses beer.core/resolve, not the namespace's own"
 check '[(pr-str (resolve (quote map))) (resolve (quote no-such-var)) (bound? #'"'"'inc)]' '["#'"'"'beer.core/map" nil true]'
 
 # --- Vars: (var sym), #'sym, callable vars ---

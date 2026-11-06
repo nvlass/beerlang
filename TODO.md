@@ -720,11 +720,41 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
     value), ideally with a `bound?`/`resolve` to check without the
     exception. beeros would then drop its own.
 
+    **Bug (beeros review, 2026-11-06) — FIXED 2026-11-06: the expansion
+    calls `beer.core/resolve`; smoke test added. `defonce` called the
+    current namespace's `resolve`.** The macro expands to an unqualified
+    `(resolve 'ns/sym)`, so in a namespace with its own `resolve` the
+    expansion calls that one:
+    ```clojure
+    (ns t1) (defn resolve [x] (println "WRONG" x) nil)
+    (defonce y 1) (defonce y 2)   ; prints WRONG twice; y is 2
+    ```
+    beeros's `beer.arp` and `beer.dns` both define `resolve` and use
+    `defonce`: the first load works by accident (the `defonce`s come
+    before `defn resolve`), but `beer.reload/ns!` would call ARP's
+    resolve with a symbol for every `defonce`. Fix: `beer.core/resolve`
+    in the expansion (and a smoke test like the above). beeros keeps
+    `beer.reload/defonce` until then.
+
 15. **`merge` walks every map, the first one included (2026-11-05) —
     DONE 2026-11-06:** core.beer's `merge` starts from the largest map;
     maps before it fill in missing keys, maps after it win. Host, 38 + 3
     keys: big+small 15 → 3.2 µs, small+big 15 → 2.7 µs (`assoc` of 3
-    keys: 0.7 µs). Still in beerlang, not native. core.beer's `merge` reduces from `{}`, so
+    keys: 0.7 µs). Still in beerlang, not native.
+
+    **Bug (beeros review, 2026-11-06) — FIXED 2026-11-06: the maps before
+    the largest are walked last to first (same cost); smoke tests added.
+    Two maps before the largest one kept the earlier value.** They fill in missing keys first to last,
+    so the first wins:
+    ```clojure
+    (merge {:k 1} {:k 2} {:a 1 :b 2 :c 3})   ;=> {:k 1 ...}, should be {:k 2 ...}
+    ```
+    The smoke tests have at most one map before the largest. Fix: walk
+    the maps before the largest one last to first (fill-missing then
+    gives the later one precedence); same cost. Add the case above to
+    the smoke tests.
+
+    The request as filed: core.beer's `merge` reduces from `{}`, so
     `(merge big small)` re-`assoc`s all of `big`'s keys: beeros's TCP
     updated its 38-key connection map with `(swap! tcb merge {...})`
     and spent 23 µs per 3-key update (host; ~0.8 ms in QEMU), against
@@ -770,6 +800,9 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
     masked), then unmask, or an IRQ between the check and the `wfi` sleeps
     until the next interrupt. io_reactor indexes an array by fd, so keep
     the IRQ fds small (just above beeros's other fake fds, not 1000+).
+    (beeros review: beeros has no timer interrupt yet, so a wait with a
+    timeout needs one first: CLINT `mtimecmp` on virt-riscv, the generic
+    timer through the GIC on virt-armv7. Planned on the beeros side.)
     Found on the way and fixed: `await` on an unfinished task yielded in a
     loop, so an awaiting task was always ready and the scheduler never
     idled (a full host core during `(await (spawn #(sleep 1000)))`). It

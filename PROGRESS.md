@@ -10,7 +10,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 
 **Test suite: all passing (100% pass rate)**
 - 330 unit tests (26 suites)
-- 739 REPL smoke tests
+- 741 REPL smoke tests
 
 **Milestones achieved:**
 - Phase 1: Foundation (types, memory, VM core)

@@ -58,7 +58,7 @@
 
 ; when: (when test body...) => (if test (do body...) nil)
 (defmacro defonce "Defines sym as the value of init unless the current namespace already has a var sym: init isn't evaluated then, and the var keeps its value (state that survives reloading a file)." [sym init]
-  (list (quote if) (list (quote resolve) (list (quote quote) (symbol (name *ns*) (name sym))))
+  (list (quote if) (list (quote beer.core/resolve) (list (quote quote) (symbol (name *ns*) (name sym))))
         nil
         (list (quote def) sym init)))
 
@@ -532,7 +532,8 @@
 
 (defn merge "A map of the entries of all the maps; later keys win. nil maps are skipped." [& maps]
   ; Starts from the largest map so that only the smaller maps' keys are
-  ; walked: maps before it fill in the keys it lacks, maps after it win
+  ; walked: maps before it fill in the keys it lacks (last to first, so the
+  ; later of them wins), maps after it win
   (let* [ms (filter (fn [m] (not (nil? m))) maps)]
     (if (empty? ms) {}
       (let* [big (loop [r (rest ms) i 1 bi 0 bc (count (first ms))]
@@ -541,14 +542,15 @@
                        (if (> c bc)
                          (recur (rest r) (+ i 1) i c)
                          (recur (rest r) (+ i 1) bi bc)))))]
-        (loop [ms ms i 0 acc (nth ms big)]
-          (if (empty? ms) acc
-            (let* [m (first ms)]
-              (recur (rest ms) (+ i 1)
-                     (cond (< i big) (reduce (fn [a k] (if (contains? a k) a (assoc a k (get m k))))
-                                             acc (keys m))
-                           (> i big) (reduce (fn [a k] (assoc a k (get m k))) acc (keys m))
-                           :else acc)))))))))
+        (loop [r ms i 0 before nil]
+          (if (= i big)
+            (reduce (fn [acc m] (reduce (fn [a k] (assoc a k (get m k))) acc (keys m)))
+                    (reduce (fn [acc m]
+                              (reduce (fn [a k] (if (contains? a k) a (assoc a k (get m k))))
+                                      acc (keys m)))
+                            (first r) before)
+                    (rest r))
+            (recur (rest r) (+ i 1) (cons (first r) before))))))))
 
 ; --- I/O helpers ---
 (defmacro with-open "Binds name to init, evaluates body and closes name afterwards, also on throw. bindings: [name init]." [bindings & body]
