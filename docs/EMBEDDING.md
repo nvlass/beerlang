@@ -27,9 +27,9 @@ CFLAGS += $(BEER_CFLAGS)       # include paths + feature defines
 
 | Switch | Values | Default | What it selects |
 |--------|--------|---------|-----------------|
-| `BEER_PLATFORM` | `posix`, `none` | `posix` | `posix`: kqueue/epoll I/O reactor (`src/io/reactor.c`, `io_reactor.c`). `none`: a stub reactor (`src/platform/none/io_reactor_none.c`) for targets without fd readiness — WASM, bare metal |
-| `BEER_NET` | `1`/`0` | `1` on posix, `0` on none | `beer.tcp`, `beer.udp` natives (needs posix) |
-| `BEER_SHELL` | `1`/`0` | `1` on posix, `0` on none | `beer.shell/exec` (needs posix) |
+| `BEER_PLATFORM` | `posix`, `none`, `embedder` | `posix` | `posix`: kqueue/epoll I/O reactor (`src/io/reactor.c`, `io_reactor.c`). `none`: a stub reactor (`src/platform/none/io_reactor_none.c`) for targets without fd readiness — WASM, bare metal. `embedder`: `io_reactor.c` on the embedder's own `reactor.h` functions (see below) |
+| `BEER_NET` | `1`/`0` | `1` on posix, else `0` | `beer.tcp`, `beer.udp` natives (needs posix) |
+| `BEER_SHELL` | `1`/`0` | `1` on posix, else `0` | `beer.shell/exec` (needs posix) |
 | `BEER_CRYPTO` | `1`/`0` | `1` | `beer.crypto` (sha256, hmac, random-bytes) |
 | `BEER_AOT` | `1`/`0` | `1` | `.beerc` compile/load (`beer.beerc`) |
 | `BEER_CFFI` | `1`/`0` | `0` | `beer.ffi` via libffi (link libffi yourself) |
@@ -43,6 +43,21 @@ so a new runtime file needs no change in any build.
 `BEER_SRCS` has no `main()`; the CLI's is `src/repl/main.c`. The `none`
 platform calls `usleep` to wait for timers: libc and Emscripten have it, a
 bare-metal embedder provides it (as beeros does).
+
+With `BEER_PLATFORM=embedder` tasks park on whatever the embedder calls
+fds. A native checks its condition, and otherwise calls
+`scheduler_park_native(vm, fd, false)` and returns; the scheduler wakes the
+task when the embedder's `reactor_poll` reports the fd, and the native runs
+again from the start. When no task is ready the scheduler calls
+`reactor_poll` with the time to the next timer (-1: none), which is where a
+bare-metal embedder waits for an interrupt (`wfi`). So tasks can wait for
+IRQs: one fd per IRQ, the interrupt handler sets a pending bit, the poll
+reports the watched fds whose bit is set. The rules (`include/reactor.h`):
+the poll doesn't clear a bit (the woken native consumes it), it reports
+only fds with interest set, it returns after any interrupt even when no
+watched fd is ready (so timers and Ctrl-C are seen), and it never runs in
+an interrupt handler. `tests/embedder/reactor/` is a worked example with a
+fake IRQ reactor (`make test-embedder`).
 
 The host build accepts the same switches: `make BEER_NET=0`,
 `make BEER_PLATFORM=none` (a REPL without sockets or subprocesses).

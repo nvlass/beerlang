@@ -210,6 +210,7 @@ Beerlang is a fully functional Clojure-dialect with a stack-based VM, cooperativ
 - `all-ns` / `find-ns` (namespace names as symbols), `ns-publics`
 - `__print-doc` native for formatted doc output
 - `with-out-str` (string streams, `STREAM_STRING`); the EDN nREPL sends `:out`
+- `await` blocks the awaiting task until the target is done (it used to yield in a loop: a full core while waiting); `BEER_PLATFORM=embedder` (beeros request 16): tasks park on an embedder's `reactor.h`, e.g. one fd per IRQ, and the idle wait is the embedder's; `make test-embedder`
 - `defonce`, `resolve`, `bound?`; `merge` starts from the largest map, so `(merge big small)` walks only `small` (15 → 3 µs for 38 + 3 keys)
 - Clojure semantics: `(str nil)` is `""`, `and` returns the first falsy value; `dotimes`
 - Map destructuring (`:keys`/`:strs`/`:syms`/`:or`/`:as`, `{x :x}`, keyword args

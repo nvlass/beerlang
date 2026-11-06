@@ -60,6 +60,12 @@ typedef struct Task {
     /* Completion watchers */
     WatcherNode* watchers;
 
+    /* await: tasks blocked until this one is done (linked by await_next),
+     * and the task this one awaits */
+    struct Task* awaiters;
+    struct Task* await_next;
+    struct Task* awaiting;
+
     /* The bytecode/constants arrays this task allocated. vm->code and
      * vm->constants are swapped on every call, so a task that ends inside a
      * callee frame can't rely on them pointing at its own arrays. */

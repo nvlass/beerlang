@@ -9,6 +9,10 @@
 # Switches (set before including, or on the command line):
 #   BEER_PLATFORM  posix  kqueue/epoll I/O reactor (default)
 #                  none   no fd readiness (WASM, bare metal): a stub reactor
+#                  embedder  the fd-wait layer (io_reactor.c) on the embedder's
+#                         own reactor.h functions: tasks park on "fds" the
+#                         embedder defines (IRQs on bare metal), and the
+#                         idle wait is the embedder's (wfi). See reactor.h
 #   BEER_NET     1/0  beer.tcp, beer.udp natives    (posix only)
 #   BEER_SHELL   1/0  beer.shell/exec               (posix only)
 #   BEER_CRYPTO  1/0  beer.crypto natives
@@ -28,7 +32,7 @@ ifndef BEER_ROOT
 endif
 
 BEER_PLATFORM ?= posix
-ifeq ($(BEER_PLATFORM),none)
+ifneq ($(BEER_PLATFORM),posix)
   BEER_NET   ?= 0
   BEER_SHELL ?= 0
 else
@@ -45,6 +49,7 @@ _BEER_SRC := $(_BEER_PREFIX)src
 
 # Feature files, kept out of the core list below
 _BEER_PLATFORM_POSIX := $(_BEER_SRC)/io/reactor.c $(_BEER_SRC)/io/io_reactor.c
+_BEER_PLATFORM_EMBEDDER := $(_BEER_SRC)/io/io_reactor.c
 _BEER_PLATFORM_NONE  := $(_BEER_SRC)/platform/none/io_reactor_none.c
 _BEER_NET    := $(_BEER_SRC)/runtime/tcp.c $(_BEER_SRC)/runtime/udp.c
 _BEER_SHELL  := $(_BEER_SRC)/runtime/shell.c
@@ -71,10 +76,13 @@ BEER_DEFS :=
 ifeq ($(BEER_PLATFORM),none)
   BEER_SRCS += $(_BEER_PLATFORM_NONE)
   BEER_DEFS += -DBEER_PLATFORM_NONE
+else ifeq ($(BEER_PLATFORM),embedder)
+  BEER_SRCS += $(_BEER_PLATFORM_EMBEDDER)
+  BEER_DEFS += -DBEER_PLATFORM_EMBEDDER
 else ifeq ($(BEER_PLATFORM),posix)
   BEER_SRCS += $(_BEER_PLATFORM_POSIX)
 else
-  $(error BEER_PLATFORM must be posix or none, not '$(BEER_PLATFORM)')
+  $(error BEER_PLATFORM must be posix, none or embedder, not '$(BEER_PLATFORM)')
 endif
 
 ifneq ($(BEER_PLATFORM),posix)

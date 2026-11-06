@@ -13,9 +13,9 @@
 
 Small / concrete:
 - beeros requests still open: `*fs*` for `open`/`beer.tar` (not needed by
-  beeros now); parking on interrupts
-  and an idle wait for bare metal (item 16) —
-  see "beeros requests" below
+  beeros now) —
+  see "beeros requests" below. Item 16 (IRQ waits, idle wait) is done on
+  the beerlang side; beeros implements its reactor.h
 - `::kw` isn't auto-resolved (reads as a keyword named `:kw`). Resolving
   at read time needs `load`, the file runner and `beerc` to read
   form-by-form instead of `reader_read_all` up front, or the file's
@@ -747,7 +747,36 @@ keys wait for a caller that needs them. `require` now needs `core.beer`
     mostly native calls: weigh that first. Plain `merge`, not a
     deep-merge.
 
-16. **Tasks that wait for interrupts, and an idle CPU (2026-11-06).**
+16. **Tasks that wait for interrupts, and an idle CPU (2026-11-06) —
+    beerlang side DONE 2026-11-06 (Proposal A):** `BEER_PLATFORM=embedder`
+    in `beerlang.mk` links `io_reactor.c` without `src/io/reactor.c`;
+    beeros supplies `reactor_new`/`free`/`set`/`poll`. The contract is in
+    `include/reactor.h` and docs/EMBEDDING.md; `make test-embedder`
+    (part of `make test`) runs a fake IRQ reactor through it: two waiters
+    on IRQs that fire in the other order, a bit latched before the wait,
+    an unrelated interrupt, ^C while idle. Two changes to the plan below:
+    - `reactor_poll` must **not** clear the pending bits. A woken task runs
+      its native again from the start (the VM rewinds to the call), so
+      `irq-wait!` checks the bit, clears it itself and parks otherwise; a
+      poll that cleared it would make the retry park again and lose the
+      wakeup. Reporting a set bit again is harmless (no waiter, nothing
+      happens), and a bit set before the park is reported by the next poll.
+    - A wait should return after one `wfi` even if no watched bit is set
+      (like `EINTR` on kqueue/epoll): the scheduler loops and sees timers,
+      Ctrl-C (`vm_request_interrupt`) and `interrupt!` in between. Looping
+      on `wfi` until a watched bit is set would miss those.
+    beeros side, for reference: check the bits with interrupts masked
+    (`mstatus.MIE=0`), then `wfi` (it wakes on a pending interrupt even
+    masked), then unmask, or an IRQ between the check and the `wfi` sleeps
+    until the next interrupt. io_reactor indexes an array by fd, so keep
+    the IRQ fds small (just above beeros's other fake fds, not 1000+).
+    Found on the way and fixed: `await` on an unfinished task yielded in a
+    loop, so an awaiting task was always ready and the scheduler never
+    idled (a full host core during `(await (spawn #(sleep 1000)))`). It
+    now blocks until the target is done.
+
+    The request as filed:
+
     beeros wants virtio-net receive (then UART, virtio-input) by
     interrupt. Today every waiter polls: the network receiver checks its
     used ring and yields, the tty yields, `repl_uart.c` runs

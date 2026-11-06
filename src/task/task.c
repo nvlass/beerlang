@@ -70,6 +70,9 @@ Value task_new(Value fn, int argc, Value* argv, Scheduler* sched) {
     task->prev = NULL;
     task->blocked_value = VALUE_NIL;
     task->watchers = NULL;
+    task->awaiters = NULL;
+    task->await_next = NULL;
+    task->awaiting = NULL;
     task->wait_queue = NULL;
     task->io_blocked = false;
     task->foreground = false;
@@ -150,6 +153,9 @@ Value task_new_from_code(uint8_t* code, int code_size,
     task->prev = NULL;
     task->blocked_value = VALUE_NIL;
     task->watchers = NULL;
+    task->awaiters = NULL;
+    task->await_next = NULL;
+    task->awaiting = NULL;
     task->wait_queue = NULL;
     task->io_blocked = false;
     task->foreground = false;

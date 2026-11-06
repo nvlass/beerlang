@@ -2192,7 +2192,9 @@ static VM_ALWAYS_INLINE void step(VM* vm, Regs* r) {
                 vm_push(vm, result);
                 if (is_pointer(result)) object_release(result);
             } else {
-                /* Inside a task — yield and re-execute when resumed */
+                /* Wait until it is done, then run the await again */
+                Task* cur = vm->scheduler ? vm->scheduler->current : NULL;
+                if (cur && cur->vm == vm && cur != target) scheduler_block_await(vm->scheduler, cur, target);
                 r->pc = pc_at_opcode;
                 vm->yielded = true;
             }

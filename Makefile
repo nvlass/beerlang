@@ -53,7 +53,7 @@ LIBEXECDIR  = $(PREFIX)/lib/beerlang
 SHAREDIR    = $(PREFIX)/share/beerlang
 
 # Targets
-.PHONY: all clean test bench repl repl-trace debug track-leaks asan install uninstall libbeerlang embed wasm wasm-docker help
+.PHONY: all clean test test-embedder bench repl repl-trace debug track-leaks asan install uninstall libbeerlang embed wasm wasm-docker help
 
 all: $(BIN_DIR)/beerlang
 
@@ -155,7 +155,14 @@ test: $(TEST_BINS)
 		echo "Running $$test..."; \
 		$$test || exit 1; \
 	done
+	@$(MAKE) --no-print-directory test-embedder
 	@echo "All tests passed!"
+
+# The runtime on an embedder's reactor.h (BEER_PLATFORM=embedder), with a
+# fake IRQ reactor: its own objects under build/embedder
+test-embedder:
+	@$(MAKE) --no-print-directory -f tests/embedder/reactor/Makefile CC=$(CC) bin/test_embedder_reactor
+	./$(BIN_DIR)/test_embedder_reactor
 
 # Build individual test
 $(BIN_DIR)/test_%: $(TEST_DIR)/%.c $(OBJS) $(VENDOR_OBJS)

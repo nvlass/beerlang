@@ -118,6 +118,9 @@ void scheduler_fire_watchers(Scheduler* sched, Task* task);
 /* Sleep: block task until wake_at_ns (CLOCK_MONOTONIC nanoseconds) */
 void scheduler_sleep(Scheduler* sched, Task* task, int64_t wake_at_ns);
 
+/* Block task until target is done (OP_AWAIT; the VM retries the await) */
+void scheduler_block_await(Scheduler* sched, Task* task, Task* target);
+
 /* For natives: true when running in a task that can be parked. */
 bool scheduler_can_park(struct VM* vm);
 

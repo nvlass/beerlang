@@ -116,6 +116,32 @@ void scheduler_block_io(Scheduler* sched, Task* task) {
     object_retain(task_val);
 }
 
+void scheduler_block_await(Scheduler* sched, Task* task, Task* target) {
+    scheduler_block_io(sched, task);
+    task->awaiting = target;
+    task->await_next = target->awaiters;
+    target->awaiters = task;
+}
+
+static void wake_awaiters(Scheduler* sched, Task* target) {
+    while (target->awaiters) {
+        Task* t = target->awaiters;
+        target->awaiters = t->await_next;
+        t->await_next = NULL;
+        t->awaiting = NULL;
+        scheduler_wake_io(sched, t);
+    }
+}
+
+/* An interrupted awaiter stops waiting */
+static void cancel_await(Task* task) {
+    Task** p = &task->awaiting->awaiters;
+    while (*p && *p != task) p = &(*p)->await_next;
+    if (*p) *p = task->await_next;
+    task->await_next = NULL;
+    task->awaiting = NULL;
+}
+
 /* Wake an I/O-blocked task */
 void scheduler_wake_io(Scheduler* sched, Task* task) {
     if (task->state != TASK_BLOCKED) {
@@ -345,6 +371,7 @@ static void deliver_to(Scheduler* sched, Task* task) {
         scheduler_wake(sched, task);
         object_release(task_val);
     } else if (task->io_blocked) {
+        if (task->awaiting) cancel_await(task);
         scheduler_cancel_timer(sched, task);
         if (sched->io_reactor) io_reactor_forget(sched->io_reactor, task);
         scheduler_wake_io(sched, task);
@@ -368,6 +395,7 @@ bool scheduler_run_one_tick(Scheduler* sched) {
     task_run(task);
     sched->current = NULL;
 
+    if (task->state == TASK_DONE && task->awaiters) wake_awaiters(sched, task);
     if (task->state == TASK_DONE && task->watchers) {
         scheduler_fire_watchers(sched, task);
     }

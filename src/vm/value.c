@@ -91,6 +91,8 @@ void value_print(Value v) {
                     case STREAM_STDOUT: printf("#<stream stdout>"); break;
                     case STREAM_STDERR: printf("#<stream stderr>"); break;
                     case STREAM_FILE:   printf("#<stream file:%d>", s->fd); break;
+                    case STREAM_SOCKET: printf("#<stream socket:%d>", s->fd); break;
+                    case STREAM_STRING: printf("#<stream string>"); break;
                 }
                 break;
             }
@@ -232,6 +234,7 @@ void value_print_readable(Value v) {
                     case STREAM_STDERR:  fprintf(PR_OUT, "#<stream stderr>"); break;
                     case STREAM_FILE:    fprintf(PR_OUT, "#<stream file:%d>", s->fd); break;
                     case STREAM_SOCKET:  fprintf(PR_OUT, "#<stream socket:%d>", s->fd); break;
+                    case STREAM_STRING:  fprintf(PR_OUT, "#<stream string>"); break;
                 }
                 break;
             }
